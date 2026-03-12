@@ -6,6 +6,7 @@
 #include <functional>
 #include <type_traits>
 #include <utility>
+#include <stdexcept>
 
 namespace rnet::core {
 
@@ -28,9 +29,18 @@ public:
     bool is_ok() const noexcept { return value_.has_value(); }
     bool is_err() const noexcept { return error_.has_value(); }
 
-    const T& value() const& { return *value_; }
-    T& value() & { return *value_; }
-    T&& value() && { return std::move(*value_); }
+    const T& value() const& {
+        if (!value_) throw std::runtime_error("Result::value() on error: " + error_.value_or("unknown"));
+        return *value_;
+    }
+    T& value() & {
+        if (!value_) throw std::runtime_error("Result::value() on error: " + error_.value_or("unknown"));
+        return *value_;
+    }
+    T&& value() && {
+        if (!value_) throw std::runtime_error("Result::value() on error: " + error_.value_or("unknown"));
+        return std::move(*value_);
+    }
 
     const std::string& error() const& { return *error_; }
     std::string& error() & { return *error_; }

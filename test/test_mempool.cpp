@@ -81,21 +81,25 @@ TEST(mempool_entry_ancestor_stats) {
     // Default ancestor stats
     ASSERT_EQ(entry.ancestor_count, int64_t(1));
 
-    // Update
-    entry.update_ancestors(3, 500, 30000);
+    // Update: adds to existing (count starts at 1 for self, size/fee include self)
+    auto self_size = static_cast<int64_t>(entry.get_tx()->get_virtual_size());
+    auto self_fee = entry.get_fee();
+    entry.update_ancestors(2, 500, 30000);
     ASSERT_EQ(entry.ancestor_count, int64_t(3));
-    ASSERT_EQ(entry.ancestor_size, int64_t(500));
-    ASSERT_EQ(entry.ancestor_fee, int64_t(30000));
+    ASSERT_EQ(entry.ancestor_size, self_size + 500);
+    ASSERT_EQ(entry.ancestor_fee, self_fee + 30000);
 }
 
 TEST(mempool_entry_descendant_stats) {
     auto tx = make_test_tx(COIN);
     CTxMemPoolEntry entry(tx, 10000, 0, 0);
 
-    entry.update_descendants(2, 300, 20000);
+    auto self_size = static_cast<int64_t>(entry.get_tx()->get_virtual_size());
+    auto self_fee = entry.get_fee();
+    entry.update_descendants(1, 300, 20000);
     ASSERT_EQ(entry.descendant_count, int64_t(2));
-    ASSERT_EQ(entry.descendant_size, int64_t(300));
-    ASSERT_EQ(entry.descendant_fee, int64_t(20000));
+    ASSERT_EQ(entry.descendant_size, self_size + 300);
+    ASSERT_EQ(entry.descendant_fee, self_fee + 20000);
 }
 
 // ─── CFeeRate tests ─────────────────────────────────────────────────

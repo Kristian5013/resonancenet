@@ -5,6 +5,7 @@
 #include "consensus/growth_policy.h"
 #include "primitives/block_header.h"
 
+using namespace rnet;
 using namespace rnet::consensus;
 using namespace rnet::primitives;
 
@@ -159,6 +160,8 @@ TEST(growth_verify_correct_header) {
         true);
 
     CBlockHeader child;
+    child.height = 1;  // Not genesis
+    child.prev_hash = uint256::from_hex("0000000000000000000000000000000000000000000000000000000000000001");
     child.d_model = expected.new_d_model;
     child.n_layers = expected.new_n_layers;
     child.d_ff = expected.new_d_ff;

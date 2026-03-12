@@ -14,18 +14,10 @@ std::string FormatMoney(int64_t amount) {
     int64_t whole = abs_val / COIN;
     int64_t frac = abs_val % COIN;
 
-    // Format fractional part with 8 digits, stripping trailing zeros
+    // Format fractional part with exactly 8 digits
     char frac_buf[16];
     std::snprintf(frac_buf, sizeof(frac_buf), "%08lld",
                   static_cast<long long>(frac));
-    std::string frac_str(frac_buf);
-
-    // Remove trailing zeros but keep at least 2 decimal places
-    size_t last_nonzero = frac_str.find_last_not_of('0');
-    if (last_nonzero == std::string::npos || last_nonzero < 1) {
-        last_nonzero = 1;
-    }
-    frac_str.resize(last_nonzero + 1);
 
     std::string result;
     if (negative) {
@@ -33,7 +25,7 @@ std::string FormatMoney(int64_t amount) {
     }
     result += std::to_string(whole);
     result += '.';
-    result += frac_str;
+    result += frac_buf;
     return result;
 }
 

@@ -16,11 +16,12 @@ GrowthResult GrowthPolicy::compute_growth(const GrowthState& state, bool loss_im
         delta = BASE_GROWTH;
     } else {
         new_stagnation = state.stagnation + 1;
-        delta = BASE_GROWTH * (1 + new_stagnation / PATIENCE);  // integer division
+        delta = 0;  // No growth without improvement
     }
 
-    // New d_model
+    // New d_model (clamped to max)
     uint32_t new_d_model = std::min(state.d_model + delta, MAX_D_MODEL);
+    delta = new_d_model - state.d_model;  // Actual delta after clamping
 
     // Layer computation based on cumulative growth from genesis
     uint32_t cumulative_growth = new_d_model - GENESIS_D_MODEL;
