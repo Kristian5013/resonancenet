@@ -51,4 +51,7 @@ Result<void> init_mempool(NodeContext& ctx);
 /// listener / connector threads.
 Result<void> init_network(NodeContext& ctx);
 
+/// Initialise JSON-RPC server and register all command handlers.
+Result<void> init_rpc(NodeContext& ctx);
+
 } // namespace rnet::node

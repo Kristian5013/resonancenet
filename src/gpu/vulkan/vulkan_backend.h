@@ -5,14 +5,27 @@
 
 #ifdef RNET_HAS_VULKAN
 
+#include <vulkan/vulkan.h>
+#include <unordered_map>
+#include <utility>
+
 namespace rnet::gpu {
 
-/// Vulkan compute backend — stub implementation.
-/// Real Vulkan compute shaders (.comp) will be added later.
+/// Vulkan compute backend using HOST_VISIBLE|HOST_COHERENT memory.
+/// Buffers are persistently mapped — kernel math runs on the CPU through
+/// mapped pointers, while Vulkan manages all resource lifetime and
+/// synchronization.  A future iteration will replace the CPU math with
+/// SPIR-V compute shaders for full GPU acceleration.
 class VulkanBackend final : public GpuBackend {
 public:
     VulkanBackend();
     ~VulkanBackend() override;
+
+    // Non-copyable, non-movable (Vulkan handles)
+    VulkanBackend(const VulkanBackend&) = delete;
+    VulkanBackend& operator=(const VulkanBackend&) = delete;
+    VulkanBackend(VulkanBackend&&) = delete;
+    VulkanBackend& operator=(VulkanBackend&&) = delete;
 
     std::string device_name() const override;
     size_t total_memory() const override;
@@ -58,8 +71,35 @@ public:
                      const void* slot_values, int d, int n_slots) override;
 
 private:
+    /// Per-allocation tracking record.
+    struct Allocation {
+        VkBuffer buffer;
+        VkDeviceMemory memory;
+        size_t size;
+    };
+
+    // Vulkan handles — created in constructor, destroyed in destructor.
+    VkInstance instance_ = VK_NULL_HANDLE;
+    VkPhysicalDevice physical_device_ = VK_NULL_HANDLE;
+    VkDevice device_ = VK_NULL_HANDLE;
+    VkQueue compute_queue_ = VK_NULL_HANDLE;
+    VkCommandPool command_pool_ = VK_NULL_HANDLE;
+    uint32_t compute_queue_family_ = UINT32_MAX;
+
+    // Device info cached at init time.
     std::string device_name_;
     size_t total_mem_ = 0;
+    size_t allocated_bytes_ = 0;
+
+    // Memory type index for HOST_VISIBLE | HOST_COHERENT allocations.
+    uint32_t host_visible_memory_type_ = UINT32_MAX;
+
+    // All live allocations keyed by their mapped pointer.
+    std::unordered_map<void*, Allocation> allocations_;
+
+    /// Find a suitable memory type index that satisfies \p type_filter and
+    /// \p properties.  Returns UINT32_MAX on failure.
+    uint32_t find_memory_type(uint32_t type_filter, VkMemoryPropertyFlags properties) const;
 };
 
 }  // namespace rnet::gpu

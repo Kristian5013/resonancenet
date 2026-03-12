@@ -157,8 +157,8 @@ void BlockSync::request_headers(CPeer& peer) {
 
     // Send getheaders with the tip hash as the locator
     core::DataStream ss;
-    core::Serialize(ss, static_cast<uint32_t>(PROTOCOL_VERSION));
-    core::Serialize(ss, static_cast<uint32_t>(1));  // count = 1
+    core::ser_write_i32(ss, static_cast<int32_t>(PROTOCOL_VERSION));
+    core::serialize_compact_size(ss, 1);  // count = 1
     tip->block_hash.serialize(ss);
     rnet::uint256 stop_hash;
     stop_hash.serialize(ss);
@@ -187,7 +187,7 @@ void BlockSync::request_blocks() {
         // Send getdata for this block to any connected peer
         CInv inv(InvType::INV_BLOCK, idx->block_hash);
         core::DataStream ss;
-        core::Serialize(ss, static_cast<uint32_t>(1));  // count
+        core::serialize_compact_size(ss, 1);  // count
         inv.serialize(ss);
 
         // Broadcast getdata to first available peer

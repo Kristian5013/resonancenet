@@ -2,13 +2,15 @@
 
 #include "../backend.h"
 #include <string>
+#include <unordered_map>
 
 #ifdef RNET_HAS_METAL
 
 namespace rnet::gpu {
 
-/// Metal backend — stub implementation.
-/// Real Metal shaders (.metal files) will be added later.
+/// Metal backend — uses Metal shared-memory buffers with CPU-side kernel math.
+/// Metal API objects are stored as void* (opaque ObjC pointers) so the header
+/// stays pure C++ — the .mm implementation file casts them to the real types.
 class MetalBackend final : public GpuBackend {
 public:
     MetalBackend();
@@ -59,6 +61,22 @@ public:
 
 private:
     std::string device_name_;
+    size_t total_memory_bytes_ = 0;
+
+    // Opaque Metal handles — cast to ObjC types in the .mm implementation.
+    // id<MTLDevice>
+    void* mtl_device_ = nullptr;
+    // id<MTLCommandQueue>
+    void* mtl_queue_ = nullptr;
+
+    /// Tracks each Metal buffer allocation so we can release it properly.
+    struct MetalAllocation {
+        void* buffer;   // id<MTLBuffer>  — the Metal buffer object
+        void* mapped;   // CPU-accessible pointer from [buffer contents]
+        size_t size;
+    };
+    std::unordered_map<void*, MetalAllocation> allocations_;
+    size_t allocated_bytes_ = 0;
 };
 
 }  // namespace rnet::gpu

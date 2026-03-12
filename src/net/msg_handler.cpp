@@ -347,7 +347,23 @@ void MsgHandler::process_getblocks(CConnection& conn,
              static_cast<unsigned long long>(conn.id()),
              static_cast<unsigned long long>(locator_count));
 
-    // TODO: Build inv response from chain
+    if (!get_block_hashes_) return;
+
+    auto hashes = get_block_hashes_(locator, stop_hash, 500);
+    if (hashes.empty()) return;
+
+    // Send inv message with block hashes
+    core::DataStream inv_payload;
+    core::serialize_compact_size(inv_payload, hashes.size());
+    for (const auto& h : hashes) {
+        CInv inv(InvType::INV_BLOCK, h);
+        inv.serialize(inv_payload);
+    }
+    conn.send_message(msg::INV, inv_payload.span());
+
+    LogDebug(NET, "Sent %zu block inv to peer %llu",
+             hashes.size(),
+             static_cast<unsigned long long>(conn.id()));
 }
 
 void MsgHandler::process_getheaders(CConnection& conn,
@@ -377,7 +393,24 @@ void MsgHandler::process_getheaders(CConnection& conn,
              static_cast<unsigned long long>(conn.id()),
              static_cast<unsigned long long>(locator_count));
 
-    // TODO: Build headers response from chain
+    if (!get_headers_) return;
+
+    auto header_blobs = get_headers_(locator, stop_hash, 2000);
+
+    // Send headers message
+    core::DataStream headers_payload;
+    core::serialize_compact_size(headers_payload, header_blobs.size());
+    for (const auto& hdr_data : header_blobs) {
+        headers_payload.write(
+            reinterpret_cast<const char*>(hdr_data.data()), hdr_data.size());
+        // Bitcoin sends tx_count=0 after each header
+        core::serialize_compact_size(headers_payload, 0);
+    }
+    conn.send_message(msg::HEADERS, headers_payload.span());
+
+    LogDebug(NET, "Sent %zu headers to peer %llu",
+             header_blobs.size(),
+             static_cast<unsigned long long>(conn.id()));
 }
 
 // ---------------------------------------------------------------------------
@@ -453,7 +486,18 @@ void MsgHandler::process_mempool(CConnection& conn,
     LogDebug(NET, "Received mempool request from peer %llu",
              static_cast<unsigned long long>(conn.id()));
 
-    // TODO: Send inv messages for all mempool transactions
+    if (!get_mempool_txids_) return;
+
+    auto txids = get_mempool_txids_();
+    if (txids.empty()) return;
+
+    core::DataStream inv_payload;
+    core::serialize_compact_size(inv_payload, txids.size());
+    for (const auto& txid : txids) {
+        CInv inv(InvType::INV_TX, txid);
+        inv.serialize(inv_payload);
+    }
+    conn.send_message(msg::INV, inv_payload.span());
 }
 
 // ---------------------------------------------------------------------------

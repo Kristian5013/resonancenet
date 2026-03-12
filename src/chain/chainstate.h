@@ -105,7 +105,10 @@ private:
     CBlockIndex* insert_block_index(const rnet::uint256& hash);
 
     /// Activate the best chain (may trigger reorg)
-    Result<void> activate_best_chain();
+    /// @param new_block If provided, used instead of reading from disk
+    ///                  when the block to connect matches this hash.
+    Result<void> activate_best_chain(
+        const primitives::CBlock* new_block = nullptr);
 
     /// Connect a block to the active chain (update UTXO set)
     Result<void> connect_block(const primitives::CBlock& block,

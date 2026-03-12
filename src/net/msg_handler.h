@@ -87,6 +87,33 @@ public:
         get_tx_data_ = std::move(fn);
     }
 
+    /// Set the function to find fork point from locator and return block hashes
+    /// Returns up to 500 block hashes starting after the fork point
+    using GetBlockHashesFn = std::function<
+        std::vector<rnet::uint256>(
+            const std::vector<rnet::uint256>& locator,
+            const rnet::uint256& stop_hash,
+            int max_count)>;
+    void set_get_block_hashes(GetBlockHashesFn fn) {
+        get_block_hashes_ = std::move(fn);
+    }
+
+    /// Set the function to get headers from locator
+    using GetHeadersFn = std::function<
+        std::vector<std::vector<uint8_t>>(
+            const std::vector<rnet::uint256>& locator,
+            const rnet::uint256& stop_hash,
+            int max_count)>;
+    void set_get_headers(GetHeadersFn fn) {
+        get_headers_ = std::move(fn);
+    }
+
+    /// Set the function to get all mempool tx hashes
+    using GetMempoolTxIdsFn = std::function<std::vector<rnet::uint256>()>;
+    void set_get_mempool_txids(GetMempoolTxIdsFn fn) {
+        get_mempool_txids_ = std::move(fn);
+    }
+
 private:
     ConnManager& connman_;
 
@@ -98,6 +125,9 @@ private:
     HaveItemFn have_item_;
     GetBlockDataFn get_block_data_;
     GetTxDataFn get_tx_data_;
+    GetBlockHashesFn get_block_hashes_;
+    GetHeadersFn get_headers_;
+    GetMempoolTxIdsFn get_mempool_txids_;
 
     // ── Handler functions ───────────────────────────────────────────
 

@@ -16,8 +16,19 @@
 #include "mempool/pool.h"
 #include "net/addr_man.h"
 #include "net/conn_manager.h"
+#include "net/msg_handler.h"
 #include "net/protocol.h"
 #include "net/sync.h"
+#include "rpc/server.h"
+#include "rpc/blockchain.h"
+#include "rpc/control.h"
+#include "rpc/lightning_rpc.h"
+#include "rpc/mining.h"
+#include "rpc/misc.h"
+#include "rpc/network.h"
+#include "rpc/rawtransaction.h"
+#include "rpc/training_rpc.h"
+#include "rpc/wallet_rpc.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -318,6 +329,183 @@ Result<void> init_network(NodeContext& ctx)
             *ctx.chainstate, *ctx.connman);
     }
 
+    // Message handler — dispatches P2P messages to chain/mempool
+    ctx.msg_handler = std::make_unique<net::MsgHandler>(*ctx.connman);
+
+    // Wire up: do we have this inv item?
+    ctx.msg_handler->set_have_item(
+        [&ctx](const net::CInv& inv) -> bool {
+            if (inv.type == net::InvType::INV_BLOCK ||
+                inv.type == net::InvType::INV_WITNESS_BLOCK) {
+                return ctx.chainstate &&
+                       ctx.chainstate->lookup_block_index(inv.hash) != nullptr;
+            }
+            if (inv.type == net::InvType::INV_TX ||
+                inv.type == net::InvType::INV_WITNESS_TX) {
+                return ctx.mempool && ctx.mempool->exists(inv.hash);
+            }
+            return false;
+        });
+
+    // Wire up: get serialized block data by hash
+    ctx.msg_handler->set_get_block_data(
+        [&ctx](const rnet::uint256& hash) -> std::vector<uint8_t> {
+            if (!ctx.chainstate) return {};
+            auto* idx = ctx.chainstate->lookup_block_index(hash);
+            if (!idx || idx->file_number < 0) return {};
+            chain::DiskBlockPos dpos;
+            dpos.file_number = idx->file_number;
+            dpos.pos = idx->data_pos;
+            auto res = ctx.chainstate->storage().read_block(dpos);
+            if (res.is_err()) return {};
+            core::DataStream ss;
+            res.value().serialize(ss);
+            return {ss.data(), ss.data() + ss.size()};
+        });
+
+    // Wire up: get serialized tx data by hash
+    ctx.msg_handler->set_get_tx_data(
+        [&ctx](const rnet::uint256& hash) -> std::vector<uint8_t> {
+            if (!ctx.mempool) return {};
+            auto tx = ctx.mempool->get(hash);
+            if (!tx) return {};
+            core::DataStream ss;
+            tx->serialize(ss);
+            return {ss.data(), ss.data() + ss.size()};
+        });
+
+    // Wire up: getblocks response — find fork point from locator, return hashes
+    ctx.msg_handler->set_get_block_hashes(
+        [&ctx](const std::vector<rnet::uint256>& locator,
+               const rnet::uint256& stop_hash,
+               int max_count) -> std::vector<rnet::uint256> {
+            if (!ctx.chainstate) return {};
+            // Find fork point: walk locator, find first hash on active chain
+            int fork_height = 0;
+            for (const auto& loc_hash : locator) {
+                if (ctx.chainstate->is_on_active_chain(loc_hash)) {
+                    auto* idx = ctx.chainstate->lookup_block_index(loc_hash);
+                    if (idx) fork_height = idx->height;
+                    break;
+                }
+            }
+            // Return block hashes from fork_height+1 up to max_count
+            std::vector<rnet::uint256> result;
+            int tip_height = ctx.chainstate->height();
+            for (int h = fork_height + 1;
+                 h <= tip_height && static_cast<int>(result.size()) < max_count;
+                 ++h) {
+                auto* idx = ctx.chainstate->get_block_by_height(h);
+                if (!idx) break;
+                result.push_back(idx->block_hash);
+                if (idx->block_hash == stop_hash) break;
+            }
+            return result;
+        });
+
+    // Wire up: getheaders response — return serialized headers
+    ctx.msg_handler->set_get_headers(
+        [&ctx](const std::vector<rnet::uint256>& locator,
+               const rnet::uint256& stop_hash,
+               int max_count) -> std::vector<std::vector<uint8_t>> {
+            if (!ctx.chainstate) return {};
+            int fork_height = 0;
+            for (const auto& loc_hash : locator) {
+                if (ctx.chainstate->is_on_active_chain(loc_hash)) {
+                    auto* idx = ctx.chainstate->lookup_block_index(loc_hash);
+                    if (idx) fork_height = idx->height;
+                    break;
+                }
+            }
+            std::vector<std::vector<uint8_t>> result;
+            int tip_height = ctx.chainstate->height();
+            for (int h = fork_height + 1;
+                 h <= tip_height && static_cast<int>(result.size()) < max_count;
+                 ++h) {
+                auto* idx = ctx.chainstate->get_block_by_height(h);
+                if (!idx) break;
+                core::DataStream ss;
+                idx->header.serialize(ss);
+                result.emplace_back(ss.data(), ss.data() + ss.size());
+                if (idx->block_hash == stop_hash) break;
+            }
+            return result;
+        });
+
+    // Wire up: received block → accept into chain
+    ctx.msg_handler->set_on_new_block(
+        [&ctx](uint64_t peer_id,
+               const std::vector<uint8_t>& block_data) -> bool {
+            if (!ctx.chainstate) return false;
+            core::DataStream ss(
+                std::span<const uint8_t>(block_data.data(), block_data.size()));
+            primitives::CBlock block;
+            try { block.unserialize(ss); } catch (...) { return false; }
+            auto res = ctx.chainstate->accept_block(block);
+            if (res.is_err()) {
+                LogPrint(NET, "Block from peer %llu rejected: %s",
+                         static_cast<unsigned long long>(peer_id),
+                         res.error().c_str());
+                return false;
+            }
+            LogPrintf("Accepted block height=%d from peer %llu",
+                     res.value()->height,
+                     static_cast<unsigned long long>(peer_id));
+            return true;
+        });
+
+    // Wire up: received tx → accept into mempool and relay
+    ctx.msg_handler->set_on_new_tx(
+        [&ctx](uint64_t peer_id,
+               const std::vector<uint8_t>& tx_data) -> bool {
+            if (!ctx.mempool) return false;
+            core::DataStream ss(
+                std::span<const uint8_t>(tx_data.data(), tx_data.size()));
+            auto tx_ptr = std::make_shared<primitives::CTransaction>();
+            try {
+                const_cast<primitives::CTransaction&>(*tx_ptr).unserialize(ss);
+            } catch (...) { return false; }
+            // Check if we already have it
+            if (ctx.mempool->exists(tx_ptr->txid())) return true;
+            int height = ctx.chainstate ? ctx.chainstate->height() : 0;
+            float val_loss = 0.0f;
+            if (ctx.chainstate && ctx.chainstate->tip()) {
+                val_loss = ctx.chainstate->tip()->val_loss;
+            }
+            auto res = ctx.mempool->add_tx(tx_ptr, 0, height, val_loss);
+            if (res.is_err()) return false;
+            // Relay to other peers (forward the raw data, avoid re-serialize)
+            ctx.connman->broadcast_except(peer_id, net::msg::TX,
+                std::span<const uint8_t>(tx_data.data(), tx_data.size()));
+            return true;
+        });
+
+    // Wire up: get mempool txids
+    ctx.msg_handler->set_get_mempool_txids(
+        [&ctx]() -> std::vector<rnet::uint256> {
+            if (!ctx.mempool) return {};
+            return ctx.mempool->get_txids();
+        });
+
+    // Register all P2P message handlers
+    ctx.msg_handler->register_handlers();
+
+    // Block broadcast: when chainstate connects a new block, announce to peers
+    if (ctx.chainstate) {
+        ctx.chainstate->on_block_connected.connect(
+            [&ctx](const chain::CBlockIndex* pindex) {
+                if (!ctx.connman || !pindex) return;
+                // Send inv for the new block to all peers
+                net::CInv inv(net::InvType::INV_BLOCK, pindex->block_hash);
+                core::DataStream ss;
+                core::serialize_compact_size(ss, 1);
+                inv.serialize(ss);
+                ctx.connman->broadcast(net::msg::INV, ss.span());
+                LogPrintf("Broadcast block inv height=%d to peers",
+                         pindex->height);
+            });
+    }
+
     // Start listening if configured
     if (ctx.listen) {
         auto start_res = ctx.connman->start(ctx.listen_port);
@@ -376,6 +564,44 @@ Result<void> init_network(NodeContext& ctx)
 }
 
 // ────────────────────────────────────────────────────────────────────
+// init_rpc
+// ────────────────────────────────────────────────────────────────────
+
+Result<void> init_rpc(NodeContext& ctx)
+{
+    if (!ctx.rpc_enabled) {
+        LogPrintf("JSON-RPC server disabled (-norpc)");
+        return Result<void>::ok();
+    }
+
+    LogPrintf("Starting JSON-RPC server on port %u...", ctx.rpc_port);
+
+    ctx.rpc_server = std::make_unique<rpc::RPCServer>();
+    ctx.rpc_server->set_context(&ctx);
+    ctx.rpc_server->set_data_dir(ctx.data_dir);
+
+    // Register all RPC command handlers
+    auto& table = ctx.rpc_server->table();
+    rpc::register_blockchain_rpcs(table);
+    rpc::register_control_rpcs(table);
+    rpc::register_lightning_rpcs(table);
+    rpc::register_mining_rpcs(table);
+    rpc::register_misc_rpcs(table);
+    rpc::register_network_rpcs(table);
+    rpc::register_rawtransaction_rpcs(table);
+    rpc::register_training_rpcs(table);
+    rpc::register_wallet_rpcs(table);
+
+    if (!ctx.rpc_server->start(ctx.rpc_port)) {
+        return Result<void>::err("Failed to start RPC server on port " +
+                                  std::to_string(ctx.rpc_port));
+    }
+
+    LogPrintf("JSON-RPC server started on port %u", ctx.rpc_port);
+    return Result<void>::ok();
+}
+
+// ────────────────────────────────────────────────────────────────────
 // app_init
 // ────────────────────────────────────────────────────────────────────
 
@@ -404,6 +630,9 @@ Result<void> app_init(NodeContext& ctx, int argc, const char* const argv[])
     auto net_res = init_network(ctx);
     if (net_res.is_err()) return net_res;
 
+    auto rpc_res = init_rpc(ctx);
+    if (rpc_res.is_err()) return rpc_res;
+
     LogPrintf("Initialisation complete");
     return Result<void>::ok();
 }
@@ -426,6 +655,11 @@ void app_shutdown(NodeContext& ctx)
 {
     LogPrintf("Shutting down...");
 
+    if (ctx.rpc_server) {
+        ctx.rpc_server->stop();
+        ctx.rpc_server.reset();
+    }
+
     if (ctx.block_sync) {
         ctx.block_sync->stop();
         ctx.block_sync.reset();
@@ -446,6 +680,7 @@ void app_shutdown(NodeContext& ctx)
     }
 
     // Release subsystems in reverse order
+    ctx.msg_handler.reset();
     ctx.addrman.reset();
     ctx.connman.reset();
     ctx.mempool.reset();

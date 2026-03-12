@@ -14,9 +14,11 @@ namespace rnet::net {
     class ConnManager;
     class BlockSync;
     class AddrManager;
+    class MsgHandler;
 }
 namespace rnet::consensus { struct ConsensusParams; }
 namespace rnet::core { class ArgsManager; }
+namespace rnet::rpc { class RPCServer; }
 
 namespace rnet::node {
 
@@ -39,7 +41,9 @@ struct NodeContext {
     std::unique_ptr<mempool::CTxMemPool>      mempool;
     std::unique_ptr<net::ConnManager>          connman;
     std::unique_ptr<net::BlockSync>           block_sync;
+    std::unique_ptr<net::MsgHandler>          msg_handler;
     std::unique_ptr<net::AddrManager>         addrman;
+    std::unique_ptr<rpc::RPCServer>           rpc_server;
 
     // ── Args manager ────────────────────────────────────────────────
 

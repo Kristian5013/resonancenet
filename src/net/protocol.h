@@ -90,16 +90,20 @@ struct CInv {
         return type == other.type && hash == other.hash;
     }
 
-    SERIALIZE_METHODS(
-        uint32_t type_val = static_cast<uint32_t>(self.type);
-        READWRITE(type_val);
-        if constexpr (std::is_const_v<std::remove_reference_t<decltype(self)>>) {
-            // serialize path
-        } else {
-            self.type = static_cast<InvType>(type_val);
-        }
-        READWRITE(self.hash);
-    )
+    template<typename Stream>
+    void serialize(Stream& s) const {
+        uint32_t type_val = static_cast<uint32_t>(type);
+        core::Serialize(s, type_val);
+        core::Serialize(s, hash);
+    }
+
+    template<typename Stream>
+    void unserialize(Stream& s) {
+        uint32_t type_val = 0;
+        core::Unserialize(s, type_val);
+        type = static_cast<InvType>(type_val);
+        core::Unserialize(s, hash);
+    }
 };
 
 /// Network address (IPv4/IPv6 + port + services)

@@ -6,7 +6,9 @@
 #include "mempool/pool.h"
 #include "net/addr_man.h"
 #include "net/conn_manager.h"
+#include "net/msg_handler.h"
 #include "net/sync.h"
+#include "rpc/server.h"
 
 namespace rnet::node {
 

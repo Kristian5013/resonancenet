@@ -146,7 +146,7 @@ Result<CBlockIndex*> CChainState::accept_block(
                        + static_cast<int64_t>(block.vtx.size());
 
     // Try to activate best chain (may connect this block or trigger reorg)
-    auto activate_result = activate_best_chain();
+    auto activate_result = activate_best_chain(&block);
     if (!activate_result) {
         return Result<CBlockIndex*>::err(activate_result.error());
     }
@@ -201,7 +201,9 @@ CBlockIndex* CChainState::insert_block_index(const rnet::uint256& hash) {
     return raw;
 }
 
-Result<void> CChainState::activate_best_chain() {
+Result<void> CChainState::activate_best_chain(
+    const primitives::CBlock* new_block)
+{
     CBlockIndex* best = find_best_tip();
     if (!best || best == tip_) {
         return Result<void>::ok();
@@ -211,17 +213,9 @@ Result<void> CChainState::activate_best_chain() {
     CBlockIndex* fork = tip_;
     CBlockIndex* walk = best;
 
-    // Walk both chains back to the same height
-    while (fork && walk && fork->height > walk->height) {
-        fork = fork->prev;
-    }
-    while (fork && walk && walk->height > fork->height) {
-        walk = walk->prev;
-    }
-    while (fork && walk && fork != walk) {
-        fork = fork->prev;
-        walk = walk->prev;
-    }
+    while (fork && walk && fork->height > walk->height) fork = fork->prev;
+    while (fork && walk && walk->height > fork->height) walk = walk->prev;
+    while (fork && walk && fork != walk) { fork = fork->prev; walk = walk->prev; }
     CBlockIndex* fork_point = fork;
 
     // Disconnect blocks from old tip to fork point
@@ -243,20 +237,29 @@ Result<void> CChainState::activate_best_chain() {
 
     // Connect blocks from fork point to new best tip
     for (auto* idx : to_connect) {
-        // Read the block from disk
-        DiskBlockPos dpos;
-        dpos.file_number = idx->file_number;
-        dpos.pos = idx->data_pos;
+        // Use the in-memory block if it matches, otherwise read from disk
+        bool use_memory = (new_block && idx->block_hash == new_block->hash());
 
-        auto block_result = storage_->read_block(dpos);
-        if (!block_result) {
-            return Result<void>::err(
-                "Failed to read block for connect: " + block_result.error());
-        }
+        if (use_memory) {
+            auto connect_result = connect_block(*new_block, idx);
+            if (!connect_result) {
+                return connect_result;
+            }
+        } else {
+            DiskBlockPos dpos;
+            dpos.file_number = idx->file_number;
+            dpos.pos = idx->data_pos;
 
-        auto connect_result = connect_block(block_result.value(), idx);
-        if (!connect_result) {
-            return connect_result;
+            auto block_result = storage_->read_block(dpos);
+            if (!block_result) {
+                return Result<void>::err(
+                    "Failed to read block for connect: " + block_result.error());
+            }
+
+            auto connect_result = connect_block(block_result.value(), idx);
+            if (!connect_result) {
+                return connect_result;
+            }
         }
     }
 
