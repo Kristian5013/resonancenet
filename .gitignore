@@ -1,0 +1,12 @@
+build/
+.vs/
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.lib
+*.dll
+*.user
+CMakeSettings.json
+.cache/
+compile_commands.json

@@ -1,0 +1,438 @@
+#include "cpu_backend.h"
+#include "../../core/logging.h"
+#include <cstdlib>
+#include <cstring>
+#include <cmath>
+#include <algorithm>
+#include <numeric>
+
+namespace rnet::gpu {
+
+CpuFallbackBackend::CpuFallbackBackend() {
+    LogPrintf("GPU: initialized CPU fallback backend");
+}
+
+CpuFallbackBackend::~CpuFallbackBackend() = default;
+
+std::string CpuFallbackBackend::device_name() const { return "CPU Fallback"; }
+size_t CpuFallbackBackend::total_memory() const { return 0; }
+size_t CpuFallbackBackend::free_memory() const { return 0; }
+GpuBackendType CpuFallbackBackend::type() const { return GpuBackendType::CPU_FALLBACK; }
+
+void* CpuFallbackBackend::alloc(size_t bytes) {
+    void* ptr = std::malloc(bytes);
+    if (ptr) {
+        std::memset(ptr, 0, bytes);
+        allocated_bytes_ += bytes;
+    }
+    return ptr;
+}
+
+void CpuFallbackBackend::free(void* ptr) {
+    std::free(ptr);
+}
+
+void CpuFallbackBackend::copy_to_device(void* dst, const void* src, size_t bytes) {
+    std::memcpy(dst, src, bytes);
+}
+
+void CpuFallbackBackend::copy_to_host(void* dst, const void* src, size_t bytes) {
+    std::memcpy(dst, src, bytes);
+}
+
+void CpuFallbackBackend::synchronize() {
+    // No-op on CPU
+}
+
+// ── Training Kernels ──────────────────────────────────────────────────
+
+void CpuFallbackBackend::embedding_forward(void* out, const void* weight,
+                                            const int* tokens, int batch, int seq, int d_model) {
+    auto* o = static_cast<float*>(out);
+    auto* w = static_cast<const float*>(weight);
+    for (int b = 0; b < batch; ++b) {
+        for (int s = 0; s < seq; ++s) {
+            int tok = tokens[b * seq + s];
+            const float* row = w + tok * d_model;
+            float* dst = o + (b * seq + s) * d_model;
+            std::memcpy(dst, row, d_model * sizeof(float));
+        }
+    }
+}
+
+void CpuFallbackBackend::rmsnorm_forward(void* out, const void* x, const void* scale,
+                                          int batch, int seq, int d, float eps) {
+    auto* o = static_cast<float*>(out);
+    auto* xp = static_cast<const float*>(x);
+    auto* sp = static_cast<const float*>(scale);
+
+    for (int b = 0; b < batch; ++b) {
+        for (int s = 0; s < seq; ++s) {
+            const float* row = xp + (b * seq + s) * d;
+            float* dst = o + (b * seq + s) * d;
+
+            // Compute RMS
+            float ss = 0.0f;
+            for (int i = 0; i < d; ++i) {
+                ss += row[i] * row[i];
+            }
+            float rms = 1.0f / std::sqrt(ss / static_cast<float>(d) + eps);
+
+            for (int i = 0; i < d; ++i) {
+                dst[i] = row[i] * rms * sp[i];
+            }
+        }
+    }
+}
+
+void CpuFallbackBackend::causal_conv_forward(void* out, const void* x, const void* weights,
+                                              const int* kernel_sizes, int n_branches,
+                                              int batch, int seq, int d) {
+    auto* o = static_cast<float*>(out);
+    auto* xp = static_cast<const float*>(x);
+    auto* wp = static_cast<const float*>(weights);
+
+    // Zero output
+    std::memset(o, 0, batch * seq * d * sizeof(float));
+
+    // For each branch, perform causal 1D convolution and accumulate
+    int max_kernel = 0;
+    for (int br = 0; br < n_branches; ++br) {
+        if (kernel_sizes[br] > max_kernel) max_kernel = kernel_sizes[br];
+    }
+
+    for (int br = 0; br < n_branches; ++br) {
+        int ks = kernel_sizes[br];
+        const float* w_branch = wp + br * max_kernel * d;
+
+        for (int b = 0; b < batch; ++b) {
+            for (int s = 0; s < seq; ++s) {
+                float* dst = o + (b * seq + s) * d;
+                for (int k = 0; k < ks; ++k) {
+                    int src_pos = s - k;
+                    if (src_pos < 0) continue;
+                    const float* src_row = xp + (b * seq + src_pos) * d;
+                    const float* w_k = w_branch + k * d;
+                    for (int i = 0; i < d; ++i) {
+                        dst[i] += src_row[i] * w_k[i];
+                    }
+                }
+            }
+        }
+    }
+}
+
+void CpuFallbackBackend::mingru_forward(void* h_out, void* state_out,
+                                         const void* x, const void* h_prev,
+                                         const void* Wz, const void* Wh,
+                                         int batch, int seq, int d) {
+    auto* ho = static_cast<float*>(h_out);
+    auto* so = static_cast<float*>(state_out);
+    auto* xp = static_cast<const float*>(x);
+    auto* hp = static_cast<const float*>(h_prev);
+    auto* wz = static_cast<const float*>(Wz);
+    auto* wh = static_cast<const float*>(Wh);
+
+    // Temp buffer for current hidden state per batch
+    std::vector<float> h_cur(batch * d);
+    std::memcpy(h_cur.data(), hp, batch * d * sizeof(float));
+
+    for (int s = 0; s < seq; ++s) {
+        for (int b = 0; b < batch; ++b) {
+            const float* x_t = xp + (b * seq + s) * d;
+            float* h_c = h_cur.data() + b * d;
+            float* h_o = ho + (b * seq + s) * d;
+
+            for (int i = 0; i < d; ++i) {
+                // Compute gate z = sigma(Wz @ x_t + h_c)
+                float z_val = 0.0f;
+                for (int j = 0; j < d; ++j) {
+                    z_val += wz[i * d + j] * x_t[j];
+                }
+                z_val += h_c[i];
+                z_val = 1.0f / (1.0f + std::exp(-z_val));
+
+                // Compute candidate h_tilde = Wh @ (z * x_t)
+                float h_tilde = 0.0f;
+                for (int j = 0; j < d; ++j) {
+                    h_tilde += wh[i * d + j] * (z_val * x_t[j]);
+                }
+
+                // Update: h_new = (1 - z) * h_c + z * h_tilde
+                float h_new = (1.0f - z_val) * h_c[i] + z_val * h_tilde;
+                h_o[i] = h_new;
+                h_c[i] = h_new;
+            }
+        }
+    }
+
+    // Copy final state
+    std::memcpy(so, h_cur.data(), batch * d * sizeof(float));
+}
+
+void CpuFallbackBackend::slot_memory_forward(void* out, const void* x,
+                                              const void* slot_keys, const void* slot_values,
+                                              int batch, int seq, int d, int n_slots) {
+    auto* o = static_cast<float*>(out);
+    auto* xp = static_cast<const float*>(x);
+    auto* sk = static_cast<const float*>(slot_keys);
+    auto* sv = static_cast<const float*>(slot_values);
+
+    for (int b = 0; b < batch; ++b) {
+        for (int s = 0; s < seq; ++s) {
+            const float* query = xp + (b * seq + s) * d;
+            float* dst = o + (b * seq + s) * d;
+
+            // Compute attention weights (softmax over dot products)
+            std::vector<float> scores(n_slots);
+            float max_score = -1e30f;
+            for (int slot = 0; slot < n_slots; ++slot) {
+                float dot = 0.0f;
+                for (int i = 0; i < d; ++i) {
+                    dot += query[i] * sk[slot * d + i];
+                }
+                dot /= std::sqrt(static_cast<float>(d));
+                scores[slot] = dot;
+                if (dot > max_score) max_score = dot;
+            }
+
+            float sum_exp = 0.0f;
+            for (int slot = 0; slot < n_slots; ++slot) {
+                scores[slot] = std::exp(scores[slot] - max_score);
+                sum_exp += scores[slot];
+            }
+            for (int slot = 0; slot < n_slots; ++slot) {
+                scores[slot] /= sum_exp;
+            }
+
+            // Weighted sum of values
+            std::memset(dst, 0, d * sizeof(float));
+            for (int slot = 0; slot < n_slots; ++slot) {
+                for (int i = 0; i < d; ++i) {
+                    dst[i] += scores[slot] * sv[slot * d + i];
+                }
+            }
+        }
+    }
+}
+
+void CpuFallbackBackend::swiglu_forward(void* out, const void* x,
+                                         const void* W_up, const void* W_gate, const void* W_down,
+                                         int batch, int seq, int d_model, int d_ff) {
+    auto* o = static_cast<float*>(out);
+    auto* xp = static_cast<const float*>(x);
+    auto* wu = static_cast<const float*>(W_up);
+    auto* wg = static_cast<const float*>(W_gate);
+    auto* wd = static_cast<const float*>(W_down);
+
+    std::vector<float> up(d_ff);
+    std::vector<float> gate(d_ff);
+    std::vector<float> hidden(d_ff);
+
+    for (int b = 0; b < batch; ++b) {
+        for (int s = 0; s < seq; ++s) {
+            const float* inp = xp + (b * seq + s) * d_model;
+            float* dst = o + (b * seq + s) * d_model;
+
+            // up = x @ W_up, gate = x @ W_gate
+            for (int i = 0; i < d_ff; ++i) {
+                float u = 0.0f, g = 0.0f;
+                for (int j = 0; j < d_model; ++j) {
+                    u += inp[j] * wu[j * d_ff + i];
+                    g += inp[j] * wg[j * d_ff + i];
+                }
+                up[i] = u;
+                gate[i] = g;
+            }
+
+            // SwiGLU: hidden = up * silu(gate)
+            for (int i = 0; i < d_ff; ++i) {
+                float silu = gate[i] / (1.0f + std::exp(-gate[i]));
+                hidden[i] = up[i] * silu;
+            }
+
+            // out = hidden @ W_down
+            for (int i = 0; i < d_model; ++i) {
+                float val = 0.0f;
+                for (int j = 0; j < d_ff; ++j) {
+                    val += hidden[j] * wd[j * d_model + i];
+                }
+                dst[i] = val;
+            }
+        }
+    }
+}
+
+void CpuFallbackBackend::cross_entropy_loss(float* loss_out, const void* logits,
+                                             const int* targets, int batch, int seq, int vocab) {
+    auto* lp = static_cast<const float*>(logits);
+    float total_loss = 0.0f;
+    int count = batch * seq;
+
+    for (int b = 0; b < batch; ++b) {
+        for (int s = 0; s < seq; ++s) {
+            const float* row = lp + (b * seq + s) * vocab;
+            int tgt = targets[b * seq + s];
+
+            // Log-sum-exp for numerical stability
+            float max_val = row[0];
+            for (int v = 1; v < vocab; ++v) {
+                if (row[v] > max_val) max_val = row[v];
+            }
+            float sum_exp = 0.0f;
+            for (int v = 0; v < vocab; ++v) {
+                sum_exp += std::exp(row[v] - max_val);
+            }
+            float log_softmax = row[tgt] - max_val - std::log(sum_exp);
+            total_loss -= log_softmax;
+        }
+    }
+
+    *loss_out = total_loss / static_cast<float>(count);
+}
+
+void CpuFallbackBackend::adamw_step(void* params, const void* grads, void* m, void* v,
+                                     float lr, float beta1, float beta2, float eps,
+                                     float weight_decay, int step, int n_params) {
+    auto* p = static_cast<float*>(params);
+    auto* g = static_cast<const float*>(grads);
+    auto* mp = static_cast<float*>(m);
+    auto* vp = static_cast<float*>(v);
+
+    float bc1 = 1.0f - std::pow(beta1, static_cast<float>(step));
+    float bc2 = 1.0f - std::pow(beta2, static_cast<float>(step));
+
+    for (int i = 0; i < n_params; ++i) {
+        // Weight decay
+        p[i] -= lr * weight_decay * p[i];
+
+        // Moment updates
+        mp[i] = beta1 * mp[i] + (1.0f - beta1) * g[i];
+        vp[i] = beta2 * vp[i] + (1.0f - beta2) * g[i] * g[i];
+
+        // Bias correction
+        float m_hat = mp[i] / bc1;
+        float v_hat = vp[i] / bc2;
+
+        // Parameter update
+        p[i] -= lr * m_hat / (std::sqrt(v_hat) + eps);
+    }
+}
+
+void CpuFallbackBackend::gemm(void* C_ptr, const void* A_ptr, const void* B_ptr,
+                                int M, int N, int K, float alpha, float beta_val) {
+    auto* C = static_cast<float*>(C_ptr);
+    auto* A = static_cast<const float*>(A_ptr);
+    auto* B = static_cast<const float*>(B_ptr);
+
+    for (int i = 0; i < M; ++i) {
+        for (int j = 0; j < N; ++j) {
+            float sum = 0.0f;
+            for (int k = 0; k < K; ++k) {
+                sum += A[i * K + k] * B[k * N + j];
+            }
+            C[i * N + j] = alpha * sum + beta_val * C[i * N + j];
+        }
+    }
+}
+
+// ── Inference Kernels ─────────────────────────────────────────────────
+
+void CpuFallbackBackend::mingru_step(void* h_out, const void* x, const void* h_prev,
+                                      const void* Wz, const void* Wh, int d) {
+    auto* ho = static_cast<float*>(h_out);
+    auto* xp = static_cast<const float*>(x);
+    auto* hp = static_cast<const float*>(h_prev);
+    auto* wz = static_cast<const float*>(Wz);
+    auto* wh = static_cast<const float*>(Wh);
+
+    for (int i = 0; i < d; ++i) {
+        float z_val = 0.0f;
+        for (int j = 0; j < d; ++j) {
+            z_val += wz[i * d + j] * xp[j];
+        }
+        z_val += hp[i];
+        z_val = 1.0f / (1.0f + std::exp(-z_val));
+
+        float h_tilde = 0.0f;
+        for (int j = 0; j < d; ++j) {
+            h_tilde += wh[i * d + j] * (z_val * xp[j]);
+        }
+
+        ho[i] = (1.0f - z_val) * hp[i] + z_val * h_tilde;
+    }
+}
+
+void CpuFallbackBackend::conv_step(void* out, void* buffer, const void* x, const void* weights,
+                                    const int* kernel_sizes, int n_branches, int d) {
+    auto* o = static_cast<float*>(out);
+    auto* xp = static_cast<const float*>(x);
+    auto* wp = static_cast<const float*>(weights);
+    auto* buf = static_cast<float*>(buffer);
+
+    int max_kernel = 0;
+    for (int br = 0; br < n_branches; ++br) {
+        if (kernel_sizes[br] > max_kernel) max_kernel = kernel_sizes[br];
+    }
+
+    std::memset(o, 0, d * sizeof(float));
+
+    for (int br = 0; br < n_branches; ++br) {
+        int ks = kernel_sizes[br];
+        float* br_buf = buf + br * max_kernel * d;
+        const float* w_branch = wp + br * max_kernel * d;
+
+        // Shift buffer and insert new token
+        if (ks > 1) {
+            std::memmove(br_buf, br_buf + d, (ks - 1) * d * sizeof(float));
+        }
+        std::memcpy(br_buf + (ks - 1) * d, xp, d * sizeof(float));
+
+        // Convolve
+        for (int k = 0; k < ks; ++k) {
+            const float* b_k = br_buf + k * d;
+            const float* w_k = w_branch + k * d;
+            for (int i = 0; i < d; ++i) {
+                o[i] += b_k[i] * w_k[i];
+            }
+        }
+    }
+}
+
+void CpuFallbackBackend::slot_query(void* out, const void* x, const void* slot_keys,
+                                     const void* slot_values, int d, int n_slots) {
+    auto* o = static_cast<float*>(out);
+    auto* xp = static_cast<const float*>(x);
+    auto* sk = static_cast<const float*>(slot_keys);
+    auto* sv = static_cast<const float*>(slot_values);
+
+    std::vector<float> scores(n_slots);
+    float max_score = -1e30f;
+    for (int slot = 0; slot < n_slots; ++slot) {
+        float dot = 0.0f;
+        for (int i = 0; i < d; ++i) {
+            dot += xp[i] * sk[slot * d + i];
+        }
+        dot /= std::sqrt(static_cast<float>(d));
+        scores[slot] = dot;
+        if (dot > max_score) max_score = dot;
+    }
+
+    float sum_exp = 0.0f;
+    for (int slot = 0; slot < n_slots; ++slot) {
+        scores[slot] = std::exp(scores[slot] - max_score);
+        sum_exp += scores[slot];
+    }
+    for (int slot = 0; slot < n_slots; ++slot) {
+        scores[slot] /= sum_exp;
+    }
+
+    std::memset(o, 0, d * sizeof(float));
+    for (int slot = 0; slot < n_slots; ++slot) {
+        for (int i = 0; i < d; ++i) {
+            o[i] += scores[slot] * sv[slot * d + i];
+        }
+    }
+}
+
+}  // namespace rnet::gpu
