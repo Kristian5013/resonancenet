@@ -2,7 +2,6 @@
 
 #include "backend.h"
 #include <vector>
-#include <span>
 #include <cstdint>
 #include <numeric>
 
@@ -16,7 +15,7 @@ public:
 
     void* data();
     const void* data() const;
-    std::span<const int64_t> shape() const;
+    const std::vector<int64_t>& shape() const;
     int64_t numel() const;
     size_t size_bytes() const;
     DType dtype() const;

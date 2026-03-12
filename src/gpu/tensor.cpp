@@ -60,7 +60,7 @@ GpuTensor& GpuTensor::operator=(GpuTensor&& other) noexcept {
 
 void* GpuTensor::data() { return data_; }
 const void* GpuTensor::data() const { return data_; }
-std::span<const int64_t> GpuTensor::shape() const { return shape_; }
+const std::vector<int64_t>& GpuTensor::shape() const { return shape_; }
 int64_t GpuTensor::numel() const { return numel_; }
 size_t GpuTensor::size_bytes() const { return size_bytes_; }
 DType GpuTensor::dtype() const { return dtype_; }

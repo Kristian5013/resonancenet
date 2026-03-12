@@ -1,0 +1,54 @@
+# ResonanceNet — 2-node regtest cluster
+# Usage: docker compose up --build
+
+services:
+  node1:
+    build: .
+    container_name: rnet-node1
+    command:
+      - -regtest=1
+      - -listen=1
+      - -port=9555
+      - -rpcport=9556
+      - -rpcbind=0.0.0.0
+      - -rpcallowip=0.0.0.0/0
+      - -datadir=/var/lib/resonancenet
+      - -printtoconsole
+    ports:
+      - "9555:9555"
+      - "9556:9556"
+    volumes:
+      - node1-data:/var/lib/resonancenet
+    networks:
+      - rnet
+
+  node2:
+    build: .
+    container_name: rnet-node2
+    command:
+      - -regtest=1
+      - -listen=1
+      - -port=9555
+      - -rpcport=9556
+      - -rpcbind=0.0.0.0
+      - -rpcallowip=0.0.0.0/0
+      - -connect=node1:9555
+      - -datadir=/var/lib/resonancenet
+      - -printtoconsole
+    ports:
+      - "19565:9555"
+      - "19566:9556"
+    volumes:
+      - node2-data:/var/lib/resonancenet
+    depends_on:
+      - node1
+    networks:
+      - rnet
+
+volumes:
+  node1-data:
+  node2-data:
+
+networks:
+  rnet:
+    driver: bridge

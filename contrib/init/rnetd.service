@@ -1,0 +1,27 @@
+[Unit]
+Description=ResonanceNet daemon
+Documentation=https://github.com/Kristian5013/resonancenet
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/rnetd -daemon=0 -conf=/etc/resonancenet/resonancenet.conf -datadir=/var/lib/resonancenet
+Type=simple
+Restart=on-failure
+RestartSec=10
+User=rnet
+Group=rnet
+RuntimeDirectory=resonancenet
+RuntimeDirectoryMode=0710
+StateDirectory=resonancenet
+StateDirectoryMode=0710
+ConfigurationDirectory=resonancenet
+ConfigurationDirectoryMode=0710
+PrivateTmp=true
+ProtectSystem=full
+NoNewPrivileges=true
+MemoryDenyWriteExecute=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
