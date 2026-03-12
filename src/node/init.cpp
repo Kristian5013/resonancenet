@@ -16,8 +16,10 @@
 #include "mempool/pool.h"
 #include "net/addr_man.h"
 #include "net/conn_manager.h"
+#include "net/protocol.h"
 #include "net/sync.h"
 
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
@@ -324,6 +326,50 @@ Result<void> init_network(NodeContext& ctx)
                       start_res.error().c_str());
         }
     }
+
+    // Connect to -connect= and -addnode= peers
+    auto connect_to_peers = [&](const std::vector<std::string>& peers) {
+        for (const auto& peer_str : peers) {
+            // Parse "host:port"
+            std::string host = peer_str;
+            uint16_t port = ctx.listen_port;
+
+            auto colon = peer_str.rfind(':');
+            if (colon != std::string::npos) {
+                host = peer_str.substr(0, colon);
+                try {
+                    port = static_cast<uint16_t>(std::stoi(peer_str.substr(colon + 1)));
+                } catch (...) {
+                    LogPrintf("Warning: invalid port in peer address: %s", peer_str.c_str());
+                    continue;
+                }
+            }
+
+            // Parse IPv4
+            net::CNetAddr addr;
+            unsigned int a, b, c, d;
+            if (std::sscanf(host.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
+                addr.set_ipv4(static_cast<uint8_t>(a), static_cast<uint8_t>(b),
+                              static_cast<uint8_t>(c), static_cast<uint8_t>(d));
+                addr.port = port;
+
+                LogPrintf("Connecting to peer %s:%u ...", host.c_str(), port);
+                auto res = ctx.connman->connect_to(addr);
+                if (res.is_ok()) {
+                    LogPrintf("Connected to %s:%u (id=%llu)",
+                              host.c_str(), port, res.value());
+                } else {
+                    LogPrintf("Failed to connect to %s:%u: %s",
+                              host.c_str(), port, res.error().c_str());
+                }
+            } else {
+                LogPrintf("Warning: cannot parse peer address: %s", peer_str.c_str());
+            }
+        }
+    };
+
+    connect_to_peers(ctx.connect_nodes);
+    connect_to_peers(ctx.add_nodes);
 
     LogPrintf("Network initialised");
     return Result<void>::ok();
