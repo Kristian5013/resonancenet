@@ -37,6 +37,7 @@ public:
     void copy_to_device(void* dst, const void* src, size_t bytes) override;
     void copy_to_host(void* dst, const void* src, size_t bytes) override;
     void synchronize() override;
+    void memset_zero(void* ptr, size_t bytes) override;
 
     void embedding_forward(void* out, const void* weight,
                             const int* tokens, int batch, int seq, int d_model) override;

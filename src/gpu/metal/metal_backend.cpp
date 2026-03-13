@@ -180,6 +180,12 @@ void MetalBackend::synchronize() {
     }
 }
 
+void MetalBackend::memset_zero(void* ptr, size_t bytes) {
+    if (ptr && bytes > 0) {
+        std::memset(ptr, 0, bytes);
+    }
+}
+
 // ── Training Kernels ────────────────────────────────────────────────────
 // All math is identical to CpuFallbackBackend, operating on shared-memory
 // mapped pointers.  When Metal compute shaders are added later, these

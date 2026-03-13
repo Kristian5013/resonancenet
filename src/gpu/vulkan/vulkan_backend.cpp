@@ -345,6 +345,12 @@ void VulkanBackend::synchronize() {
     }
 }
 
+void VulkanBackend::memset_zero(void* ptr, size_t bytes) {
+    if (ptr && bytes > 0) {
+        std::memset(ptr, 0, bytes);
+    }
+}
+
 // ── Training Kernels ─────────────────────────────────────────────────────
 // These operate on persistently mapped HOST_VISIBLE memory.  The math is
 // identical to CpuFallbackBackend so that numerical results match exactly.
