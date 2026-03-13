@@ -526,9 +526,8 @@ void ConnManager::maintenance_loop() {
                 addrman_->mark_attempt(addr);
                 auto res = connect_to(addr);
                 if (res.is_ok()) {
-                    LogPrintf("Auto-connected to seed peer %s:%u",
-                              addr.to_string().c_str(),
-                              static_cast<unsigned>(addr.port));
+                    LogPrintf("Auto-connected to peer %s",
+                              addr.to_string().c_str());
                 }
             }
         }
