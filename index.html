@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ResonanceNet — Proof-of-Training Blockchain</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif;
+            background: #0a0a0f;
+            color: #e0e0e0;
+            line-height: 1.6;
+        }
+
+        .hero {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            padding: 2rem;
+            background: radial-gradient(ellipse at 50% 0%, #1a1a3e 0%, #0a0a0f 70%);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .hero::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: conic-gradient(from 0deg at 50% 50%, transparent 0deg, rgba(99, 102, 241, 0.03) 90deg, transparent 180deg);
+            animation: rotate 20s linear infinite;
+        }
+
+        @keyframes rotate {
+            to { transform: rotate(360deg); }
+        }
+
+        .hero > * { position: relative; z-index: 1; }
+
+        .logo {
+            font-size: 4rem;
+            font-weight: 800;
+            background: linear-gradient(135deg, #6366f1, #8b5cf6, #a78bfa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 1rem;
+            letter-spacing: -0.02em;
+        }
+
+        .tagline {
+            font-size: 1.5rem;
+            color: #9ca3af;
+            margin-bottom: 3rem;
+            max-width: 600px;
+        }
+
+        .tagline strong {
+            color: #a78bfa;
+        }
+
+        .buttons {
+            display: flex;
+            gap: 1.5rem;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 1rem 2rem;
+            border-radius: 12px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            text-decoration: none;
+            transition: all 0.2s ease;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #6366f1, #8b5cf6);
+            color: #fff;
+            box-shadow: 0 4px 20px rgba(99, 102, 241, 0.3);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 30px rgba(99, 102, 241, 0.4);
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.05);
+            color: #e0e0e0;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.1);
+            transform: translateY(-2px);
+        }
+
+        .features {
+            padding: 6rem 2rem;
+            max-width: 1100px;
+            margin: 0 auto;
+        }
+
+        .features h2 {
+            text-align: center;
+            font-size: 2.5rem;
+            margin-bottom: 3rem;
+            background: linear-gradient(135deg, #e0e0e0, #9ca3af);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+        }
+
+        .card {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 16px;
+            padding: 2rem;
+            transition: all 0.2s ease;
+        }
+
+        .card:hover {
+            background: rgba(255, 255, 255, 0.05);
+            border-color: rgba(99, 102, 241, 0.3);
+            transform: translateY(-4px);
+        }
+
+        .card-icon {
+            font-size: 2rem;
+            margin-bottom: 1rem;
+        }
+
+        .card h3 {
+            font-size: 1.3rem;
+            margin-bottom: 0.5rem;
+            color: #f0f0f0;
+        }
+
+        .card p {
+            color: #9ca3af;
+            font-size: 0.95rem;
+        }
+
+        .how-it-works {
+            padding: 6rem 2rem;
+            background: rgba(99, 102, 241, 0.03);
+        }
+
+        .how-it-works .inner {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .how-it-works h2 {
+            text-align: center;
+            font-size: 2.5rem;
+            margin-bottom: 3rem;
+            background: linear-gradient(135deg, #e0e0e0, #9ca3af);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .step {
+            display: flex;
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+            align-items: flex-start;
+        }
+
+        .step-num {
+            flex-shrink: 0;
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            background: linear-gradient(135deg, #6366f1, #8b5cf6);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 1.2rem;
+        }
+
+        .step-text h3 {
+            font-size: 1.2rem;
+            margin-bottom: 0.3rem;
+        }
+
+        .step-text p {
+            color: #9ca3af;
+        }
+
+        .stats {
+            padding: 4rem 2rem;
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 2rem;
+            text-align: center;
+        }
+
+        .stat-num {
+            font-size: 2.5rem;
+            font-weight: 800;
+            background: linear-gradient(135deg, #6366f1, #a78bfa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .stat-label {
+            color: #9ca3af;
+            font-size: 0.9rem;
+            margin-top: 0.3rem;
+        }
+
+        .download {
+            padding: 6rem 2rem;
+            text-align: center;
+        }
+
+        .download h2 {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+            background: linear-gradient(135deg, #e0e0e0, #9ca3af);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .download p {
+            color: #9ca3af;
+            margin-bottom: 2rem;
+        }
+
+        .download-grid {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+            flex-wrap: wrap;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .dl-card {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 12px;
+            padding: 1.5rem 2rem;
+            text-decoration: none;
+            color: #e0e0e0;
+            transition: all 0.2s ease;
+            min-width: 200px;
+        }
+
+        .dl-card:hover {
+            background: rgba(99, 102, 241, 0.1);
+            border-color: rgba(99, 102, 241, 0.3);
+            transform: translateY(-2px);
+        }
+
+        .dl-card .platform {
+            font-weight: 600;
+            font-size: 1.1rem;
+        }
+
+        .dl-card .arch {
+            color: #9ca3af;
+            font-size: 0.85rem;
+        }
+
+        footer {
+            text-align: center;
+            padding: 3rem 2rem;
+            color: #6b7280;
+            border-top: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        footer a {
+            color: #8b5cf6;
+            text-decoration: none;
+        }
+
+        footer a:hover { text-decoration: underline; }
+
+        @media (max-width: 640px) {
+            .logo { font-size: 2.5rem; }
+            .tagline { font-size: 1.1rem; }
+            .features h2, .how-it-works h2, .download h2 { font-size: 1.8rem; }
+        }
+    </style>
+</head>
+<body>
+    <section class="hero">
+        <h1 class="logo">ResonanceNet</h1>
+        <p class="tagline">The world's first <strong>Proof-of-Training</strong> blockchain. Miners don't burn energy on hash puzzles &mdash; they train neural networks.</p>
+        <div class="buttons">
+            <a href="ResonanceNet_Whitepaper_V2.pdf" class="btn btn-primary">
+                <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg>
+                Read Whitepaper
+            </a>
+            <a href="https://github.com/Kristian5013/resonancenet/releases/latest" class="btn btn-secondary">
+                <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 11l5 5 5-5M12 4v12"/></svg>
+                Download v0.1.0
+            </a>
+            <a href="https://github.com/Kristian5013/resonancenet" class="btn btn-secondary">
+                <svg width="20" height="20" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+                Source Code
+            </a>
+        </div>
+    </section>
+
+    <section class="features">
+        <h2>Why ResonanceNet?</h2>
+        <div class="grid">
+            <div class="card">
+                <div class="card-icon">&#x1f9e0;</div>
+                <h3>Proof-of-Training</h3>
+                <p>Every block requires real AI model improvement. Mining energy goes toward training neural networks, not solving useless hash puzzles.</p>
+            </div>
+            <div class="card">
+                <div class="card-icon">&#x1f4c8;</div>
+                <h3>Continuous Growth</h3>
+                <p>The shared model grows autonomously &mdash; adding layers and dimensions as the chain advances. No hard forks needed.</p>
+            </div>
+            <div class="card">
+                <div class="card-icon">&#x26a1;</div>
+                <h3>MinGRU Architecture</h3>
+                <p>O(1) inference per token with no KV cache. Efficient training and instant text generation from the chain's model.</p>
+            </div>
+            <div class="card">
+                <div class="card-icon">&#x1f512;</div>
+                <h3>Modern Cryptography</h3>
+                <p>Keccak-256d hashing (Ethereum-compatible), Ed25519 block signing, BIP32/44 HD wallets with mandatory recovery.</p>
+            </div>
+            <div class="card">
+                <div class="card-icon">&#x1f3ae;</div>
+                <h3>Multi-GPU Backends</h3>
+                <p>CUDA, Vulkan, and Metal support. CPU fallback included. Mine on any hardware.</p>
+            </div>
+            <div class="card">
+                <div class="card-icon">&#x1f310;</div>
+                <h3>Decentralized P2P</h3>
+                <p>Bitcoin Core-style networking with encrypted transport, relay protection, and full node verification.</p>
+            </div>
+        </div>
+    </section>
+
+    <section class="how-it-works">
+        <div class="inner">
+            <h2>How Mining Works</h2>
+            <div class="step">
+                <div class="step-num">1</div>
+                <div class="step-text">
+                    <h3>Load Checkpoint</h3>
+                    <p>The miner loads the current model checkpoint from the chain tip.</p>
+                </div>
+            </div>
+            <div class="step">
+                <div class="step-num">2</div>
+                <div class="step-text">
+                    <h3>Train the Model</h3>
+                    <p>Run forward and backward passes on the MinGRU neural network using real training data.</p>
+                </div>
+            </div>
+            <div class="step">
+                <div class="step-num">3</div>
+                <div class="step-text">
+                    <h3>Evaluate</h3>
+                    <p>Compute validation loss on a deterministic dataset. If loss improved &mdash; you found a valid block.</p>
+                </div>
+            </div>
+            <div class="step">
+                <div class="step-num">4</div>
+                <div class="step-text">
+                    <h3>Broadcast</h3>
+                    <p>Assemble the block with the new checkpoint and broadcast to the network. Other nodes verify the improvement.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section class="stats">
+        <div class="stats-grid">
+            <div>
+                <div class="stat-num">31K+</div>
+                <div class="stat-label">Lines of C++20</div>
+            </div>
+            <div>
+                <div class="stat-num">15</div>
+                <div class="stat-label">Libraries</div>
+            </div>
+            <div>
+                <div class="stat-num">6</div>
+                <div class="stat-label">Binaries</div>
+            </div>
+            <div>
+                <div class="stat-num">3</div>
+                <div class="stat-label">GPU Backends</div>
+            </div>
+        </div>
+    </section>
+
+    <section class="download" id="download">
+        <h2>Join the Testnet</h2>
+        <p>Download pre-built binaries and connect to the seed node.</p>
+        <div class="download-grid">
+            <a href="https://github.com/Kristian5013/resonancenet/releases/latest/download/resonancenet-0.1.0-testnet-x86_64-linux.tar.gz" class="dl-card">
+                <div class="platform">Linux</div>
+                <div class="arch">x86_64 &middot; tar.gz</div>
+            </a>
+            <a href="https://github.com/Kristian5013/resonancenet/releases/latest/download/resonancenet-0.1.0-testnet-arm64-darwin.tar.gz" class="dl-card">
+                <div class="platform">macOS</div>
+                <div class="arch">ARM64 &middot; tar.gz</div>
+            </a>
+            <a href="https://github.com/Kristian5013/resonancenet/releases/latest/download/resonancenet-0.1.0-testnet-win64.zip" class="dl-card">
+                <div class="platform">Windows</div>
+                <div class="arch">x64 &middot; zip</div>
+            </a>
+        </div>
+    </section>
+
+    <footer>
+        <p>ResonanceNet is open source under the <a href="https://github.com/Kristian5013/resonancenet/blob/main/COPYING">MIT License</a>.</p>
+        <p style="margin-top: 0.5rem;">
+            <a href="https://github.com/Kristian5013/resonancenet">GitHub</a> &middot;
+            <a href="ResonanceNet_Whitepaper_V2.pdf">Whitepaper</a> &middot;
+            <a href="https://github.com/Kristian5013/resonancenet/releases/latest">Downloads</a>
+        </p>
+    </footer>
+</body>
+</html>
