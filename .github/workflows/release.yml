@@ -22,7 +22,7 @@ jobs:
             archive: tar.gz
           - os: windows-latest
             name: win64
-            triplet: x64-windows
+            triplet: x64-windows-static
             archive: zip
           - os: macos-14
             name: arm64-darwin
@@ -174,5 +174,5 @@ jobs:
           tag_name: ${{ github.ref_name }}
           generate_release_notes: true
           draft: false
-          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') || contains(github.ref_name, '-testnet') }}
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
           files: artifacts/*

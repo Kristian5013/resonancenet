@@ -21,7 +21,7 @@ jobs:
           - os: ubuntu-24.04
             triplet: x64-linux
           - os: windows-latest
-            triplet: x64-windows
+            triplet: x64-windows-static
           - os: macos-14
             triplet: arm64-osx
 
