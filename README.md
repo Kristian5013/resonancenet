@@ -187,3 +187,5 @@ Copyright (c) 2026 ResonanceNet Contributors
 ---
 
 **GitHub**: [Kristian5013/resonancenet](https://github.com/Kristian5013/resonancenet)
+**Website**: [kristian5013.github.io/resonancenet](https://kristian5013.github.io/resonancenet/)
+**Telegram**: [resonance_net_main](https://t.me/resonance_net_main)
