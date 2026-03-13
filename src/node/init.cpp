@@ -327,6 +327,7 @@ Result<void> init_network(NodeContext& ctx)
     ctx.connman = std::make_unique<net::ConnManager>();
     ctx.connman->set_user_agent("/ResonanceNet:2.0.0/");
     ctx.connman->set_local_services(net::NODE_NETWORK);
+    ctx.connman->set_addrman(ctx.addrman.get());
     if (ctx.chainstate) {
         ctx.connman->set_best_height(ctx.chainstate->height());
     }

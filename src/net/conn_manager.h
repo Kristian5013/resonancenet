@@ -17,6 +17,8 @@
 
 namespace rnet::net {
 
+class AddrManager;
+
 /// ConnManager — manages all P2P connections.
 ///
 /// Responsibilities:
@@ -123,6 +125,9 @@ public:
     void set_user_agent(const std::string& ua) { user_agent_ = ua; }
     const std::string& user_agent() const { return user_agent_; }
 
+    /// Set the address manager (for auto-connecting to peers)
+    void set_addrman(AddrManager* addrman) { addrman_ = addrman; }
+
     /// Set current best block height (for version messages)
     void set_best_height(int32_t h) { best_height_ = h; }
     int32_t best_height() const { return best_height_.load(); }
@@ -175,6 +180,9 @@ private:
     uint64_t local_services_ = NODE_NETWORK;
     std::string user_agent_ = "/ResonanceNet:2.0.0/";
     std::atomic<int32_t> best_height_{0};
+
+    /// Address manager for peer discovery
+    AddrManager* addrman_ = nullptr;
 
     /// Thread group for network threads
     core::ThreadGroup threads_;

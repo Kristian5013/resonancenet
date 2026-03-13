@@ -7,6 +7,7 @@
 #include "core/random.h"
 #include "core/time.h"
 #include "crypto/keccak.h"
+#include "net/addr_man.h"
 
 namespace rnet::net {
 
@@ -515,6 +516,21 @@ void ConnManager::maintenance_loop() {
         // Disconnect timed-out peers
         for (auto id : to_disconnect) {
             disconnect(id);
+        }
+
+        // Auto-connect: if we have fewer outbound connections than desired,
+        // pick a peer from AddrManager and try to connect
+        if (addrman_ && outbound_count() < static_cast<size_t>(MAX_OUTBOUND)) {
+            CNetAddr addr = addrman_->select();
+            if (addr.port != 0 && !is_connected(addr) && !is_banned(addr)) {
+                addrman_->mark_attempt(addr);
+                auto res = connect_to(addr);
+                if (res.is_ok()) {
+                    LogPrintf("Auto-connected to seed peer %s:%u",
+                              addr.to_string().c_str(),
+                              static_cast<unsigned>(addr.port));
+                }
+            }
         }
     }
 }
