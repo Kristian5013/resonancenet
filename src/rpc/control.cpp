@@ -96,7 +96,11 @@ static JsonValue rpc_getmemoryinfo(const RPCRequest& req,
 #else
     struct rusage usage;
     if (getrusage(RUSAGE_SELF, &usage) == 0) {
+#ifdef __APPLE__
+        used_bytes = usage.ru_maxrss;  // bytes on macOS
+#else
         used_bytes = usage.ru_maxrss * 1024;  // KB to bytes on Linux
+#endif
     }
 
     long pages = sysconf(_SC_PHYS_PAGES);
@@ -104,10 +108,12 @@ static JsonValue rpc_getmemoryinfo(const RPCRequest& req,
     if (pages > 0 && page_size > 0) {
         total_bytes = pages * page_size;
     }
+#ifdef _SC_AVPHYS_PAGES
     long avail = sysconf(_SC_AVPHYS_PAGES);
     if (avail > 0 && page_size > 0) {
         free_bytes = avail * page_size;
     }
+#endif
 #endif
 
     JsonValue locked = JsonValue::object();
