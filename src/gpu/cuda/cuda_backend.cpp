@@ -38,6 +38,35 @@ void launch_conv_step(float* out, float* buffer, const float* x, const float* we
 void launch_slot_query(float* out, const float* x,
                         const float* slot_keys, const float* slot_values,
                         int d, int n_slots);
+
+// Backward kernel launchers
+void launch_cross_entropy_backward(float* d_logits, const float* logits,
+                                    const int* targets, int batch, int seq, int vocab);
+void launch_embedding_backward(float* d_weight, const float* d_out,
+                                const int* tokens, int batch, int seq, int d_model);
+void launch_rmsnorm_backward(float* d_x, float* d_scale, const float* d_out,
+                              const float* x, const float* scale,
+                              int batch, int seq, int d, float eps);
+void launch_causal_conv_backward(float* d_x, float* d_weights,
+                                  const float* d_out, const float* x,
+                                  const float* fwd_weights,
+                                  const int* kernel_sizes_dev, int n_branches,
+                                  int max_kernel,
+                                  int batch, int seq, int d);
+void launch_mingru_backward(float* d_x, float* d_Wz, float* d_Wh,
+                              float* d_h_next,
+                              const float* d_h_out, const float* x,
+                              const float* h_all, const float* h_init,
+                              const float* Wz, const float* Wh,
+                              int batch, int seq, int d);
+void launch_slot_memory_backward(float* d_x, float* d_keys, float* d_values,
+                                  const float* d_out, const float* x,
+                                  const float* keys, const float* values,
+                                  int batch, int seq, int d, int n_slots);
+void launch_swiglu_backward_activation(float* d_up, float* d_gate,
+                                        const float* d_hidden,
+                                        const float* up, const float* gate,
+                                        int total);
 }
 
 namespace rnet::gpu {
@@ -312,6 +341,183 @@ void CudaBackend::slot_query(void* out, const void* x, const void* slot_keys,
                        static_cast<const float*>(slot_keys),
                        static_cast<const float*>(slot_values),
                        d, n_slots);
+}
+
+// ── Extended GEMM and Utility ───────────────────────────────────────────────
+
+void CudaBackend::gemm_ex(void* C, const void* A, const void* B,
+                            int M, int N, int K,
+                            bool trans_a, bool trans_b,
+                            float alpha, float beta_val) {
+    cublasHandle_t handle = get_cublas();
+
+    // Row-major C[M,N] = alpha * op(A) @ op(B) + beta * C
+    // For cuBLAS col-major: compute C^T = op(B)^T @ op(A)^T
+    // Swap A/B and flip transpose flags for row-major → col-major conversion.
+    int lda = trans_a ? M : K;  // A stored as [trans_a ? K : M, trans_a ? M : K]
+    int ldb = trans_b ? K : N;  // B stored as [trans_b ? N : K, trans_b ? K : N]
+    int ldc = N;
+
+    cublasOperation_t cublas_opA = trans_b ? CUBLAS_OP_T : CUBLAS_OP_N;
+    cublasOperation_t cublas_opB = trans_a ? CUBLAS_OP_T : CUBLAS_OP_N;
+
+    cublasSgemm(handle, cublas_opA, cublas_opB,
+                N, M, K, &alpha,
+                static_cast<const float*>(B), ldb,
+                static_cast<const float*>(A), lda,
+                &beta_val,
+                static_cast<float*>(C), ldc);
+}
+
+void CudaBackend::memset_zero(void* ptr, size_t bytes) {
+    cudaMemset(ptr, 0, bytes);
+}
+
+// ── Backward Kernels ────────────────────────────────────────────────────────
+
+void CudaBackend::cross_entropy_backward(void* d_logits, const void* logits,
+                                           const int* targets,
+                                           int batch, int seq, int vocab) {
+    launch_cross_entropy_backward(static_cast<float*>(d_logits),
+                                   static_cast<const float*>(logits),
+                                   targets, batch, seq, vocab);
+}
+
+void CudaBackend::embedding_backward(void* d_weight, const void* d_out,
+                                       const int* tokens,
+                                       int batch, int seq, int d_model, int vocab_size) {
+    (void)vocab_size;  // d_weight is [vocab_size, d_model], zeroed by caller
+    launch_embedding_backward(static_cast<float*>(d_weight),
+                               static_cast<const float*>(d_out),
+                               tokens, batch, seq, d_model);
+}
+
+void CudaBackend::rmsnorm_backward(void* d_x, void* d_scale, const void* d_out,
+                                     const void* x, const void* scale,
+                                     int batch, int seq, int d, float eps) {
+    launch_rmsnorm_backward(static_cast<float*>(d_x),
+                             static_cast<float*>(d_scale),
+                             static_cast<const float*>(d_out),
+                             static_cast<const float*>(x),
+                             static_cast<const float*>(scale),
+                             batch, seq, d, eps);
+}
+
+void CudaBackend::causal_conv_backward(void* d_x, void* d_weights, const void* d_out,
+                                         const void* x, const void* fwd_weights,
+                                         const int* kernel_sizes, int n_branches,
+                                         int batch, int seq, int d) {
+    int max_kernel = 0;
+    for (int i = 0; i < n_branches; ++i) {
+        if (kernel_sizes[i] > max_kernel) max_kernel = kernel_sizes[i];
+    }
+
+    int* d_kernel_sizes;
+    cudaMalloc(&d_kernel_sizes, n_branches * sizeof(int));
+    cudaMemcpy(d_kernel_sizes, kernel_sizes, n_branches * sizeof(int), cudaMemcpyHostToDevice);
+
+    launch_causal_conv_backward(static_cast<float*>(d_x),
+                                 static_cast<float*>(d_weights),
+                                 static_cast<const float*>(d_out),
+                                 static_cast<const float*>(x),
+                                 static_cast<const float*>(fwd_weights),
+                                 d_kernel_sizes, n_branches, max_kernel,
+                                 batch, seq, d);
+
+    cudaFree(d_kernel_sizes);
+}
+
+void CudaBackend::mingru_backward(void* d_x, void* d_Wz, void* d_Wh,
+                                    const void* d_h_out, const void* x,
+                                    const void* h_all, const void* h_init,
+                                    const void* Wz, const void* Wh,
+                                    int batch, int seq, int d) {
+    // Allocate d_h_next buffer (propagated gradient between timesteps)
+    float* d_h_next;
+    cudaMalloc(&d_h_next, batch * d * sizeof(float));
+    cudaMemset(d_h_next, 0, batch * d * sizeof(float));
+
+    launch_mingru_backward(static_cast<float*>(d_x),
+                            static_cast<float*>(d_Wz),
+                            static_cast<float*>(d_Wh),
+                            d_h_next,
+                            static_cast<const float*>(d_h_out),
+                            static_cast<const float*>(x),
+                            static_cast<const float*>(h_all),
+                            static_cast<const float*>(h_init),
+                            static_cast<const float*>(Wz),
+                            static_cast<const float*>(Wh),
+                            batch, seq, d);
+
+    cudaFree(d_h_next);
+}
+
+void CudaBackend::slot_memory_backward(void* d_x, void* d_keys, void* d_values,
+                                         const void* d_out, const void* x,
+                                         const void* keys, const void* values,
+                                         int batch, int seq, int d, int n_slots) {
+    launch_slot_memory_backward(static_cast<float*>(d_x),
+                                 static_cast<float*>(d_keys),
+                                 static_cast<float*>(d_values),
+                                 static_cast<const float*>(d_out),
+                                 static_cast<const float*>(x),
+                                 static_cast<const float*>(keys),
+                                 static_cast<const float*>(values),
+                                 batch, seq, d, n_slots);
+}
+
+void CudaBackend::swiglu_backward(void* d_x, void* d_W_up, void* d_W_gate, void* d_W_down,
+                                    const void* d_out, const void* x,
+                                    const void* W_up, const void* W_gate, const void* W_down,
+                                    int batch, int seq, int d_model, int d_ff) {
+    int BS = batch * seq;
+
+    // Allocate temporaries for recomputed forward intermediates
+    float* up_buf;
+    float* gate_buf;
+    float* d_hidden;
+    cudaMalloc(&up_buf, BS * d_ff * sizeof(float));
+    cudaMalloc(&gate_buf, BS * d_ff * sizeof(float));
+    cudaMalloc(&d_hidden, BS * d_ff * sizeof(float));
+
+    // Recompute forward: up = x @ W_up, gate = x @ W_gate
+    gemm(up_buf, x, W_up, BS, d_ff, d_model, 1.0f, 0.0f);
+    gemm(gate_buf, x, W_gate, BS, d_ff, d_model, 1.0f, 0.0f);
+
+    // d_hidden = d_out @ W_down^T  : [BS, d_model] @ [d_model, d_ff] (transposed)
+    gemm_ex(d_hidden, d_out, W_down, BS, d_ff, d_model, false, true, 1.0f, 0.0f);
+
+    // Compute forward hidden = up * silu(gate) for d_W_down gradient
+    float* hidden_fwd;
+    cudaMalloc(&hidden_fwd, BS * d_ff * sizeof(float));
+    launch_swiglu_activation(hidden_fwd, up_buf, gate_buf, BS * d_ff);
+
+    // d_W_down += hidden^T @ d_out : [d_ff, BS] @ [BS, d_model] = [d_ff, d_model]
+    gemm_ex(d_W_down, hidden_fwd, d_out, d_ff, d_model, BS, true, false, 1.0f, 1.0f);
+    cudaFree(hidden_fwd);
+
+    // Backward activation: compute d_up_grad, d_gate_grad from d_hidden, up, gate
+    float* d_up_grad;
+    float* d_gate_grad;
+    cudaMalloc(&d_up_grad, BS * d_ff * sizeof(float));
+    cudaMalloc(&d_gate_grad, BS * d_ff * sizeof(float));
+    launch_swiglu_backward_activation(d_up_grad, d_gate_grad, d_hidden, up_buf, gate_buf, BS * d_ff);
+
+    // d_x = d_up_grad @ W_up^T + d_gate_grad @ W_gate^T
+    gemm_ex(d_x, d_up_grad, W_up, BS, d_model, d_ff, false, true, 1.0f, 0.0f);
+    gemm_ex(d_x, d_gate_grad, W_gate, BS, d_model, d_ff, false, true, 1.0f, 1.0f);
+
+    // d_W_up += x^T @ d_up_grad : [d_model, BS] @ [BS, d_ff] = [d_model, d_ff]
+    gemm_ex(d_W_up, x, d_up_grad, d_model, d_ff, BS, true, false, 1.0f, 1.0f);
+
+    // d_W_gate += x^T @ d_gate_grad : [d_model, BS] @ [BS, d_ff] = [d_model, d_ff]
+    gemm_ex(d_W_gate, x, d_gate_grad, d_model, d_ff, BS, true, false, 1.0f, 1.0f);
+
+    cudaFree(up_buf);
+    cudaFree(gate_buf);
+    cudaFree(d_hidden);
+    cudaFree(d_up_grad);
+    cudaFree(d_gate_grad);
 }
 
 }  // namespace rnet::gpu

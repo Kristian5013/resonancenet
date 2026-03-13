@@ -7,6 +7,7 @@
 #include "core/random.h"
 #include "core/serialize.h"
 #include "core/time.h"
+#include "net/addr_man.h"
 #include "net/conn_manager.h"
 
 namespace rnet::net {
@@ -15,8 +16,8 @@ namespace rnet::net {
 // Construction
 // ---------------------------------------------------------------------------
 
-MsgHandler::MsgHandler(ConnManager& connman)
-    : connman_(connman)
+MsgHandler::MsgHandler(ConnManager& connman, AddrManager* addrman)
+    : connman_(connman), addrman_(addrman)
 {}
 
 MsgHandler::~MsgHandler() = default;
@@ -176,7 +177,15 @@ void MsgHandler::process_addr(CConnection& conn, const std::string& /*cmd*/,
              static_cast<unsigned long long>(count),
              static_cast<unsigned long long>(conn.id()));
 
-    // TODO: Forward to AddrManager for storage
+    // Forward to AddrManager for storage
+    if (addrman_ && !addrs.empty()) {
+        std::string source = conn.addr().to_string();
+        addrman_->add(addrs, source);
+
+        LogDebug(NET, "Added %llu addresses from peer %llu to addrman",
+                 static_cast<unsigned long long>(addrs.size()),
+                 static_cast<unsigned long long>(conn.id()));
+    }
 }
 
 void MsgHandler::process_getaddr(CConnection& conn,
@@ -185,11 +194,22 @@ void MsgHandler::process_getaddr(CConnection& conn,
     LogDebug(NET, "Received getaddr from peer %llu",
              static_cast<unsigned long long>(conn.id()));
 
-    // TODO: Respond with known addresses from AddrManager
-    // For now, send empty addr message
+    // Respond with known addresses from AddrManager
+    std::vector<CNetAddr> addrs;
+    if (addrman_) {
+        addrs = addrman_->get_addr(1000);
+    }
+
     core::DataStream addr_payload;
-    core::serialize_compact_size(addr_payload, 0);
+    core::serialize_compact_size(addr_payload, addrs.size());
+    for (const auto& addr : addrs) {
+        addr.serialize(addr_payload);
+    }
     conn.send_message(msg::ADDR, addr_payload.span());
+
+    LogDebug(NET, "Sent %zu addresses to peer %llu",
+             addrs.size(),
+             static_cast<unsigned long long>(conn.id()));
 }
 
 // ---------------------------------------------------------------------------

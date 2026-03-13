@@ -95,6 +95,19 @@ if(WIN32)
     target_link_libraries(rnet-miner PRIVATE ws2_32)
 endif()
 
+# ─── Training tools ──────────────────────────────────────────────────
+
+# rnet-prepare-dataset — converts text to binary tokenized format
+add_executable(rnet-prepare-dataset tools/prepare_dataset.cpp)
+
+# rnet-train-test — standalone GPU training test
+add_executable(rnet-train-test tools/train_test.cpp)
+target_include_directories(rnet-train-test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(rnet-train-test PRIVATE
+    rnet_training rnet_gpu rnet_consensus rnet_primitives
+    rnet_script rnet_crypto rnet_util
+)
+
 # ─── Test suite ──────────────────────────────────────────────────────
 
 add_subdirectory(test)

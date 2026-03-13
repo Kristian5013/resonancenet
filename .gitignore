@@ -10,3 +10,11 @@ build/
 CMakeSettings.json
 .cache/
 compile_commands.json
+testdata*/
+*.bin
+*.rnet
+node*.log
+build_rnetd.bat
+build_tools.bat
+build_wallet.bat
+.vscode/

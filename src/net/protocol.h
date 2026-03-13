@@ -11,9 +11,28 @@
 
 namespace rnet::net {
 
-/// P2P network magic bytes: "RNET"
-static constexpr std::array<uint8_t, 4> NETWORK_MAGIC = {
-    0x52, 0x4E, 0x45, 0x54
+/// Default P2P network magic bytes: "RNET" (mainnet)
+/// The active magic is set at startup via set_network_magic() based on
+/// the selected network (mainnet/testnet/regtest).
+inline std::array<uint8_t, 4>& active_network_magic() {
+    static std::array<uint8_t, 4> magic = {0x52, 0x4E, 0x45, 0x54};  // "RNET"
+    return magic;
+}
+
+/// Set the active network magic (call once at startup before any P2P I/O).
+inline void set_network_magic(const std::array<uint8_t, 4>& magic) {
+    active_network_magic() = magic;
+}
+
+/// Convenience alias — returns the currently active magic bytes.
+/// All serialization / parsing code should use this instead of a constant.
+inline const std::array<uint8_t, 4>& NETWORK_MAGIC_REF() {
+    return active_network_magic();
+}
+
+/// Legacy constant kept for backward-compatible default initialization.
+static constexpr std::array<uint8_t, 4> MAINNET_MAGIC = {
+    0x52, 0x4E, 0x45, 0x54  // "RNET"
 };
 
 /// Default P2P port
@@ -145,7 +164,7 @@ struct CNetAddr {
 struct MessageHeader {
     static constexpr size_t HEADER_SIZE = 4 + COMMAND_SIZE + 4 + 4;
 
-    std::array<uint8_t, 4> magic = NETWORK_MAGIC;
+    std::array<uint8_t, 4> magic = MAINNET_MAGIC;
     std::array<char, COMMAND_SIZE> command{};
     uint32_t payload_size = 0;
     uint32_t checksum = 0;

@@ -15,6 +15,7 @@
 
 namespace rnet::net {
 
+class AddrManager;
 class ConnManager;
 
 /// Callback types for chain/mempool integration
@@ -45,7 +46,7 @@ using InvCallback = std::function<void(
 /// dependencies.
 class MsgHandler {
 public:
-    explicit MsgHandler(ConnManager& connman);
+    explicit MsgHandler(ConnManager& connman, AddrManager* addrman = nullptr);
     ~MsgHandler();
 
     // Non-copyable
@@ -116,6 +117,7 @@ public:
 
 private:
     ConnManager& connman_;
+    AddrManager* addrman_ = nullptr;
 
     // Callbacks
     BlockCallback on_new_block_;

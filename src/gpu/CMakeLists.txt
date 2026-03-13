@@ -42,8 +42,9 @@ if(CUDAToolkit_FOUND)
     set_source_files_properties(cuda/kernels.cu PROPERTIES LANGUAGE CUDA)
     set_target_properties(rnet_gpu PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
         CUDA_STANDARD 17
-        CUDA_ARCHITECTURES "75;80;86;89;90"
+        CUDA_ARCHITECTURES native
     )
     target_compile_definitions(rnet_gpu PUBLIC RNET_HAS_CUDA)
     target_link_libraries(rnet_gpu PRIVATE CUDA::cudart CUDA::cublas)

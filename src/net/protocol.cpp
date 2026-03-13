@@ -84,7 +84,7 @@ std::string MessageHeader::get_command() const {
 }
 
 bool MessageHeader::valid_magic() const {
-    return magic == NETWORK_MAGIC;
+    return magic == NETWORK_MAGIC_REF();
 }
 
 std::string inv_type_string(InvType type) {

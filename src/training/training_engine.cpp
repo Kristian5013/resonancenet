@@ -4,6 +4,10 @@
 #include "gpu/backend.h"
 #include "gpu/tensor.h"
 
+#include <cmath>
+#include <cstring>
+#include <random>
+
 namespace rnet::training {
 
 using rnet::gpu::GpuTensor;
@@ -28,6 +32,13 @@ void TrainingEngine::free_resources() {
     act_ff_.reset();
     act_logits_.reset();
 
+    // Release per-layer saved activations and gradient buffers
+    layer_acts_.clear();
+    grad_residual_.reset();
+    grad_temp_.reset();
+    grad_logits_.reset();
+    grad_skip_.reset();
+
     // Release weight/optimizer/gradient tensors
     weights_.clear();
     adam_m_.clear();
@@ -37,22 +48,51 @@ void TrainingEngine::free_resources() {
     // Release token buffers
     if (gpu_tokens_) { backend_.free(gpu_tokens_); gpu_tokens_ = nullptr; }
     if (gpu_targets_) { backend_.free(gpu_targets_); gpu_targets_ = nullptr; }
+    if (ones_buf_) { backend_.free(ones_buf_); ones_buf_ = nullptr; }
 
     lr_schedule_.reset();
     initialized_ = false;
 }
 
 void TrainingEngine::alloc_weight(const std::string& name, std::vector<int64_t> shape) {
-    auto w = std::make_unique<GpuTensor>(backend_, shape, DType::BF16);
+    auto w = std::make_unique<GpuTensor>(backend_, shape, DType::FP32);
     auto m = std::make_unique<GpuTensor>(backend_, shape, DType::FP32);
     auto v = std::make_unique<GpuTensor>(backend_, shape, DType::FP32);
-    auto g = std::make_unique<GpuTensor>(backend_, shape, DType::BF16);
+    auto g = std::make_unique<GpuTensor>(backend_, shape, DType::FP32);
 
-    // Zero-initialize optimizer state
-    std::vector<uint8_t> zeros(m->size_bytes(), 0);
-    m->copy_from_host(zeros.data());
-    zeros.resize(v->size_bytes(), 0);
-    v->copy_from_host(zeros.data());
+    // Zero-initialize optimizer state and gradients
+    backend_.memset_zero(m->data(), m->size_bytes());
+    backend_.memset_zero(v->data(), v->size_bytes());
+    backend_.memset_zero(g->data(), g->size_bytes());
+
+    // Initialize weights on CPU and upload
+    int64_t numel = w->numel();
+    std::vector<float> init_data(numel);
+    static std::mt19937 rng(42);
+
+    bool is_scale = (name.find("rmsnorm") != std::string::npos && name.find("scale") != std::string::npos);
+
+    if (is_scale) {
+        // RMSNorm scale: initialize to 1.0
+        std::fill(init_data.begin(), init_data.end(), 1.0f);
+    } else if (shape.size() >= 2) {
+        // Weight matrices: Xavier normal initialization
+        int64_t fan_in = shape[0];
+        int64_t fan_out = shape[1];
+        float std_dev = std::sqrt(2.0f / static_cast<float>(fan_in + fan_out));
+        std::normal_distribution<float> dist(0.0f, std_dev);
+        for (int64_t i = 0; i < numel; ++i) {
+            init_data[i] = dist(rng);
+        }
+    } else {
+        // 1D weights (conv, etc.): small uniform
+        float bound = 0.02f;
+        std::uniform_real_distribution<float> dist(-bound, bound);
+        for (int64_t i = 0; i < numel; ++i) {
+            init_data[i] = dist(rng);
+        }
+    }
+    w->copy_from_host(init_data.data());
 
     weights_[name] = std::move(w);
     adam_m_[name] = std::move(m);
@@ -64,28 +104,45 @@ void TrainingEngine::alloc_activations(int batch_size, int seq_len) {
     int d = static_cast<int>(config_.d_model);
     int d_ff = static_cast<int>(config_.d_ff);
     int vocab = static_cast<int>(config_.vocab_size);
+    int n_layers = static_cast<int>(config_.n_layers);
 
-    act_input_ = std::make_unique<GpuTensor>(
-        backend_, std::vector<int64_t>{batch_size, seq_len, d}, DType::BF16);
-    act_residual_ = std::make_unique<GpuTensor>(
-        backend_, std::vector<int64_t>{batch_size, seq_len, d}, DType::BF16);
-    act_norm_ = std::make_unique<GpuTensor>(
-        backend_, std::vector<int64_t>{batch_size, seq_len, d}, DType::BF16);
-    act_conv_ = std::make_unique<GpuTensor>(
-        backend_, std::vector<int64_t>{batch_size, seq_len, d}, DType::BF16);
-    act_gru_ = std::make_unique<GpuTensor>(
-        backend_, std::vector<int64_t>{batch_size, seq_len, d}, DType::BF16);
-    act_gru_state_ = std::make_unique<GpuTensor>(
-        backend_, std::vector<int64_t>{batch_size, d}, DType::BF16);
-    act_slot_ = std::make_unique<GpuTensor>(
-        backend_, std::vector<int64_t>{batch_size, seq_len, d}, DType::BF16);
-    act_ff_ = std::make_unique<GpuTensor>(
-        backend_, std::vector<int64_t>{batch_size, seq_len, d}, DType::BF16);
-    act_logits_ = std::make_unique<GpuTensor>(
-        backend_, std::vector<int64_t>{batch_size, seq_len, vocab}, DType::BF16);
+    // Shared activation buffers (used during forward and backward)
+    act_input_ = std::make_unique<GpuTensor>(backend_, std::vector<int64_t>{batch_size, seq_len, d}, DType::FP32);
+    act_residual_ = std::make_unique<GpuTensor>(backend_, std::vector<int64_t>{batch_size, seq_len, d}, DType::FP32);
+    act_norm_ = std::make_unique<GpuTensor>(backend_, std::vector<int64_t>{batch_size, seq_len, d}, DType::FP32);
+    act_conv_ = std::make_unique<GpuTensor>(backend_, std::vector<int64_t>{batch_size, seq_len, d}, DType::FP32);
+    act_gru_ = std::make_unique<GpuTensor>(backend_, std::vector<int64_t>{batch_size, seq_len, d}, DType::FP32);
+    act_gru_state_ = std::make_unique<GpuTensor>(backend_, std::vector<int64_t>{batch_size, d}, DType::FP32);
+    act_slot_ = std::make_unique<GpuTensor>(backend_, std::vector<int64_t>{batch_size, seq_len, d}, DType::FP32);
+    act_ff_ = std::make_unique<GpuTensor>(backend_, std::vector<int64_t>{batch_size, seq_len, d}, DType::FP32);
+    act_logits_ = std::make_unique<GpuTensor>(backend_, std::vector<int64_t>{batch_size, seq_len, vocab}, DType::FP32);
+
+    // Per-layer saved activations for backward pass
+    layer_acts_.resize(n_layers);
+    for (int l = 0; l < n_layers; ++l) {
+        auto& la = layer_acts_[l];
+        la.residual_in = std::make_unique<GpuTensor>(backend_, std::vector<int64_t>{batch_size, seq_len, d}, DType::FP32);
+        la.norm1_out = std::make_unique<GpuTensor>(backend_, std::vector<int64_t>{batch_size, seq_len, d}, DType::FP32);
+        la.conv_out = std::make_unique<GpuTensor>(backend_, std::vector<int64_t>{batch_size, seq_len, d}, DType::FP32);
+        la.gru_h_init = std::make_unique<GpuTensor>(backend_, std::vector<int64_t>{batch_size, d}, DType::FP32);
+        la.gru_out = std::make_unique<GpuTensor>(backend_, std::vector<int64_t>{batch_size, seq_len, d}, DType::FP32);
+        la.slot_out = std::make_unique<GpuTensor>(backend_, std::vector<int64_t>{batch_size, seq_len, d}, DType::FP32);
+        la.norm2_out = std::make_unique<GpuTensor>(backend_, std::vector<int64_t>{batch_size, seq_len, d}, DType::FP32);
+    }
+
+    // Gradient buffers
+    grad_residual_ = std::make_unique<GpuTensor>(backend_, std::vector<int64_t>{batch_size, seq_len, d}, DType::FP32);
+    grad_temp_ = std::make_unique<GpuTensor>(backend_, std::vector<int64_t>{batch_size, seq_len, d}, DType::FP32);
+    grad_logits_ = std::make_unique<GpuTensor>(backend_, std::vector<int64_t>{batch_size, seq_len, vocab}, DType::FP32);
+    grad_skip_ = std::make_unique<GpuTensor>(backend_, std::vector<int64_t>{batch_size, seq_len, d}, DType::FP32);
 
     gpu_tokens_ = backend_.alloc(static_cast<size_t>(batch_size) * seq_len * sizeof(int));
     gpu_targets_ = backend_.alloc(static_cast<size_t>(batch_size) * seq_len * sizeof(int));
+
+    // Scalar buffer for gemm-based vector add: contains 1.0f
+    ones_buf_ = backend_.alloc(sizeof(float));
+    float one = 1.0f;
+    backend_.copy_to_device(ones_buf_, &one, sizeof(float));
 }
 
 Result<void> TrainingEngine::init(const ModelConfig& config) {
@@ -113,16 +170,15 @@ Result<void> TrainingEngine::init(const ModelConfig& config) {
         // RMSNorm scale
         alloc_weight(prefix + "rmsnorm.scale", {d});
 
-        // Causal convolution weights
-        // Total conv weight size: sum of active kernel_size * d_model
-        int64_t total_conv_params = 0;
+        // Causal convolution weights: padded layout [n_branches, max_kernel, d]
+        // CUDA kernels index as weights[br * max_kernel * d + k * d + i]
+        int max_kernel = 0;
         for (int i = 0; i < config_.n_conv_branches; ++i) {
-            if (config_.kernel_sizes[i] > 0) {
-                total_conv_params += static_cast<int64_t>(config_.kernel_sizes[i]) * d;
-            }
+            if (config_.kernel_sizes[i] > max_kernel) max_kernel = config_.kernel_sizes[i];
         }
-        if (total_conv_params > 0) {
-            alloc_weight(prefix + "conv.weight", {total_conv_params});
+        if (max_kernel > 0 && config_.n_conv_branches > 0) {
+            int64_t conv_weight_size = static_cast<int64_t>(config_.n_conv_branches) * max_kernel * d;
+            alloc_weight(prefix + "conv.weight", {conv_weight_size});
         }
 
         // MinGRU weights
@@ -235,102 +291,214 @@ float TrainingEngine::forward_pass(int batch_size, int seq_len) {
     int n_slots = static_cast<int>(config_.n_slots);
 
     // Embedding lookup
-    backend_.embedding_forward(
-        act_input_->data(),
-        weights_.at("embedding.weight")->data(),
-        static_cast<int*>(gpu_tokens_),
-        batch_size, seq_len, d);
-
-    // Copy to residual stream
-    backend_.copy_to_device(act_residual_->data(), act_input_->data(),
-                             act_input_->size_bytes());
+    backend_.embedding_forward(act_input_->data(), weights_.at("embedding.weight")->data(),
+                                static_cast<int*>(gpu_tokens_), batch_size, seq_len, d);
+    backend_.copy_to_device(act_residual_->data(), act_input_->data(), act_input_->size_bytes());
 
     // Zero-init GRU state
-    {
-        std::vector<uint8_t> zeros(act_gru_state_->size_bytes(), 0);
-        act_gru_state_->copy_from_host(zeros.data());
-    }
+    backend_.memset_zero(act_gru_state_->data(), act_gru_state_->size_bytes());
 
-    // Per-layer forward pass
     for (uint32_t layer = 0; layer < config_.n_layers; ++layer) {
         std::string prefix = "layers." + std::to_string(layer) + ".";
+        auto& la = layer_acts_[layer];
 
-        // RMSNorm
-        backend_.rmsnorm_forward(
-            act_norm_->data(), act_residual_->data(),
-            weights_.at(prefix + "rmsnorm.scale")->data(),
-            batch_size, seq_len, d);
+        // Save residual input for backward
+        backend_.copy_to_device(la.residual_in->data(), act_residual_->data(), act_residual_->size_bytes());
 
-        // Causal convolution
+        // RMSNorm 1
+        backend_.rmsnorm_forward(act_norm_->data(), act_residual_->data(),
+                                  weights_.at(prefix + "rmsnorm.scale")->data(),
+                                  batch_size, seq_len, d);
+        backend_.copy_to_device(la.norm1_out->data(), act_norm_->data(), act_norm_->size_bytes());
+
+        // Causal conv
         std::string conv_name = prefix + "conv.weight";
         auto conv_it = weights_.find(conv_name);
         if (conv_it != weights_.end()) {
-            backend_.causal_conv_forward(
-                act_conv_->data(), act_norm_->data(),
-                conv_it->second->data(),
-                kernel_sizes_host_, config_.n_conv_branches,
-                batch_size, seq_len, d);
+            backend_.causal_conv_forward(act_conv_->data(), act_norm_->data(),
+                                          conv_it->second->data(), kernel_sizes_host_,
+                                          config_.n_conv_branches, batch_size, seq_len, d);
         } else {
-            // No conv weights — pass through
-            backend_.copy_to_device(act_conv_->data(), act_norm_->data(),
-                                     act_norm_->size_bytes());
+            backend_.copy_to_device(act_conv_->data(), act_norm_->data(), act_norm_->size_bytes());
         }
+        backend_.copy_to_device(la.conv_out->data(), act_conv_->data(), act_conv_->size_bytes());
+
+        // Save GRU initial state
+        backend_.copy_to_device(la.gru_h_init->data(), act_gru_state_->data(), act_gru_state_->size_bytes());
 
         // MinGRU
-        backend_.mingru_forward(
-            act_gru_->data(), act_gru_state_->data(),
-            act_conv_->data(), act_gru_state_->data(),
-            weights_.at(prefix + "mingru.Wz")->data(),
-            weights_.at(prefix + "mingru.Wh")->data(),
-            batch_size, seq_len, d);
+        backend_.mingru_forward(act_gru_->data(), act_gru_state_->data(),
+                                 act_conv_->data(), act_gru_state_->data(),
+                                 weights_.at(prefix + "mingru.Wz")->data(),
+                                 weights_.at(prefix + "mingru.Wh")->data(),
+                                 batch_size, seq_len, d);
+        backend_.copy_to_device(la.gru_out->data(), act_gru_->data(), act_gru_->size_bytes());
 
         // Slot memory
-        backend_.slot_memory_forward(
-            act_slot_->data(), act_gru_->data(),
-            weights_.at(prefix + "slot.keys")->data(),
-            weights_.at(prefix + "slot.values")->data(),
-            batch_size, seq_len, d, n_slots);
+        backend_.slot_memory_forward(act_slot_->data(), act_gru_->data(),
+                                      weights_.at(prefix + "slot.keys")->data(),
+                                      weights_.at(prefix + "slot.values")->data(),
+                                      batch_size, seq_len, d, n_slots);
+        backend_.copy_to_device(la.slot_out->data(), act_slot_->data(), act_slot_->size_bytes());
 
         // RMSNorm 2
-        backend_.rmsnorm_forward(
-            act_norm_->data(), act_slot_->data(),
-            weights_.at(prefix + "rmsnorm2.scale")->data(),
-            batch_size, seq_len, d);
+        backend_.rmsnorm_forward(act_norm_->data(), act_slot_->data(),
+                                  weights_.at(prefix + "rmsnorm2.scale")->data(),
+                                  batch_size, seq_len, d);
+        backend_.copy_to_device(la.norm2_out->data(), act_norm_->data(), act_norm_->size_bytes());
 
         // SwiGLU FFN
-        backend_.swiglu_forward(
-            act_ff_->data(), act_norm_->data(),
+        backend_.swiglu_forward(act_ff_->data(), act_norm_->data(),
+                                 weights_.at(prefix + "ffn.W_up")->data(),
+                                 weights_.at(prefix + "ffn.W_gate")->data(),
+                                 weights_.at(prefix + "ffn.W_down")->data(),
+                                 batch_size, seq_len, d, d_ff);
+
+        // Residual connection: residual += ff_out
+        // Uses gemm trick: residual[N,1] = 1.0 * ff[N,1] @ [1.0] + 1.0 * residual[N,1]
+        int total_elems = batch_size * seq_len * d;
+        backend_.gemm(act_residual_->data(), act_ff_->data(), ones_buf_,
+                       total_elems, 1, 1, 1.0f, 1.0f);
+    }
+
+    // Output projection
+    backend_.gemm(act_logits_->data(), act_residual_->data(),
+                   weights_.at("output.weight")->data(),
+                   batch_size * seq_len, vocab, d);
+
+    // Cross-entropy loss
+    float loss = 0.0f;
+    backend_.cross_entropy_loss(&loss, act_logits_->data(),
+                                 static_cast<int*>(gpu_targets_), batch_size, seq_len, vocab);
+    backend_.synchronize();
+    return loss;
+}
+
+void TrainingEngine::backward_pass(int batch_size, int seq_len) {
+    int d = static_cast<int>(config_.d_model);
+    int d_ff = static_cast<int>(config_.d_ff);
+    int vocab = static_cast<int>(config_.vocab_size);
+    int n_slots = static_cast<int>(config_.n_slots);
+    int BS = batch_size * seq_len;
+
+    // Zero all gradients
+    for (auto& [name, grad] : grads_) {
+        backend_.memset_zero(grad->data(), grad->size_bytes());
+    }
+
+    // 1. Cross-entropy backward -> grad_logits_
+    backend_.cross_entropy_backward(grad_logits_->data(), act_logits_->data(),
+                                     static_cast<int*>(gpu_targets_), batch_size, seq_len, vocab);
+
+    // 2. Output projection backward:
+    //    logits = residual @ output_weight  where residual [BS, d], output_weight [d, vocab]
+    //    d_residual = d_logits @ output_weight^T  [BS, d]
+    //    d_output_weight += residual^T @ d_logits  [d, vocab]
+    backend_.gemm_ex(grad_residual_->data(), grad_logits_->data(),
+                      weights_.at("output.weight")->data(),
+                      BS, d, vocab, false, true);  // d_logits @ W^T
+    backend_.gemm_ex(grads_.at("output.weight")->data(), act_residual_->data(),
+                      grad_logits_->data(),
+                      d, vocab, BS, true, false, 1.0f, 1.0f);  // residual^T @ d_logits, accumulate
+
+    // 3. Backward through layers in reverse
+    for (int layer = static_cast<int>(config_.n_layers) - 1; layer >= 0; --layer) {
+        std::string prefix = "layers." + std::to_string(layer) + ".";
+        auto& la = layer_acts_[layer];
+
+        // Save incoming gradient for skip connection: d_skip = d_residual
+        backend_.copy_to_device(grad_skip_->data(), grad_residual_->data(), grad_residual_->size_bytes());
+
+        // --- SwiGLU backward ---
+        // Forward: ff_out = swiglu(norm2_out), input was norm2_out
+        backend_.swiglu_backward(
+            grad_temp_->data(),  // d_x (d_norm2)
+            grads_.at(prefix + "ffn.W_up")->data(),
+            grads_.at(prefix + "ffn.W_gate")->data(),
+            grads_.at(prefix + "ffn.W_down")->data(),
+            grad_residual_->data(),  // d_out (d_ff)
+            la.norm2_out->data(),    // x (input to swiglu)
             weights_.at(prefix + "ffn.W_up")->data(),
             weights_.at(prefix + "ffn.W_gate")->data(),
             weights_.at(prefix + "ffn.W_down")->data(),
             batch_size, seq_len, d, d_ff);
 
-        // Residual connection: residual = residual + ff_out
-        // The backend handles residual addition within the forward kernels.
-        // We update residual_buf to hold the layer output.
-        backend_.copy_to_device(act_residual_->data(), act_ff_->data(),
-                                 act_ff_->size_bytes());
+        // --- RMSNorm2 backward ---
+        // Forward: norm2 = rmsnorm(slot_out), input was slot_out
+        backend_.rmsnorm_backward(
+            grad_residual_->data(),  // reuse as d_slot_out
+            grads_.at(prefix + "rmsnorm2.scale")->data(),
+            grad_temp_->data(),    // d_out (d_norm2)
+            la.slot_out->data(),   // x (input to rmsnorm2)
+            weights_.at(prefix + "rmsnorm2.scale")->data(),
+            batch_size, seq_len, d);
+
+        // --- Slot memory backward ---
+        backend_.slot_memory_backward(
+            grad_temp_->data(),  // d_x (d_gru_out)
+            grads_.at(prefix + "slot.keys")->data(),
+            grads_.at(prefix + "slot.values")->data(),
+            grad_residual_->data(),  // d_out (d_slot_out)
+            la.gru_out->data(),      // x (input to slot memory)
+            weights_.at(prefix + "slot.keys")->data(),
+            weights_.at(prefix + "slot.values")->data(),
+            batch_size, seq_len, d, n_slots);
+
+        // --- MinGRU backward ---
+        backend_.mingru_backward(
+            grad_residual_->data(),  // reuse as d_conv_out (d_x for mingru)
+            grads_.at(prefix + "mingru.Wz")->data(),
+            grads_.at(prefix + "mingru.Wh")->data(),
+            grad_temp_->data(),        // d_h_out (d_gru_out)
+            la.conv_out->data(),       // x (input to mingru)
+            la.gru_out->data(),        // h_all (all hidden states)
+            la.gru_h_init->data(),     // h_init
+            weights_.at(prefix + "mingru.Wz")->data(),
+            weights_.at(prefix + "mingru.Wh")->data(),
+            batch_size, seq_len, d);
+
+        // --- Causal conv backward ---
+        std::string conv_name = prefix + "conv.weight";
+        auto conv_it = weights_.find(conv_name);
+        if (conv_it != weights_.end()) {
+            backend_.causal_conv_backward(
+                grad_temp_->data(),  // d_x (d_norm1)
+                grads_.at(conv_name)->data(),
+                grad_residual_->data(),  // d_out (d_conv_out)
+                la.norm1_out->data(),    // x (input to conv)
+                conv_it->second->data(), // forward weights
+                kernel_sizes_host_, config_.n_conv_branches,
+                batch_size, seq_len, d);
+        } else {
+            // No conv -- pass through gradient
+            backend_.copy_to_device(grad_temp_->data(), grad_residual_->data(), grad_residual_->size_bytes());
+        }
+
+        // --- RMSNorm1 backward ---
+        backend_.rmsnorm_backward(
+            grad_residual_->data(),  // d_x (d_residual_in)
+            grads_.at(prefix + "rmsnorm.scale")->data(),
+            grad_temp_->data(),        // d_out (d_norm1)
+            la.residual_in->data(),    // x (input to rmsnorm1)
+            weights_.at(prefix + "rmsnorm.scale")->data(),
+            batch_size, seq_len, d);
+
+        // Add skip-connection gradient: d_residual = d_through_layer + d_skip
+        int total_elems = batch_size * seq_len * d;
+        backend_.gemm(grad_residual_->data(), grad_skip_->data(), ones_buf_,
+                       total_elems, 1, 1, 1.0f, 1.0f);
     }
 
-    // Output projection: logits = residual @ output_weight
-    backend_.gemm(
-        act_logits_->data(), act_residual_->data(),
-        weights_.at("output.weight")->data(),
-        batch_size * seq_len, vocab, d);
-
-    // Cross-entropy loss
-    float loss = 0.0f;
-    backend_.cross_entropy_loss(
-        &loss, act_logits_->data(),
-        static_cast<int*>(gpu_targets_),
-        batch_size, seq_len, vocab);
-
-    backend_.synchronize();
-    return loss;
+    // 4. Embedding backward
+    backend_.embedding_backward(
+        grads_.at("embedding.weight")->data(),
+        grad_residual_->data(),
+        static_cast<int*>(gpu_tokens_),
+        batch_size, seq_len, d, vocab);
 }
 
 void TrainingEngine::optimizer_step(float lr) {
-    int current_step = static_cast<int>(step_);
+    int current_step = static_cast<int>(step_) + 1;  // 1-indexed for bias correction
     constexpr float beta1 = 0.9f;
     constexpr float beta2 = 0.999f;
     constexpr float eps = 1e-8f;
@@ -374,8 +542,11 @@ Result<float> TrainingEngine::train_steps(int n_steps, DataLoader& data) {
         backend_.copy_to_device(gpu_targets_, batch.targets.data(),
                                  static_cast<size_t>(BATCH_SIZE) * seq_len * sizeof(int));
 
-        // Forward pass (computes loss and populates gradients via autograd)
+        // Forward pass (computes loss and saves activations)
         last_loss = forward_pass(BATCH_SIZE, seq_len);
+
+        // Backward pass (computes gradients for all weights)
+        backward_pass(BATCH_SIZE, seq_len);
 
         // Get learning rate for current step
         float lr = lr_schedule_->get_lr(static_cast<int>(step_));

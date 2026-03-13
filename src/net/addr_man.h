@@ -80,8 +80,12 @@ public:
     /// Add DNS seed addresses
     void add_seed(const std::string& hostname, uint16_t port = DEFAULT_PORT);
 
-    /// Get addresses for seeding (hardcoded seeds)
+    /// Get addresses for seeding (hardcoded seeds for the active network)
     static std::vector<CNetAddr> get_default_seeds();
+
+    /// Get addresses for seeding a specific network type.
+    /// Returns hardcoded seed node IPs for mainnet/testnet; empty for regtest.
+    static std::vector<CNetAddr> get_default_seeds(const std::string& network);
 
 private:
     mutable core::Mutex mutex_;

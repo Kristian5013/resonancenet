@@ -69,7 +69,7 @@ private:
     uint64_t step_ = 0;
     bool initialized_ = false;
 
-    /// Named GPU tensors for model weights (BF16).
+    /// Named GPU tensors for model weights (FP32).
     std::unordered_map<std::string, std::unique_ptr<rnet::gpu::GpuTensor>> weights_;
 
     /// AdamW optimizer state: first moment (m) and second moment (v).
@@ -90,9 +90,33 @@ private:
     std::unique_ptr<rnet::gpu::GpuTensor> act_ff_;
     std::unique_ptr<rnet::gpu::GpuTensor> act_logits_;
 
+    /// Per-layer saved activations for backward pass.
+    struct LayerActivations {
+        std::unique_ptr<rnet::gpu::GpuTensor> residual_in;   // [batch, seq, d] input to this layer
+        std::unique_ptr<rnet::gpu::GpuTensor> norm1_out;     // [batch, seq, d] after first rmsnorm
+        std::unique_ptr<rnet::gpu::GpuTensor> conv_out;      // [batch, seq, d] after causal conv
+        std::unique_ptr<rnet::gpu::GpuTensor> gru_h_init;    // [batch, d] GRU initial state for this layer
+        std::unique_ptr<rnet::gpu::GpuTensor> gru_out;       // [batch, seq, d] all GRU outputs
+        std::unique_ptr<rnet::gpu::GpuTensor> slot_out;      // [batch, seq, d] slot memory output
+        std::unique_ptr<rnet::gpu::GpuTensor> norm2_out;     // [batch, seq, d] after second rmsnorm
+    };
+    std::vector<LayerActivations> layer_acts_;
+
+    /// Gradient buffer for the residual stream.
+    std::unique_ptr<rnet::gpu::GpuTensor> grad_residual_;
+    /// Temp gradient buffer.
+    std::unique_ptr<rnet::gpu::GpuTensor> grad_temp_;
+    /// Logits gradient.
+    std::unique_ptr<rnet::gpu::GpuTensor> grad_logits_;
+    /// Saved incoming residual gradient for skip connection.
+    std::unique_ptr<rnet::gpu::GpuTensor> grad_skip_;
+
     /// Token buffers on device.
     void* gpu_tokens_ = nullptr;
     void* gpu_targets_ = nullptr;
+
+    /// Scalar buffer containing 1.0f for gemm-based vector add.
+    void* ones_buf_ = nullptr;
 
     /// LR schedule for training.
     std::unique_ptr<LRSchedule> lr_schedule_;
@@ -111,6 +135,10 @@ private:
 
     /// Run one forward pass, computing loss. Tokens/targets must already be on GPU.
     float forward_pass(int batch_size, int seq_len);
+
+    /// Run backward pass, computing gradients for all weights.
+    /// Must be called after forward_pass(). Populates grads_ map.
+    void backward_pass(int batch_size, int seq_len);
 
     /// Run one optimizer step on all weights.
     void optimizer_step(float lr);

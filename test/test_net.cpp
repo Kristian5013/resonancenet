@@ -15,10 +15,13 @@ using namespace rnet::net;
 // ─── Protocol constants ─────────────────────────────────────────────
 
 TEST(net_magic_bytes) {
-    ASSERT_EQ(NETWORK_MAGIC[0], uint8_t(0x52));  // 'R'
-    ASSERT_EQ(NETWORK_MAGIC[1], uint8_t(0x4E));  // 'N'
-    ASSERT_EQ(NETWORK_MAGIC[2], uint8_t(0x45));  // 'E'
-    ASSERT_EQ(NETWORK_MAGIC[3], uint8_t(0x54));  // 'T'
+    // Default (mainnet) magic
+    ASSERT_EQ(MAINNET_MAGIC[0], uint8_t(0x52));  // 'R'
+    ASSERT_EQ(MAINNET_MAGIC[1], uint8_t(0x4E));  // 'N'
+    ASSERT_EQ(MAINNET_MAGIC[2], uint8_t(0x45));  // 'E'
+    ASSERT_EQ(MAINNET_MAGIC[3], uint8_t(0x54));  // 'T'
+    // Active magic should also default to mainnet
+    ASSERT_EQ(NETWORK_MAGIC_REF()[0], uint8_t(0x52));
 }
 
 TEST(net_default_port) {
@@ -118,7 +121,7 @@ TEST(net_message_header_serialize) {
     core::DataStream ds;
 
     // Write magic bytes
-    ds.write(NETWORK_MAGIC.data(), 4);
+    ds.write(MAINNET_MAGIC.data(), 4);
 
     // Write command (12 bytes, zero-padded)
     char cmd[COMMAND_SIZE] = {};

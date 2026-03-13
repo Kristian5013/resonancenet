@@ -36,7 +36,7 @@ std::vector<uint8_t> Transport::serialize_message(
     std::span<const uint8_t> payload)
 {
     MessageHeader hdr;
-    hdr.magic = NETWORK_MAGIC;
+    hdr.magic = NETWORK_MAGIC_REF();
     hdr.set_command(command);
     hdr.payload_size = static_cast<uint32_t>(payload.size());
     hdr.checksum = compute_checksum(payload);
@@ -116,10 +116,11 @@ bool Transport::try_parse_header() {
     }
 
     while (recv_buf_.size() >= MessageHeader::HEADER_SIZE) {
-        bool magic_ok = (recv_buf_[0] == NETWORK_MAGIC[0] &&
-                         recv_buf_[1] == NETWORK_MAGIC[1] &&
-                         recv_buf_[2] == NETWORK_MAGIC[2] &&
-                         recv_buf_[3] == NETWORK_MAGIC[3]);
+        const auto& magic = NETWORK_MAGIC_REF();
+        bool magic_ok = (recv_buf_[0] == magic[0] &&
+                         recv_buf_[1] == magic[1] &&
+                         recv_buf_[2] == magic[2] &&
+                         recv_buf_[3] == magic[3]);
         if (magic_ok) break;
         recv_buf_.erase(recv_buf_.begin());
     }

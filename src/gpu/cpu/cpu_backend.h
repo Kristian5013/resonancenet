@@ -48,6 +48,39 @@ public:
     void gemm(void* C, const void* A, const void* B,
                int M, int N, int K, float alpha, float beta) override;
 
+    void gemm_ex(void* C, const void* A, const void* B,
+                  int M, int N, int K,
+                  bool trans_a, bool trans_b,
+                  float alpha, float beta) override;
+    void memset_zero(void* ptr, size_t bytes) override;
+
+    // === Backward kernels ===
+    void cross_entropy_backward(void* d_logits, const void* logits, const int* targets,
+                                 int batch, int seq, int vocab) override;
+    void embedding_backward(void* d_weight, const void* d_out, const int* tokens,
+                             int batch, int seq, int d_model, int vocab_size) override;
+    void rmsnorm_backward(void* d_x, void* d_scale, const void* d_out,
+                           const void* x, const void* scale,
+                           int batch, int seq, int d, float eps) override;
+    void causal_conv_backward(void* d_x, void* d_weights, const void* d_out,
+                               const void* x, const void* fwd_weights,
+                               const int* kernel_sizes, int n_branches,
+                               int batch, int seq, int d) override;
+    void mingru_backward(void* d_x, void* d_Wz, void* d_Wh,
+                          const void* d_h_out, const void* x,
+                          const void* h_all, const void* h_init,
+                          const void* Wz, const void* Wh,
+                          int batch, int seq, int d) override;
+    void slot_memory_backward(void* d_x, void* d_keys, void* d_values,
+                               const void* d_out, const void* x,
+                               const void* keys, const void* values,
+                               int batch, int seq, int d, int n_slots) override;
+    void swiglu_backward(void* d_x, void* d_W_up, void* d_W_gate, void* d_W_down,
+                          const void* d_out, const void* x,
+                          const void* W_up, const void* W_gate, const void* W_down,
+                          int batch, int seq, int d_model, int d_ff) override;
+
+    // === Inference-specific (single token) ===
     void mingru_step(void* h_out, const void* x, const void* h_prev,
                       const void* Wz, const void* Wh, int d) override;
     void conv_step(void* out, void* buffer, const void* x, const void* weights,

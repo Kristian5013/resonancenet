@@ -295,6 +295,12 @@ Result<void> init_network(NodeContext& ctx)
 {
     LogPrintf("Initialising P2P network...");
 
+    // Set the active network magic so that all P2P framing uses the
+    // correct magic bytes for this network (mainnet/testnet/regtest).
+    const auto& chain_params = common::ChainParams::get();
+    net::set_network_magic(chain_params.consensus().magic);
+    LogPrintf("Network magic set for %s", ctx.network.c_str());
+
     // Address manager
     ctx.addrman = std::make_unique<net::AddrManager>();
     {
@@ -310,8 +316,10 @@ Result<void> init_network(NodeContext& ctx)
         }
 
         if (ctx.addrman->size() < 10) {
-            auto seeds = net::AddrManager::get_default_seeds();
-            ctx.addrman->add(seeds, "dns-seed");
+            auto seeds = net::AddrManager::get_default_seeds(ctx.network);
+            LogPrintf("Loading seed nodes for %s (%zu seeds)",
+                      ctx.network.c_str(), seeds.size());
+            ctx.addrman->add(seeds, "hardcoded-seed");
         }
     }
 
@@ -330,7 +338,8 @@ Result<void> init_network(NodeContext& ctx)
     }
 
     // Message handler — dispatches P2P messages to chain/mempool
-    ctx.msg_handler = std::make_unique<net::MsgHandler>(*ctx.connman);
+    ctx.msg_handler = std::make_unique<net::MsgHandler>(
+        *ctx.connman, ctx.addrman.get());
 
     // Wire up: do we have this inv item?
     ctx.msg_handler->set_have_item(

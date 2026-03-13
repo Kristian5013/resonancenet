@@ -12,7 +12,7 @@ set "LIBPATH=%MSVC_ROOT%\lib\x64"
 
 cd /d "%~dp0"
 
-if not exist build (
+if not exist build\build.ninja (
     cmake -B build -G Ninja -DCMAKE_C_COMPILER=cl.exe -DCMAKE_CXX_COMPILER=cl.exe -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
 )
 

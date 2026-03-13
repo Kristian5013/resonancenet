@@ -94,6 +94,62 @@ public:
     virtual void gemm(void* C, const void* A, const void* B,
                        int M, int N, int K, float alpha = 1.0f, float beta = 0.0f) = 0;
 
+    /// GEMM with transpose flags.
+    /// C[M,N] = alpha * op(A) @ op(B) + beta * C
+    /// If trans_a: A is stored as [K,M], used transposed as [M,K].
+    /// If trans_b: B is stored as [N,K], used transposed as [K,N].
+    virtual void gemm_ex(void* C, const void* A, const void* B,
+                          int M, int N, int K,
+                          bool trans_a, bool trans_b,
+                          float alpha = 1.0f, float beta = 0.0f) = 0;
+
+    /// Fill device memory with zeros.
+    virtual void memset_zero(void* ptr, size_t bytes) = 0;
+
+    // === Backward kernels (gradient computation) ===
+
+    /// d_logits[i,v] = softmax(logits[i,:])[v] - (v == targets[i] ? 1 : 0), averaged over batch*seq.
+    virtual void cross_entropy_backward(void* d_logits, const void* logits, const int* targets,
+                                         int batch, int seq, int vocab) = 0;
+
+    /// Scatter-add gradients to embedding weight matrix.
+    /// d_weight[tokens[i], :] += d_out[i, :]
+    virtual void embedding_backward(void* d_weight, const void* d_out, const int* tokens,
+                                     int batch, int seq, int d_model, int vocab_size) = 0;
+
+    /// Backward through RMSNorm.
+    virtual void rmsnorm_backward(void* d_x, void* d_scale, const void* d_out,
+                                   const void* x, const void* scale,
+                                   int batch, int seq, int d, float eps = 1e-6f) = 0;
+
+    /// Backward through multi-branch causal convolution.
+    /// fwd_weights = the forward convolution weights (needed for d_x computation).
+    virtual void causal_conv_backward(void* d_x, void* d_weights, const void* d_out,
+                                       const void* x, const void* fwd_weights,
+                                       const int* kernel_sizes, int n_branches,
+                                       int batch, int seq, int d) = 0;
+
+    /// Backward through MinGRU (BPTT).
+    /// h_all[batch, seq, d] = all hidden states from forward pass.
+    /// h_init[batch, d] = initial hidden state before first timestep.
+    virtual void mingru_backward(void* d_x, void* d_Wz, void* d_Wh,
+                                  const void* d_h_out, const void* x,
+                                  const void* h_all, const void* h_init,
+                                  const void* Wz, const void* Wh,
+                                  int batch, int seq, int d) = 0;
+
+    /// Backward through slot memory attention.
+    virtual void slot_memory_backward(void* d_x, void* d_keys, void* d_values,
+                                       const void* d_out, const void* x,
+                                       const void* keys, const void* values,
+                                       int batch, int seq, int d, int n_slots) = 0;
+
+    /// Backward through SwiGLU FFN (recomputes intermediates internally).
+    virtual void swiglu_backward(void* d_x, void* d_W_up, void* d_W_gate, void* d_W_down,
+                                  const void* d_out, const void* x,
+                                  const void* W_up, const void* W_gate, const void* W_down,
+                                  int batch, int seq, int d_model, int d_ff) = 0;
+
     // === Inference-specific (single token) ===
     virtual void mingru_step(void* h_out, const void* x, const void* h_prev,
                               const void* Wz, const void* Wh, int d) = 0;
