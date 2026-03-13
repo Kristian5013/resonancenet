@@ -17,6 +17,7 @@ target_link_libraries(rnet_chain PUBLIC
 )
 
 # LevelDB
+find_package(Threads REQUIRED)
 find_package(leveldb CONFIG QUIET)
 if(leveldb_FOUND)
     target_link_libraries(rnet_chain PRIVATE leveldb::leveldb)
