@@ -451,6 +451,13 @@ Result<void> init_network(NodeContext& ctx)
             LogPrintf("Accepted block height=%d from peer %llu",
                      res.value()->height,
                      static_cast<unsigned long long>(peer_id));
+
+            // Feed into BlockSync so it can track progress & request more
+            if (ctx.block_sync) {
+                net::CPeer peer;
+                peer.id = peer_id;
+                ctx.block_sync->on_block(peer, block);
+            }
             return true;
         });
 
@@ -487,6 +494,45 @@ Result<void> init_network(NodeContext& ctx)
             return ctx.mempool->get_txids();
         });
 
+    // Wire up: received headers → feed into BlockSync
+    ctx.msg_handler->set_on_headers(
+        [&ctx](uint64_t peer_id,
+               const std::vector<uint8_t>& headers_data) -> bool {
+            if (!ctx.block_sync || !ctx.chainstate) return false;
+
+            core::DataStream ss(
+                std::span<const uint8_t>(headers_data.data(), headers_data.size()));
+
+            uint64_t count = core::unserialize_compact_size(ss);
+            std::vector<primitives::CBlockHeader> headers;
+            headers.reserve(static_cast<size_t>(count));
+
+            for (uint64_t i = 0; i < count; ++i) {
+                primitives::CBlockHeader hdr;
+                try {
+                    hdr.unserialize(ss);
+                    // Skip tx_count (always 0 in headers message)
+                    core::unserialize_compact_size(ss);
+                } catch (...) {
+                    LogPrintf("Failed to parse header %llu from peer %llu",
+                             static_cast<unsigned long long>(i),
+                             static_cast<unsigned long long>(peer_id));
+                    return false;
+                }
+                headers.push_back(std::move(hdr));
+            }
+
+            LogPrintf("Received %zu headers from peer %llu",
+                     headers.size(),
+                     static_cast<unsigned long long>(peer_id));
+
+            // Create a temporary CPeer for BlockSync interface
+            net::CPeer peer;
+            peer.id = peer_id;
+            ctx.block_sync->on_headers(peer, headers);
+            return true;
+        });
+
     // Register all P2P message handlers
     ctx.msg_handler->register_handlers();
 
@@ -495,6 +541,10 @@ Result<void> init_network(NodeContext& ctx)
         ctx.chainstate->on_block_connected.connect(
             [&ctx](const chain::CBlockIndex* pindex) {
                 if (!ctx.connman || !pindex) return;
+
+                // Update ConnManager best height so version messages are correct
+                ctx.connman->set_best_height(pindex->height);
+
                 // Send inv for the new block to all peers
                 net::CInv inv(net::InvType::INV_BLOCK, pindex->block_hash);
                 core::DataStream ss;
@@ -503,6 +553,33 @@ Result<void> init_network(NodeContext& ctx)
                 ctx.connman->broadcast(net::msg::INV, ss.span());
                 LogPrintf("Broadcast block inv height=%d to peers",
                          pindex->height);
+            });
+    }
+
+    // IBD: when a new peer connects with a higher height, start syncing
+    if (ctx.block_sync && ctx.chainstate) {
+        ctx.connman->on_connected.connect(
+            [&ctx](net::CConnection& conn) {
+                int32_t peer_height = conn.start_height();
+                int32_t our_height = ctx.chainstate->height();
+
+                LogPrintf("Peer %llu connected: their height=%d, our height=%d",
+                         static_cast<unsigned long long>(conn.id()),
+                         peer_height, our_height);
+
+                if (peer_height > our_height) {
+                    // This peer has blocks we need — start IBD
+                    net::CPeer peer;
+                    peer.id = conn.id();
+                    peer.start_height = peer_height;
+
+                    ctx.block_sync->start();
+                    ctx.block_sync->on_new_peer(peer);
+
+                    LogPrintf("Starting IBD from peer %llu (need blocks %d..%d)",
+                             static_cast<unsigned long long>(conn.id()),
+                             our_height + 1, peer_height);
+                }
             });
     }
 

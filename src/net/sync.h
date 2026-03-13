@@ -87,6 +87,9 @@ private:
     /// Peer we are syncing headers from
     uint64_t header_sync_peer_ = 0;
 
+    /// Last received header hash (for getheaders locator)
+    rnet::uint256 last_header_hash_;
+
     /// Blocks we have requested but not yet received
     std::set<rnet::uint256> blocks_in_flight_;
 

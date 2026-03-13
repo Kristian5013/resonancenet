@@ -1,5 +1,7 @@
 #include "net/sync.h"
 
+#include <algorithm>
+
 #include "chain/chainstate.h"
 #include "core/logging.h"
 #include "core/stream.h"
@@ -55,6 +57,7 @@ void BlockSync::on_headers(CPeer& peer,
         if (idx->height > best_header_height_) {
             best_header_height_ = idx->height;
         }
+        last_header_hash_ = idx->block_hash;
     }
 
     // Request more headers
@@ -151,15 +154,21 @@ bool BlockSync::is_initial_block_download() const {
 }
 
 void BlockSync::request_headers(CPeer& peer) {
-    // Build a getHeaders message with our chain tip hash
-    auto* tip = chainstate_.tip();
-    if (!tip) return;
+    // Build a getHeaders message with our best known header hash as locator
+    // Use last_header_hash_ if we've received headers, otherwise chain tip
+    rnet::uint256 locator_hash;
+    if (!last_header_hash_.is_zero()) {
+        locator_hash = last_header_hash_;
+    } else {
+        auto* tip = chainstate_.tip();
+        if (!tip) return;
+        locator_hash = tip->block_hash;
+    }
 
-    // Send getheaders with the tip hash as the locator
     core::DataStream ss;
     core::ser_write_i32(ss, static_cast<int32_t>(PROTOCOL_VERSION));
     core::serialize_compact_size(ss, 1);  // count = 1
-    tip->block_hash.serialize(ss);
+    locator_hash.serialize(ss);
     rnet::uint256 stop_hash;
     stop_hash.serialize(ss);
 
@@ -167,32 +176,53 @@ void BlockSync::request_headers(CPeer& peer) {
 }
 
 void BlockSync::request_blocks() {
-    // Walk the block index for blocks we need to download
-    // For simplicity, request blocks by height from tip+1
+    // Collect header-only block index entries that need downloading
+    // Walk from best header back to our tip via prev pointers
     int start_height = chainstate_.height() + 1;
 
-    for (int h = start_height; h <= best_header_height_; ++h) {
-        if (blocks_in_flight_.size() >=
+    // Build list of hashes we need, by walking block_index
+    std::vector<rnet::uint256> needed;
+    for (const auto& [hash, idx] : chainstate_.block_index()) {
+        if (idx->height >= start_height &&
+            idx->height <= best_header_height_ &&
+            idx->status < chain::CBlockIndex::FULLY_VALIDATED) {
+            needed.push_back(hash);
+        }
+    }
+
+    // Sort by height
+    std::sort(needed.begin(), needed.end(),
+        [this](const rnet::uint256& a, const rnet::uint256& b) {
+            auto* ia = chainstate_.lookup_block_index(a);
+            auto* ib = chainstate_.lookup_block_index(b);
+            return ia->height < ib->height;
+        });
+
+    // Request blocks in batches
+    std::vector<CInv> to_request;
+    for (const auto& hash : needed) {
+        if (blocks_in_flight_.size() + to_request.size() >=
             static_cast<size_t>(MAX_BLOCKS_IN_FLIGHT_PER_PEER * 4)) {
             break;
         }
+        if (blocks_in_flight_.count(hash) > 0) continue;
 
-        auto* idx = chainstate_.get_block_by_height(h);
-        if (!idx) continue;
-
-        if (blocks_in_flight_.count(idx->block_hash) > 0) continue;
-
-        blocks_in_flight_.insert(idx->block_hash);
-
-        // Send getdata for this block to any connected peer
-        CInv inv(InvType::INV_BLOCK, idx->block_hash);
-        core::DataStream ss;
-        core::serialize_compact_size(ss, 1);  // count
-        inv.serialize(ss);
-
-        // Broadcast getdata to first available peer
-        connman_.broadcast(msg::GETDATA, ss.span());
+        blocks_in_flight_.insert(hash);
+        to_request.emplace_back(InvType::INV_BLOCK, hash);
     }
+
+    if (to_request.empty()) return;
+
+    // Send single getdata with all requested blocks
+    core::DataStream ss;
+    core::serialize_compact_size(ss, to_request.size());
+    for (const auto& inv : to_request) {
+        inv.serialize(ss);
+    }
+    connman_.broadcast(msg::GETDATA, ss.span());
+
+    LogPrintf("Requested %zu blocks for IBD (height %d..%d)",
+             to_request.size(), start_height, best_header_height_);
 }
 
 uint64_t BlockSync::select_header_sync_peer() {
