@@ -14,9 +14,17 @@ add_library(rnet_crypto STATIC
 
 target_link_libraries(rnet_crypto PUBLIC rnet_util)
 
-# OpenSSL
+# OpenSSL — prefer static on Windows to avoid DLL dependency
+if(WIN32)
+    set(OPENSSL_USE_STATIC_LIBS TRUE)
+    set(OPENSSL_MSVC_STATIC_RT TRUE)
+endif()
 find_package(OpenSSL REQUIRED)
 target_link_libraries(rnet_crypto PRIVATE OpenSSL::Crypto)
+# Static OpenSSL on Windows needs crypt32 and ws2_32
+if(WIN32 AND OPENSSL_USE_STATIC_LIBS)
+    target_link_libraries(rnet_crypto PRIVATE crypt32 ws2_32)
+endif()
 
 # secp256k1
 find_library(SECP256K1_LIB NAMES libsecp256k1 secp256k1)
