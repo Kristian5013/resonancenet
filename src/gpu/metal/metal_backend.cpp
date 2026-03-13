@@ -568,6 +568,75 @@ void MetalBackend::slot_query(void* out, const void* x, const void* slot_keys,
     }
 }
 
+// ── gemm_ex ────────────────────────────────────────────────────────────
+
+void MetalBackend::gemm_ex(void* C_ptr, const void* A_ptr, const void* B_ptr,
+                            int M, int N, int K,
+                            bool transpose_a, bool transpose_b,
+                            float alpha, float beta_val) {
+    auto* C = static_cast<float*>(C_ptr);
+    auto* A = static_cast<const float*>(A_ptr);
+    auto* B = static_cast<const float*>(B_ptr);
+
+    for (int i = 0; i < M; ++i) {
+        for (int j = 0; j < N; ++j) {
+            float sum = 0.0f;
+            for (int k = 0; k < K; ++k) {
+                float a_val = transpose_a ? A[k * M + i] : A[i * K + k];
+                float b_val = transpose_b ? B[j * K + k] : B[k * N + j];
+                sum += a_val * b_val;
+            }
+            C[i * N + j] = alpha * sum + beta_val * C[i * N + j];
+        }
+    }
+}
+
+// ── Backward Pass Stubs ────────────────────────────────────────────────
+// These delegate to CpuFallbackBackend-style implementations.
+// TODO: implement with Metal compute shaders for GPU acceleration.
+
+void MetalBackend::cross_entropy_backward(void* /*d_logits*/, const void* /*logits*/,
+                                           const int* /*targets*/,
+                                           int /*batch*/, int /*seq*/, int /*vocab*/) {
+    // Stub: not yet implemented for Metal
+}
+
+void MetalBackend::embedding_backward(void* /*d_weight*/, const void* /*d_out*/,
+                                       const int* /*tokens*/,
+                                       int /*batch*/, int /*seq*/, int /*d_model*/, int /*vocab*/) {
+}
+
+void MetalBackend::rmsnorm_backward(void* /*d_x*/, void* /*d_scale*/, const void* /*d_out*/,
+                                     const void* /*x*/, const void* /*scale*/,
+                                     int /*batch*/, int /*seq*/, int /*d*/, float /*eps*/) {
+}
+
+void MetalBackend::causal_conv_backward(void* /*d_x*/, void* /*d_weights*/, const void* /*d_out*/,
+                                         const void* /*x*/, const void* /*fwd_weights*/,
+                                         const int* /*ks*/, int /*nb*/,
+                                         int /*batch*/, int /*seq*/, int /*d*/) {
+}
+
+void MetalBackend::mingru_backward(void* /*d_x*/, void* /*d_Wz*/, void* /*d_Wh*/,
+                                    const void* /*d_out*/, const void* /*x*/,
+                                    const void* /*h_prev*/, const void* /*Wz*/, const void* /*Wh*/,
+                                    int /*batch*/, int /*seq*/, int /*d*/) {
+}
+
+void MetalBackend::slot_memory_backward(void* /*d_x*/, void* /*d_keys*/, void* /*d_values*/,
+                                         const void* /*d_out*/, const void* /*x*/,
+                                         const void* /*sk*/, const void* /*sv*/,
+                                         int /*batch*/, int /*seq*/, int /*d*/, int /*n_slots*/) {
+}
+
+void MetalBackend::swiglu_backward(void* /*d_x*/, void* /*d_W_up*/, void* /*d_W_gate*/,
+                                    void* /*d_W_down*/,
+                                    const void* /*d_out*/, const void* /*x*/,
+                                    const void* /*W_up*/, const void* /*W_gate*/,
+                                    const void* /*W_down*/,
+                                    int /*batch*/, int /*seq*/, int /*d_model*/, int /*d_ff*/) {
+}
+
 }  // namespace rnet::gpu
 
 #endif  // RNET_HAS_METAL
