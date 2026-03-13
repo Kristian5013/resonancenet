@@ -475,22 +475,25 @@ inline void Unserialize(Stream& s, std::variant<Ts...>& var) {
 }
 
 // Helper to unserialize variant by runtime index
+template<typename Stream, typename T>
+bool try_unserialize_variant(Stream& s, auto& var, uint32_t idx, uint32_t& current) {
+    if (current == idx) {
+        T val;
+        Unserialize(s, val);
+        var = std::move(val);
+        ++current;
+        return true;  // done
+    }
+    ++current;
+    return false;
+}
+
 template<typename Stream, typename... Ts>
 void unserialize_variant_by_index(Stream& s,
                                   std::variant<Ts...>& var,
                                   uint32_t idx) {
     uint32_t current = 0;
-    bool done = false;
-    (void)((
-        [&]() {
-            if (!done && current == idx) {
-                Ts val;
-                Unserialize(s, val);
-                var = std::move(val);
-                done = true;
-            }
-            ++current;
-        }(), !done) && ...);
+    (void)(try_unserialize_variant<Stream, Ts>(s, var, idx, current) || ...);
 }
 
 // ─── Serializable concept (for objects with serialize/unserialize) ───

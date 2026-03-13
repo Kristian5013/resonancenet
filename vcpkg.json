@@ -1,0 +1,10 @@
+{
+  "name": "resonancenet",
+  "version": "0.1.0",
+  "description": "Proof-of-Training blockchain",
+  "dependencies": [
+    "openssl",
+    "secp256k1",
+    "leveldb"
+  ]
+}
