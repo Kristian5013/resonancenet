@@ -78,9 +78,7 @@ rnet::Result<std::vector<uint8_t>> argon2id_derive(
 #else
 // Fallback: use PBKDF2-SHA512 when Argon2id is not available
 // (OpenSSL < 3.2 or builds without Argon2 support)
-#if OPENSSL_VERSION_NUMBER < 0x30000000L
 #include <openssl/evp.h>
-#endif
 
 namespace rnet::crypto {
 
