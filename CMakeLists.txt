@@ -29,13 +29,26 @@ add_subdirectory(src/rpc)
 # rnetd — main daemon
 add_executable(rnetd src/rnetd.cpp)
 target_include_directories(rnetd PRIVATE src)
-target_link_libraries(rnetd PRIVATE
-    rnet_rpc rnet_node rnet_net rnet_chain rnet_mempool
-    rnet_consensus rnet_primitives rnet_script
-    rnet_common rnet_gpu rnet_crypto rnet_util
-    rnet_training rnet_inference rnet_miner
-    rnet_wallet rnet_lightning
-)
+if(UNIX)
+    # GCC requires linker group for circular static lib dependencies
+    target_link_libraries(rnetd PRIVATE
+        -Wl,--start-group
+        rnet_rpc rnet_node rnet_net rnet_chain rnet_mempool
+        rnet_consensus rnet_primitives rnet_script
+        rnet_common rnet_gpu rnet_crypto rnet_util
+        rnet_training rnet_inference rnet_miner
+        rnet_wallet rnet_lightning
+        -Wl,--end-group
+    )
+else()
+    target_link_libraries(rnetd PRIVATE
+        rnet_rpc rnet_node rnet_net rnet_chain rnet_mempool
+        rnet_consensus rnet_primitives rnet_script
+        rnet_common rnet_gpu rnet_crypto rnet_util
+        rnet_training rnet_inference rnet_miner
+        rnet_wallet rnet_lightning
+    )
+endif()
 if(WIN32)
     target_link_libraries(rnetd PRIVATE ws2_32)
 endif()
