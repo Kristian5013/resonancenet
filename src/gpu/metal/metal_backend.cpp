@@ -618,8 +618,9 @@ void MetalBackend::causal_conv_backward(void* /*d_x*/, void* /*d_weights*/, cons
 }
 
 void MetalBackend::mingru_backward(void* /*d_x*/, void* /*d_Wz*/, void* /*d_Wh*/,
-                                    const void* /*d_out*/, const void* /*x*/,
-                                    const void* /*h_prev*/, const void* /*Wz*/, const void* /*Wh*/,
+                                    const void* /*d_h_out*/, const void* /*x*/,
+                                    const void* /*h_all*/, const void* /*h_init*/,
+                                    const void* /*Wz*/, const void* /*Wh*/,
                                     int /*batch*/, int /*seq*/, int /*d*/) {
 }
 
