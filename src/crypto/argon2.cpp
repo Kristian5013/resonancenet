@@ -10,6 +10,10 @@
 #include <openssl/core_names.h>
 #include <openssl/kdf.h>
 #include <openssl/params.h>
+#endif
+
+// Argon2 KDF params were added in OpenSSL 3.2
+#if defined(OSSL_KDF_PARAM_ARGON2_MEMCOST)
 
 namespace rnet::crypto {
 
@@ -72,9 +76,11 @@ rnet::Result<std::vector<uint8_t>> argon2id_derive(
 }  // namespace rnet::crypto
 
 #else
-// Fallback: use PBKDF2-SHA512 as a lesser substitute if Argon2id
-// is not available (OpenSSL < 3.0). Log a warning.
+// Fallback: use PBKDF2-SHA512 when Argon2id is not available
+// (OpenSSL < 3.2 or builds without Argon2 support)
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
 #include <openssl/evp.h>
+#endif
 
 namespace rnet::crypto {
 

@@ -475,8 +475,8 @@ inline void Unserialize(Stream& s, std::variant<Ts...>& var) {
 }
 
 // Helper to unserialize variant by runtime index
-template<typename Stream, typename T>
-bool try_unserialize_variant(Stream& s, auto& var, uint32_t idx, uint32_t& current) {
+template<typename Stream, typename T, typename Variant>
+bool try_unserialize_variant(Stream& s, Variant& var, uint32_t idx, uint32_t& current) {
     if (current == idx) {
         T val;
         Unserialize(s, val);
