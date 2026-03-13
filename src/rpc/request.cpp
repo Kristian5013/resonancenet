@@ -3,6 +3,7 @@
 #include <cctype>
 #include <charconv>
 #include <cmath>
+#include <cstdlib>
 #include <sstream>
 #include <stdexcept>
 
@@ -357,11 +358,11 @@ private:
         std::string_view num_str = input_.substr(start, pos_ - start);
 
         if (is_float) {
-            double val = 0.0;
-            auto [p, ec] = std::from_chars(num_str.data(),
-                                           num_str.data() + num_str.size(),
-                                           val);
-            if (ec != std::errc{}) return false;
+            // Apple libc++ doesn't support std::from_chars for doubles
+            std::string tmp(num_str);
+            char* end = nullptr;
+            double val = std::strtod(tmp.c_str(), &end);
+            if (end != tmp.c_str() + tmp.size()) return false;
             out = JsonValue(val);
         } else {
             int64_t val = 0;
