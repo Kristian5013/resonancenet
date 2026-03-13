@@ -33,8 +33,8 @@ add_subdirectory(src/rpc)
 # rnetd — main daemon
 add_executable(rnetd src/rnetd.cpp)
 target_include_directories(rnetd PRIVATE src)
-if(UNIX)
-    # GCC requires linker group for circular static lib dependencies
+if(UNIX AND NOT APPLE)
+    # GCC/ld requires linker group for circular static lib dependencies
     target_link_libraries(rnetd PRIVATE
         -Wl,--start-group
         rnet_rpc rnet_node rnet_net rnet_chain rnet_mempool
