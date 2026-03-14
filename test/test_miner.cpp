@@ -196,5 +196,5 @@ TEST(miner_block_template_reward_breakdown) {
         parent, {}, {}, kp.public_key, emission, params);
 
     ASSERT_EQ(tmpl.reward.total(),
-              tmpl.reward.base + tmpl.reward.bonus + tmpl.reward.recovered);
+              tmpl.reward.base + tmpl.reward.recovered);
 }

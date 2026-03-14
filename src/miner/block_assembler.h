@@ -39,7 +39,7 @@ public:
     ///
     /// @param parent       Parent block header (for height, prev_hash, etc.)
     /// @param miner_pubkey Miner's public key for coinbase output.
-    /// @param reward       Block reward (base + bonus + recovered).
+    /// @param reward       Block reward (base + recovered).
     /// @param growth       Growth result for header fields.
     /// @return             Assembled block with all transactions.
     primitives::CBlock assemble(

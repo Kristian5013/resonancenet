@@ -5,7 +5,6 @@
 #include "consensus/block_reward.h"
 
 #include <algorithm>
-#include <cmath>
 
 namespace rnet::consensus {
 
@@ -66,23 +65,13 @@ int64_t get_base_reward(const EmissionState& state, const ConsensusParams& param
 // ---------------------------------------------------------------------------
 // compute_block_reward
 // ---------------------------------------------------------------------------
-// Assembles the full block reward from three components:
+// Assembles the full block reward from two components:
 //
-//   total = base + bonus + recovered
+//   total = base + recovered
 //
 // Where:
 //   base      — halving-aware subsidy from get_base_reward()
-//   bonus     — training quality incentive (up to 10% of base)
 //   recovered — coins returned from expired UTXOs (set by caller)
-//
-// Bonus formula (integer arithmetic, truncates toward zero):
-//
-//   bonus = base * 0.10 * clamp(improvement, 0, 1)
-//
-// The improvement value measures how much a miner's training step
-// reduced the model's validation loss.  Clamping to [0, 1] prevents
-// gaming via artificially inflated metrics while still rewarding
-// genuine progress.
 //
 // Supply cap enforcement:
 //   - If total_minted has already reached max_supply (21'000'000 RNET),
@@ -92,18 +81,16 @@ int64_t get_base_reward(const EmissionState& state, const ConsensusParams& param
 //     trimmed to exactly fill the remaining gap.
 //
 // Genesis special case (height == 0):
-//   Returns the full initial_reward with no bonus and no cap check,
-//   since the genesis block bootstraps the chain before any emission
-//   state exists.
+//   Returns the full initial_reward with no cap check, since the
+//   genesis block bootstraps the chain before any emission state exists.
 // ---------------------------------------------------------------------------
 BlockReward compute_block_reward(uint64_t height,
-                                 float improvement,
                                  const EmissionState& state,
                                  const ConsensusParams& params)
 {
     BlockReward reward{};
 
-    // 1. Genesis block: return the full initial reward, no bonus.
+    // 1. Genesis block: return the full initial reward.
     //    50 RNET (50 * 10^8 base units) on mainnet.
     if (height == 0) {
         reward.base = params.initial_reward;
@@ -122,16 +109,7 @@ BlockReward compute_block_reward(uint64_t height,
         reward.base = params.max_supply - state.total_minted;
     }
 
-    // 4. Compute training quality bonus.
-    //    bonus = base * 0.10 * clamp(improvement, 0, 1)
-    //
-    //    Cast through double to preserve precision before the final
-    //    truncation to int64_t.
-    float clamped_improvement = std::clamp(improvement, 0.0f, 1.0f);
-    reward.bonus = static_cast<int64_t>(
-        static_cast<double>(reward.base) * 0.10 * static_cast<double>(clamped_improvement));
-
-    // 5. Recovered coins from expired UTXOs are not computed here;
+    // 4. Recovered coins from expired UTXOs are not computed here;
     //    they are set by the caller from chain state before calling
     //    BlockReward::total().
 

@@ -97,35 +97,22 @@ TEST(block_reward_multiple_halvings) {
     ASSERT_EQ(reward, expected);
 }
 
-TEST(block_reward_compute_with_bonus) {
+TEST(block_reward_base_subsidy) {
     auto params = ConsensusParams::mainnet();
     EmissionState state;
     state.total_minted = 0;
     state.effective_supply = 0;
 
-    // With 5% improvement, should get a bonus
-    auto reward = compute_block_reward(1, 0.05f, state, params);
+    auto reward = compute_block_reward(1, state, params);
     ASSERT_TRUE(reward.base > 0);
-    ASSERT_TRUE(reward.total() >= reward.base);
-}
-
-TEST(block_reward_no_improvement) {
-    auto params = ConsensusParams::mainnet();
-    EmissionState state;
-    state.total_minted = 0;
-    state.effective_supply = 0;
-
-    // 0 improvement = no bonus
-    auto reward = compute_block_reward(1, 0.0f, state, params);
-    ASSERT_TRUE(reward.base > 0);
-    ASSERT_EQ(reward.bonus, int64_t(0));
+    ASSERT_EQ(reward.total(), reward.base + reward.recovered);
 }
 
 TEST(block_reward_total) {
     auto params = ConsensusParams::mainnet();
     EmissionState state{};
-    auto reward = compute_block_reward(1, 0.1f, state, params);
-    ASSERT_EQ(reward.total(), reward.base + reward.bonus + reward.recovered);
+    auto reward = compute_block_reward(1, state, params);
+    ASSERT_EQ(reward.total(), reward.base + reward.recovered);
 }
 
 // ─── Genesis block tests ────────────────────────────────────────────

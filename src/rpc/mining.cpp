@@ -285,7 +285,7 @@ static JsonValue rpc_generate(const RPCRequest& req,
         // 7. Coinbase transaction.
         consensus::EmissionState emission{};
         auto reward = consensus::compute_block_reward(
-            block.height, loss_improved ? 0.01f : 0.0f, emission, params);
+            block.height, emission, params);
 
         primitives::CMutableTransaction mtx;
         mtx.version = 1;

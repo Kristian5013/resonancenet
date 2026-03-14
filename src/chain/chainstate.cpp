@@ -383,8 +383,7 @@ Result<void> CChainState::activate_best_chain(
 //   7. Update chain tip and active chain vector
 //
 // Reward formula:
-//   improvement = (prev_val_loss - val_loss) / prev_val_loss
-//   allowed_coinbase = subsidy + bonus + fees
+//   allowed_coinbase = subsidy + fees
 //
 // Fork choice rule (PoT):
 //   height > tip.height            => candidate wins (longer chain)
@@ -409,21 +408,14 @@ Result<void> CChainState::connect_block(
         total_fees += tx_in_value - tx_out_value;
     }
 
-    // 2. Compute allowed subsidy
-    //   improvement = (prev_val_loss - val_loss) / prev_val_loss
-    float improvement = 0.0f;
-    if (pindex->header.prev_val_loss > 0.0f &&
-        pindex->header.val_loss < pindex->header.prev_val_loss) {
-        improvement = (pindex->header.prev_val_loss - pindex->header.val_loss)
-                    / pindex->header.prev_val_loss;
-    }
+    // 2. Compute allowed subsidy.
     consensus::EmissionState emission{};  // TODO: track cumulative emission
     const auto allowed = consensus::compute_block_reward(
-        pindex->header.height, improvement, emission, params_);
+        pindex->header.height, emission, params_);
     const int64_t max_coinbase = allowed.total() + total_fees;
 
-    // 3. Verify coinbase amount
-    //   allowed_coinbase = subsidy + bonus + fees
+    // 3. Verify coinbase amount.
+    //    allowed_coinbase = subsidy + fees
     if (!block.vtx.empty() && block.vtx[0]->is_coinbase()) {
         if (block.vtx[0]->get_value_out() > max_coinbase) {
             return Result<void>::err("bad-cb-amount");

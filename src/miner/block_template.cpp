@@ -32,12 +32,9 @@ BlockTemplate create_block_template(
     // 1. Compute expected growth for this block.
     tmpl.growth = consensus::GrowthPolicy::expected_growth(parent_header);
 
-    // 2. Compute block reward.
-    // Improvement is unknown at template time; use 0 for base reward estimation.
-    // The actual bonus will be computed after the solve.
+    // 2. Compute block reward (base subsidy + recovered).
     tmpl.reward = consensus::compute_block_reward(
         parent_header.height + 1,
-        0.0f,
         emission,
         params);
 

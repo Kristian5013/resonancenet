@@ -16,7 +16,7 @@ std::vector<uint8_t> make_coinbase_script(const crypto::Ed25519PublicKey& pubkey
 /// Create a coinbase transaction for a new block.
 ///
 /// @param height      Block height (encoded in scriptSig per BIP34 convention).
-/// @param reward      Total block reward in resonances (base + bonus + recovered).
+/// @param reward      Total block reward in resonances (base + recovered).
 /// @param pubkey      Miner's Ed25519 public key for the reward output.
 /// @param extra_nonce Optional extra nonce bytes for the scriptSig.
 /// @return            Immutable coinbase transaction.
