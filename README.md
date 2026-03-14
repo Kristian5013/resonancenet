@@ -1,31 +1,65 @@
 # ResonanceNet
 
-**Proof-of-Training blockchain — where mining means teaching AI.**
+**Training AI instead of hashing.**
 
-ResonanceNet v0.1.0 is a Bitcoin Core-style blockchain built from scratch in C++20. Instead of burning electricity on hash puzzles (Proof-of-Work), miners train neural networks and submit validation loss improvements as proof. The network converges on increasingly capable AI models while securing the ledger.
+ResonanceNet is an experimental L1 blockchain designed for decentralized training and distribution of AI.
 
-52K+ lines of code. 317 source files. 15 libraries. MIT licensed.
+The network trains a shared neural model using a Proof-of-Training consensus mechanism. Miners compete to improve the model's validation loss, and blocks are accepted only when the network confirms that the new checkpoint improves upon the previous state.
+
+Each block contains a verifiable model checkpoint, allowing the blockchain to accumulate training progress and gradually develop a publicly available AI model.
+
+Unlike centralized AI services, the model can be downloaded and run locally. Users perform inference directly on their own device — no API access, subscription, or centralized server required.
+
+The architecture is optimized for efficient single-user inference and implementation simplicity. Compared to large transformer-based systems, the model design avoids complex optimization requirements and distributed infrastructure, making decentralized training more practical.
+
+Early benchmarks show throughput of approximately 150,000 tokens per second on an RTX 5080-class GPU, with higher throughput expected on newer hardware.
+
+ResonanceNet explores a different paradigm for AI infrastructure: intelligence distributed as a public artifact, not managed through centralized services.
 
 ---
 
-## Features
+## Key Features
 
-- **Proof-of-Training (PoT)** — Miners train MinGRU models and compete on `val_loss` improvement. No wasted computation.
-- **Keccak-256d hashing** — Double Keccak-256 for block hashes and transaction IDs.
-- **Ed25519 signatures** — Fast, compact, deterministic signing.
-- **Bech32 addresses** — Human-readable `rn1...` prefix (analogous to Bitcoin's `bc1`).
-- **SegWit-style P2WPKH scripts** — Witness-separated transactions from day one.
-- **UTXO expiry** — Coins expire when the network's `val_loss` improves 10x from their creation point. Expired funds return to mining rewards, preventing indefinite state bloat. Send-to-self resets the timer.
-- **GPU acceleration** — CPU fallback, CUDA, Vulkan, and Metal backends for training kernels.
-- **Lightning layer** — Payment channels on port 9556 for instant off-chain transactions.
-- **Full P2P network** — Gossip protocol, block relay, mempool synchronization, peer discovery.
-- **JSON-RPC interface** — Bitcoin Core-compatible RPC for wallets, explorers, and tooling.
+- **Proof-of-Training (PoT)** — Miners train MinGRU neural networks and compete on validation loss improvement. No wasted computation — every block makes the model smarter.
+- **Verifiable Checkpoints** — Each block includes a Keccak-256d hash of the model checkpoint. Nodes can independently verify training progress.
+- **Continuous Model Growth** — The network autonomously adds layers and expands dimensions at consensus-defined heights as training progresses.
+- **UTXO Expiry** — Coins expire when the network's validation loss improves 10x from their creation point. Expired funds return to mining rewards, preventing state bloat. Send-to-self resets the timer.
+- **GPU Acceleration** — CUDA (full), Vulkan, Metal backends for training kernels, with CPU fallback.
+- **Ed25519 Signatures** — Fast, compact, deterministic block and transaction signing.
+- **Keccak-256d Hashing** — Double Keccak-256 for block hashes and transaction IDs (Ethereum-compatible, 0x01 padding).
+- **Bech32 Addresses** — Human-readable `rn1...` prefix, SegWit-style P2WPKH scripts from day one.
+- **Full P2P Network** — Gossip protocol, block relay, mempool synchronization, encrypted peer discovery.
+- **JSON-RPC Interface** — Bitcoin Core-compatible RPC for wallets, explorers, and tooling.
+- **Lightning Layer** — Payment channels for instant off-chain transactions.
+- **HD Wallet** — BIP32/44 key derivation with mandatory recovery policy.
+
+---
+
+## How Mining Works
+
+```
+Traditional blockchain:          ResonanceNet:
+
+  Hash(nonce) < target?            val_loss < prev_val_loss?
+         |                                  |
+    Pure waste                      Model improves
+         |                                  |
+   Block found                        Block found
+```
+
+1. Miner loads the current model checkpoint from the chain tip
+2. Trains the MinGRU model on real data for N steps
+3. Evaluates on a validation set
+4. If `val_loss` improves over the parent block — valid block found
+5. Checkpoint hash and loss are committed to the block header
+
+The difficulty scales with model growth: as the network advances, models become larger and harder to improve.
 
 ---
 
 ## Architecture
 
-ResonanceNet uses strict L0-L7 library layering. Higher layers may depend on lower layers, never the reverse.
+ResonanceNet uses strict L0-L7 library layering. Higher layers depend on lower layers, never the reverse.
 
 ```
 L7  rnet_gpu, rnet_inference, rnet_lightning
@@ -41,7 +75,7 @@ L0  rnet_util
 | Layer | Libraries | Purpose |
 |-------|-----------|---------|
 | L0 | `rnet_util` | Logging, filesystem, hex encoding, serialization |
-| L1 | `rnet_crypto` | Keccak-256d, Ed25519, BIP32/39 HD keys, AES-256, ChaCha20-Poly1305 |
+| L1 | `rnet_crypto` | Keccak-256d, Ed25519, BIP32/39 HD keys, AES-256, ChaCha20 |
 | L2 | `rnet_primitives` `rnet_script` `rnet_consensus` | Blocks, transactions, script interpreter, consensus rules |
 | L3 | `rnet_chain` `rnet_mempool` | UTXO set with expiry tracking, skip-list indexed mempool |
 | L4 | `rnet_training` `rnet_wallet` | MinGRU training loop, HD wallet with coin selection |
@@ -53,7 +87,7 @@ L0  rnet_util
 
 | Binary | Description |
 |--------|-------------|
-| `rnetd` | Main daemon — runs a full node |
+| `rnetd` | Full node daemon |
 | `rnet-cli` | RPC command-line client |
 | `rnet-tx` | Offline transaction builder |
 | `rnet-wallet-tool` | Wallet creation and management |
@@ -62,7 +96,46 @@ L0  rnet_util
 
 ---
 
-## Building
+## Quick Start
+
+### Download
+
+Pre-built binaries for Linux, macOS, and Windows are available on the [Releases](https://github.com/Kristian5013/resonancenet/releases) page.
+
+### Join the Testnet
+
+```bash
+# Extract and run
+tar xzf resonancenet-0.1.0-testnet-x86_64-linux.tar.gz
+cd resonancenet-0.1.0-testnet
+
+# Connect to the seed node
+./rnetd -testnet -addnode=188.137.227.180:19555
+
+# Check sync status
+./rnet-cli -testnet getblockchaininfo
+
+# Start mining (training the AI)
+./rnet-miner -testnet
+```
+
+### Local Development (regtest)
+
+```bash
+# Start a regtest node
+./rnetd -regtest -datadir=./data1 -port=19555 -rpcport=19556
+
+# Generate blocks
+./rnet-cli -regtest -rpcport=19556 generate 10
+
+# Two-node test
+./rnetd -regtest -datadir=./data2 -port=19565 -rpcport=19566 -connect=127.0.0.1:19555
+./rnet-cli -regtest -rpcport=19556 getpeerinfo
+```
+
+---
+
+## Building from Source
 
 ### Requirements
 
@@ -83,81 +156,31 @@ ninja -C build
 ### Linux / macOS
 
 ```bash
-cmake -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=/path/to/vcpkg/scripts/buildsystems/vcpkg.cmake
+cmake -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
 ninja -C build
 ```
 
-### GPU backends
-
-GPU support is auto-detected at configure time. To force a specific backend:
-
-```bash
-cmake -B build -G Ninja \
-  -DCMAKE_TOOLCHAIN_FILE=/path/to/vcpkg/scripts/buildsystems/vcpkg.cmake \
-  -DENABLE_CUDA=ON \
-  -DENABLE_VULKAN=ON \
-  -DENABLE_METAL=ON
-```
-
 ---
 
-## Quick Start
+## Network
 
-### Single node (regtest)
-
-```bash
-# Start a regtest node
-./rnetd -regtest -datadir=./data1 -port=19555 -rpcport=19556
-
-# Generate 10 blocks
-./rnet-cli -regtest -rpcport=19556 generate 10
-
-# Check chain state
-./rnet-cli -regtest -rpcport=19556 getblockchaininfo
-```
-
-### Two-node test
-
-```bash
-# Terminal 1 — first node
-./rnetd -regtest -datadir=./data1 -port=19555 -rpcport=19556
-
-# Terminal 2 — second node, connects to first
-./rnetd -regtest -datadir=./data2 -port=19565 -rpcport=19566 -connect=127.0.0.1:19555
-
-# Verify peer connection
-./rnet-cli -regtest -rpcport=19556 getpeerinfo
-```
-
----
+| Network | P2P Port | RPC Port | Seed Node |
+|---------|----------|----------|-----------|
+| Mainnet | 9555 | 9556 | — |
+| Testnet | 19555 | 19556 | `188.137.227.180:19555` |
+| Regtest | 19555 | 19556 | localhost |
 
 ## RPC API
 
-ResonanceNet exposes a JSON-RPC interface compatible with Bitcoin Core conventions.
-
 | Method | Description |
 |--------|-------------|
-| `getblockchaininfo` | Chain height, best block hash, difficulty, val_loss |
-| `getblock <hash>` | Full block data by hash |
-| `getblockhash <height>` | Block hash at a given height |
+| `getblockchaininfo` | Chain height, best block, val_loss, model dimensions |
+| `getblock <hash>` | Full block data including PoT fields |
+| `gettraininginfo` | Current model config, loss history, training stats |
 | `generate <n>` | Mine n blocks (regtest only) |
 | `sendrawtransaction <hex>` | Broadcast a signed transaction |
-| `gettxout <txid> <vout>` | Query a specific UTXO |
 | `getpeerinfo` | Connected peers and their state |
-| `getmininginfo` | Current mining/training status |
-
-Default RPC port: **9556** (mainnet), **19556** (regtest).
-
----
-
-## Network Ports
-
-| Network | P2P Port | RPC Port |
-|---------|----------|----------|
-| Mainnet | 9555 | 9556 |
-| Regtest | 19555 | 19556 |
-
-Lightning payment channels also operate on port **9556**.
+| `getmininginfo` | Mining/training status |
 
 ---
 
@@ -169,23 +192,18 @@ Lightning payment channels also operate on port **9556**.
 4. Ensure all tests pass (`ninja -C build && ./build/rnet_tests`)
 5. Open a pull request
 
-Key conventions:
-- `using Mutex = std::mutex;` (non-recursive) — use `*Locked()` method variants for locked access
-- Coinbase outputs: Ed25519 raw `[0x20][32-byte pubkey][0xAC]`
-- Regular outputs: P2WPKH `[0x00][0x14][20-byte Hash160(pubkey)]`
-- Hash160 = first 20 bytes of Keccak256d(data)
-- `rnet_wallet` and `rnet_node` must never import each other
-
 ---
 
 ## License
 
 ResonanceNet is released under the [MIT License](COPYING).
 
-Copyright (c) 2026 ResonanceNet Contributors
+Copyright (c) 2025-2026 ResonanceNet Contributors
 
 ---
 
-**GitHub**: [Kristian5013/resonancenet](https://github.com/Kristian5013/resonancenet)
 **Website**: [kristian5013.github.io/resonancenet](https://kristian5013.github.io/resonancenet/)
-**Telegram**: [resonance_net_main](https://t.me/resonance_net_main)
+**Telegram**: [ResonanceNet AI Blockchain](https://t.me/resonance_net_main)
+**Releases**: [Download](https://github.com/Kristian5013/resonancenet/releases)
+**Whitepaper**: [PDF](https://kristian5013.github.io/resonancenet/ResonanceNet_Whitepaper_V2.pdf)
+**Email**: pilatovichkristian2@gmail.com
