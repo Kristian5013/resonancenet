@@ -3,6 +3,8 @@
 #include <set>
 
 #include "primitives/amount.h"
+#include "script/interpreter.h"
+#include "script/verify.h"
 
 namespace rnet::consensus {
 
@@ -59,6 +61,71 @@ bool check_transaction(const primitives::CTransaction& tx, ValidationState& stat
                 return false;
             }
         }
+    }
+
+    return true;
+}
+
+bool check_inputs(const primitives::CTransaction& tx,
+                  const chain::CCoinsViewCache& coins,
+                  ValidationState& state) {
+    // Coinbase transactions have no inputs to check
+    if (tx.is_coinbase()) {
+        return true;
+    }
+
+    int64_t total_in = 0;
+
+    for (unsigned int i = 0; i < tx.vin().size(); ++i) {
+        const auto& txin = tx.vin()[i];
+
+        // 1. Look up the coin in the UTXO set
+        chain::Coin coin;
+        if (!coins.get_coin(txin.prevout, coin)) {
+            state.invalid("bad-txns-inputs-missingorspent");
+            return false;
+        }
+
+        // 2. Verify the coin is not spent
+        if (coin.is_spent()) {
+            state.invalid("bad-txns-inputs-missingorspent");
+            return false;
+        }
+
+        // 3. Sum input values and check for overflow
+        total_in += coin.out.value;
+        if (!primitives::MoneyRange(coin.out.value) ||
+            !primitives::MoneyRange(total_in)) {
+            state.invalid("bad-txns-inputvalues-outofrange");
+            return false;
+        }
+
+        // 4. Run script verification
+        script::CScript script_sig(txin.script_sig.begin(),
+                                   txin.script_sig.end());
+        script::CScript script_pub_key(coin.out.script_pub_key.begin(),
+                                       coin.out.script_pub_key.end());
+
+        script::TransactionSignatureChecker checker(&tx, i, coin.out.value);
+        script::ScriptError serror = script::ScriptError::OK;
+
+        const primitives::CScriptWitness* witness =
+            txin.witness.is_null() ? nullptr : &txin.witness;
+
+        if (!script::verify_script(script_sig, script_pub_key, witness,
+                                   script::STANDARD_SCRIPT_VERIFY_FLAGS,
+                                   checker, &serror)) {
+            state.invalid("mandatory-script-verify-flag-failed ("
+                          + std::string(script::script_error_string(serror))
+                          + ")");
+            return false;
+        }
+    }
+
+    // 5. Verify inputs cover outputs (no inflation)
+    if (total_in < tx.get_value_out()) {
+        state.invalid("bad-txns-in-belowout");
+        return false;
     }
 
     return true;

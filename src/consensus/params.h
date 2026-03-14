@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "core/types.h"
 #include "primitives/amount.h"
 
 namespace rnet::consensus {
@@ -34,6 +35,10 @@ struct ConsensusParams {
     int min_steps_per_block = 100;
     int max_steps_per_block = 50000;
     int eval_batches = 20;
+
+    /// Consensus-pinned dataset hash. Blocks must train on a dataset matching
+    /// this hash. Zero means "no dataset pinning" (used in regtest).
+    rnet::uint256 consensus_dataset_hash{};
 
     // --- Genesis model configuration ---
     uint32_t genesis_d_model = 384;

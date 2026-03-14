@@ -339,6 +339,14 @@ Result<void> CChainState::connect_block(
         }
     }
 
+    // --- Step 3.5: Verify inputs for non-coinbase transactions ---
+    for (size_t i = 1; i < block.vtx.size(); ++i) {
+        consensus::ValidationState tx_state;
+        if (!consensus::check_inputs(*block.vtx[i], coins_cache_, tx_state)) {
+            return Result<void>::err(tx_state.reject_reason);
+        }
+    }
+
     // --- Step 4: Build undo data and update UTXO set ---
     std::vector<Coin> undo_coins;
 

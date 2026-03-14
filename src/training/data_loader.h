@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "core/error.h"
+#include "core/types.h"
 
 namespace rnet::training {
 
@@ -23,6 +24,7 @@ class DataLoader {
 public:
     /// Load a pre-tokenized dataset from disk.
     /// The file format is raw int32 tokens, little-endian.
+    /// Computes and stores the Keccak-256d hash of the raw file content.
     Result<void> load_dataset(const std::filesystem::path& path);
 
     /// Get the next batch. The batch contains input tokens and targets
@@ -38,11 +40,18 @@ public:
     /// Total number of tokens in the loaded dataset.
     size_t total_tokens() const;
 
+    /// Keccak-256d hash of the raw dataset file bytes.
+    /// Only valid after a successful load_dataset() call.
+    rnet::uint256 dataset_hash() const;
+
 private:
     std::vector<int> tokens_;
     size_t pos_ = 0;
     int last_batch_size_ = 0;
     int last_seq_len_ = 0;
+
+    /// Keccak-256d hash computed over the raw file content at load time.
+    rnet::uint256 dataset_hash_{};
 };
 
 }  // namespace rnet::training

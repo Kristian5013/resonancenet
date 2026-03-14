@@ -5,6 +5,7 @@ namespace rnet::consensus {
 ConsensusParams ConsensusParams::mainnet() {
     ConsensusParams p;
     // All defaults are mainnet values — nothing to override.
+    // consensus_dataset_hash: will be set when mainnet dataset is pinned.
     return p;
 }
 
@@ -27,6 +28,8 @@ ConsensusParams ConsensusParams::testnet() {
     // Smaller model limits
     p.max_d_model = 2048;
     p.max_layers = 24;
+
+    // consensus_dataset_hash: will be set when testnet dataset is pinned.
 
     return p;
 }
@@ -72,6 +75,8 @@ ConsensusParams ConsensusParams::regtest() {
     p.max_checkpoint_size = 50'000'000;
     p.max_block_sigops = 20000;
     p.finality_depth = 2;
+
+    // No dataset pinning in regtest — consensus_dataset_hash stays zero.
 
     return p;
 }

@@ -3,6 +3,8 @@
 #include <cstdio>
 #include <cstring>
 
+#include "crypto/keccak.h"
+
 namespace rnet::training {
 
 Result<void> DataLoader::load_dataset(const std::filesystem::path& path) {
@@ -51,6 +53,16 @@ Result<void> DataLoader::load_dataset(const std::filesystem::path& path) {
 
     std::fclose(f);
     pos_ = 0;
+
+    // -----------------------------------------------------------------------
+    // Compute Keccak-256d hash over the raw file bytes (the loaded tokens).
+    // This ensures the dataset_hash reflects exactly what was loaded.
+    // -----------------------------------------------------------------------
+    auto raw_bytes = std::span<const uint8_t>(
+        reinterpret_cast<const uint8_t*>(tokens_.data()),
+        n_tokens * sizeof(int32_t));
+    dataset_hash_ = crypto::keccak256d(raw_bytes);
+
     return Result<void>::ok();
 }
 
@@ -100,6 +112,10 @@ bool DataLoader::has_more() const {
 
 size_t DataLoader::total_tokens() const {
     return tokens_.size();
+}
+
+rnet::uint256 DataLoader::dataset_hash() const {
+    return dataset_hash_;
 }
 
 }  // namespace rnet::training

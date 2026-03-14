@@ -175,6 +175,7 @@ Result<SolverResult> TrainingSolver::solve(
     result.improvement = (parent_loss - val_loss) / parent_loss;
     result.train_steps = static_cast<uint32_t>(n_steps);
     result.checkpoint_hash = hash_result.value();
+    result.dataset_hash = train_data.dataset_hash();
     result.checkpoint_path = ckpt_path;
     result.model_config = new_config;
 

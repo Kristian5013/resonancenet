@@ -21,6 +21,7 @@ struct SolverResult {
     float improvement = 0.0f;            ///< Fractional improvement over parent
     uint32_t train_steps = 0;            ///< Actual steps trained
     rnet::uint256 checkpoint_hash{};     ///< Hash of the output checkpoint
+    rnet::uint256 dataset_hash{};        ///< Keccak-256d hash of the training dataset
     std::filesystem::path checkpoint_path; ///< Path to saved checkpoint
     training::ModelConfig model_config;  ///< Model config used (may have grown)
 };

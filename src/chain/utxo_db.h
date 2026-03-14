@@ -10,8 +10,9 @@
 namespace rnet::chain {
 
 /// CCoinsViewDB — persistent UTXO database backed by LevelDB.
-/// This is a stub implementation that stores data in memory.
-/// A full implementation would use LevelDB or similar.
+/// Keys: serialized COutPoint (txid + vout index).
+/// Values: serialized Coin (CTxOut + height + is_coinbase + val_loss_at_creation).
+/// Special key "B" stores the best block hash.
 class CCoinsViewDB : public CCoinsView {
 public:
     explicit CCoinsViewDB(const core::fs::path& db_path,
@@ -31,15 +32,17 @@ public:
 
     size_t estimate_size() const override;
 
-    /// Write a batch of coin updates to the database
+    /// Write a batch of coin updates to the database.
+    /// Spent coins (is_null() on out) are deleted; live coins are written.
+    /// The best block hash is updated atomically in the same batch.
     Result<void> batch_write(
         const std::unordered_map<primitives::COutPoint, Coin>& map,
         const rnet::uint256& best_block);
 
-    /// Compact the database (LevelDB compaction)
+    /// Compact the database (triggers LevelDB compaction over full key range)
     void compact();
 
-    /// Estimate database size on disk
+    /// Estimate database size on disk via LevelDB property
     uint64_t estimated_db_size() const;
 
 private:

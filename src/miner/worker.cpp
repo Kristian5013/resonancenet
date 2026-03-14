@@ -200,6 +200,7 @@ void MiningWorker::run() {
             // Fill in the template block with solver results
             primitives::CBlock found_block = tmpl->block;
             found_block.checkpoint_hash = sol.checkpoint_hash;
+            found_block.dataset_hash = sol.dataset_hash;
             found_block.val_loss = sol.val_loss;
             found_block.train_steps = sol.train_steps;
 
