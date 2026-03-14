@@ -1,3 +1,7 @@
+// Copyright (c) 2025-2026 The ResonanceNet Core developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #include "wallet/create_tx.h"
 
 #include "core/logging.h"
@@ -5,11 +9,29 @@
 
 namespace rnet::wallet {
 
+// ===========================================================================
+//  create_transaction -- assemble an unsigned transaction from coin selection
+// ===========================================================================
+//
+//  1. Validate recipients and total send amount.
+//  2. Run Branch-and-Bound coin selection (via select_coins).
+//  3. Build inputs from selected coins (with optional RBF signalling).
+//  4. Build recipient outputs, optionally subtracting the fee.
+//  5. Append a change output if the selection produced surplus.
+//
+//  The returned CreateTxResult contains the unsigned mutable transaction,
+//  the coin selection details, and the total fee.  Signing is a separate
+//  step (see sign_tx.cpp).
+
+// ---------------------------------------------------------------------------
+// create_transaction
+// ---------------------------------------------------------------------------
+
 Result<CreateTxResult> create_transaction(
     const std::vector<WalletCoin>& available_coins,
     const CreateTxParams& params) {
 
-    // Validate recipients
+    // 1. Validate recipients.
     if (params.recipients.empty()) {
         return Result<CreateTxResult>::err("no recipients specified");
     }
@@ -29,7 +51,7 @@ Result<CreateTxResult> create_transaction(
         return Result<CreateTxResult>::err("total send amount out of range");
     }
 
-    // Coin selection
+    // 2. Coin selection (Branch-and-Bound with knapsack fallback).
     CoinSelectionParams cs_params;
     cs_params.target_value = total_send;
     cs_params.fee_rate = params.fee_rate;
@@ -41,12 +63,12 @@ Result<CreateTxResult> create_transaction(
     }
     auto& selection = selection_result.value();
 
-    // Build transaction
+    // 3. Build the mutable transaction shell.
     primitives::CMutableTransaction mtx;
     mtx.version = params.version;
     mtx.locktime = params.locktime;
 
-    // Add inputs
+    // 4. Add inputs from selected coins.
     for (const auto& coin : selection.selected) {
         primitives::CTxIn txin(coin.outpoint);
         if (params.rbf) {
@@ -55,7 +77,7 @@ Result<CreateTxResult> create_transaction(
         mtx.vin.push_back(std::move(txin));
     }
 
-    // Add recipient outputs
+    // 5. Add recipient outputs.
     int64_t fee = selection.fee;
     for (const auto& r : params.recipients) {
         auto decoded = primitives::decode_address(r.address, params.network);
@@ -76,7 +98,7 @@ Result<CreateTxResult> create_transaction(
         mtx.vout.emplace_back(output_value, std::move(script));
     }
 
-    // Add change output if needed
+    // 6. Add change output if needed.
     CreateTxResult result;
     if (selection.has_change && selection.change > 0) {
         std::vector<uint8_t> change_script;
@@ -98,6 +120,7 @@ Result<CreateTxResult> create_transaction(
         result.change_address = params.change_address;
     }
 
+    // 7. Package the result.
     result.tx = std::move(mtx);
     result.coin_selection = std::move(selection);
     result.total_fee = fee;
@@ -105,4 +128,4 @@ Result<CreateTxResult> create_transaction(
     return Result<CreateTxResult>::ok(std::move(result));
 }
 
-}  // namespace rnet::wallet
+} // namespace rnet::wallet

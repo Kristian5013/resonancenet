@@ -1,24 +1,39 @@
-#include "rpc/network.h"
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
 
-#include <cstdio>
+#include "rpc/network.h"
 
 #include "core/logging.h"
 #include "net/conn_manager.h"
 #include "net/connection.h"
 #include "node/context.h"
 
+#include <cstdio>
+
 namespace rnet::rpc {
 
-// ── getnetworkinfo ──────────────────────────────────────────────────
+// ===========================================================================
+//  Network RPC handlers
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// rpc_getnetworkinfo
+//
+// Returns version info, connection counts, relay fees, and reachable
+// networks.  Mirrors Bitcoin Core's getnetworkinfo shape.
+// ---------------------------------------------------------------------------
 
 static JsonValue rpc_getnetworkinfo(const RPCRequest& req,
                                     node::NodeContext& ctx) {
+    // 1. Build static version fields.
     JsonValue result = JsonValue::object();
 
     result.set("version", JsonValue(static_cast<int64_t>(40000)));  // v4.0.0
     result.set("subversion", JsonValue(std::string("/ResonanceNet:4.0.0/")));
     result.set("protocolversion", JsonValue(static_cast<int64_t>(70016)));
 
+    // 2. Populate connection counts from ConnManager.
     if (ctx.connman) {
         result.set("connections",
                     JsonValue(static_cast<int64_t>(ctx.connman->connection_count())));
@@ -33,12 +48,13 @@ static JsonValue rpc_getnetworkinfo(const RPCRequest& req,
         result.set("networkactive", JsonValue(false));
     }
 
+    // 3. Relay and fee policy.
     result.set("relayfee", JsonValue(0.00001));
     result.set("incrementalfee", JsonValue(0.00001));
     result.set("localrelay", JsonValue(true));
     result.set("timeoffset", JsonValue(static_cast<int64_t>(0)));
 
-    // Networks
+    // 4. Enumerate reachable networks.
     JsonValue networks = JsonValue::array();
     {
         JsonValue net = JsonValue::object();
@@ -61,14 +77,21 @@ static JsonValue rpc_getnetworkinfo(const RPCRequest& req,
     return result;
 }
 
-// ── getpeerinfo ─────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// rpc_getpeerinfo
+//
+// Iterates active connections and returns per-peer details: address,
+// bytes transferred, ping latency, sync height, etc.
+// ---------------------------------------------------------------------------
 
 static JsonValue rpc_getpeerinfo(const RPCRequest& req,
                                  node::NodeContext& ctx) {
     JsonValue peers = JsonValue::array();
 
+    // 1. Early-out when P2P is unavailable.
     if (!ctx.connman) return peers;
 
+    // 2. Walk every live connection.
     auto connections = ctx.connman->get_connections();
     for (const auto& conn : connections) {
         if (!conn) continue;
@@ -110,7 +133,11 @@ static JsonValue rpc_getpeerinfo(const RPCRequest& req,
     return peers;
 }
 
-// ── getconnectioncount ──────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// rpc_getconnectioncount
+//
+// Trivial wrapper returning the integer peer count.
+// ---------------------------------------------------------------------------
 
 static JsonValue rpc_getconnectioncount(const RPCRequest& req,
                                         node::NodeContext& ctx) {
@@ -118,10 +145,16 @@ static JsonValue rpc_getconnectioncount(const RPCRequest& req,
     return JsonValue(static_cast<int64_t>(ctx.connman->connection_count()));
 }
 
-// ── addnode ─────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// rpc_addnode
+//
+// Adds, removes, or one-try-connects a peer by "host:port" address.
+// Parses dotted-quad IPv4; defaults to port 9555.
+// ---------------------------------------------------------------------------
 
 static JsonValue rpc_addnode(const RPCRequest& req,
                              node::NodeContext& ctx) {
+    // 1. Validate required parameters.
     const auto& node_param = get_param(req, 0);
     const auto& cmd_param = get_param(req, 1);
 
@@ -137,7 +170,7 @@ static JsonValue rpc_addnode(const RPCRequest& req,
     std::string addr_str = node_param.as_string();
     std::string command = cmd_param.as_string();
 
-    // Parse "host:port" string into CNetAddr
+    // 2. Parse "host:port" string into CNetAddr.
     auto parse_addr = [](const std::string& s) -> net::CNetAddr {
         net::CNetAddr addr;
         std::string host = s;
@@ -159,6 +192,7 @@ static JsonValue rpc_addnode(const RPCRequest& req,
         return addr;
     };
 
+    // 3. Dispatch on command string.
     if (command == "add") {
         auto addr = parse_addr(addr_str);
         auto result = ctx.connman->connect_to(addr);
@@ -183,7 +217,11 @@ static JsonValue rpc_addnode(const RPCRequest& req,
     return JsonValue();  // null = success
 }
 
-// ── disconnectnode ──────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// rpc_disconnectnode
+//
+// Disconnects a peer identified by address string or numeric connection id.
+// ---------------------------------------------------------------------------
 
 static JsonValue rpc_disconnectnode(const RPCRequest& req,
                                     node::NodeContext& ctx) {
@@ -194,14 +232,15 @@ static JsonValue rpc_disconnectnode(const RPCRequest& req,
     const auto& addr_param = get_param(req, 0);
     const auto& id_param = get_param_optional(req, 1);
 
+    // 1. Prefer numeric node-id when supplied.
     if (id_param.is_int()) {
         uint64_t conn_id = static_cast<uint64_t>(id_param.as_int());
         ctx.connman->disconnect(conn_id);
         return JsonValue();
     }
 
+    // 2. Fall back to address-string lookup.
     if (addr_param.is_string()) {
-        // Find by address and disconnect
         auto connections = ctx.connman->get_connections();
         for (const auto& conn : connections) {
             if (conn && conn->addr().to_string() == addr_param.as_string()) {
@@ -217,7 +256,9 @@ static JsonValue rpc_disconnectnode(const RPCRequest& req,
                           "address (string) or nodeid (int) required");
 }
 
-// ── Registration ────────────────────────────────────────────────────
+// ===========================================================================
+//  Registration
+// ===========================================================================
 
 void register_network_rpcs(RPCTable& table) {
     table.register_command({
@@ -258,4 +299,4 @@ void register_network_rpcs(RPCTable& table) {
     });
 }
 
-}  // namespace rnet::rpc
+} // namespace rnet::rpc

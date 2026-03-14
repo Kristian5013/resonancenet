@@ -1,35 +1,47 @@
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
+// Own header.
 #include "miner/block_template.h"
 
+// Project headers.
 #include "core/logging.h"
 #include "miner/block_assembler.h"
 #include "miner/difficulty.h"
 
 namespace rnet::miner {
 
+// ---------------------------------------------------------------------------
+// create_block_template
+// ---------------------------------------------------------------------------
+// Assembles a candidate block from the parent header, pending transactions,
+// and miner identity.  Growth and reward are estimated conservatively since
+// the actual validation loss improvement is unknown at template time.
+// ---------------------------------------------------------------------------
 BlockTemplate create_block_template(
     const primitives::CBlockHeader& parent_header,
     const std::vector<primitives::CTransactionRef>& txs,
     const std::vector<int64_t>& tx_fees,
     const crypto::Ed25519PublicKey& miner_pubkey,
     const consensus::EmissionState& emission,
-    const consensus::ConsensusParams& params) {
-
+    const consensus::ConsensusParams& params)
+{
     BlockTemplate tmpl;
 
-    // Compute growth for this block
-    // Assume loss will improve (conservative: we don't know yet)
+    // 1. Compute expected growth for this block.
     tmpl.growth = consensus::GrowthPolicy::expected_growth(parent_header);
 
-    // Compute block reward
+    // 2. Compute block reward.
     // Improvement is unknown at template time; use 0 for base reward estimation.
     // The actual bonus will be computed after the solve.
     tmpl.reward = consensus::compute_block_reward(
         parent_header.height + 1,
-        0.0f,  // Improvement unknown at template time
+        0.0f,
         emission,
         params);
 
-    // Build transaction entries with fee metadata
+    // 3. Build transaction entries with fee metadata.
     std::vector<TxEntry> entries;
     entries.reserve(txs.size());
     for (size_t i = 0; i < txs.size(); ++i) {
@@ -43,7 +55,7 @@ BlockTemplate create_block_template(
         entries.push_back(std::move(entry));
     }
 
-    // Assemble the block
+    // 4. Assemble the block.
     BlockAssembler assembler(params);
     assembler.add_transactions(entries);
     tmpl.block = assembler.assemble(parent_header, miner_pubkey,
@@ -62,4 +74,4 @@ BlockTemplate create_block_template(
     return tmpl;
 }
 
-}  // namespace rnet::miner
+} // namespace rnet::miner

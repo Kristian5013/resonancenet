@@ -1,14 +1,22 @@
+// Copyright (c) 2025 The ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #include "primitives/witness.h"
 
 #include "core/hex.h"
 
 namespace rnet::primitives {
 
-std::string CScriptWitness::to_string() const {
+// ---------------------------------------------------------------------------
+// CScriptWitness::to_string
+//   Renders each witness stack item as a hex-encoded string.
+// ---------------------------------------------------------------------------
+std::string CScriptWitness::to_string() const
+{
     std::string result = "[";
     for (size_t i = 0; i < stack.size(); ++i) {
         if (i > 0) result += ", ";
-        // Represent each stack item as hex
         result += "0x";
         static constexpr char hex_chars[] = "0123456789abcdef";
         for (uint8_t b : stack[i]) {
@@ -20,4 +28,4 @@ std::string CScriptWitness::to_string() const {
     return result;
 }
 
-}  // namespace rnet::primitives
+} // namespace rnet::primitives

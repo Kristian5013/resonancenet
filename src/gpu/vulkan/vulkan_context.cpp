@@ -1,15 +1,32 @@
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #ifdef RNET_HAS_VULKAN
 
+// Own header.
 #include "vulkan_context.h"
+
+// Project headers.
 #include "../../core/logging.h"
 
+// Standard library.
 #include <vulkan/vulkan.h>
 
 namespace rnet::gpu {
 
-std::vector<GpuDeviceInfo> VulkanContext::enumerate() {
+// ---------------------------------------------------------------------------
+// VulkanContext::enumerate
+// ---------------------------------------------------------------------------
+// Creates a temporary VkInstance to enumerate all physical devices, collects
+// their names, VRAM sizes, and Vulkan API versions, then destroys the
+// instance.
+// ---------------------------------------------------------------------------
+std::vector<GpuDeviceInfo> VulkanContext::enumerate()
+{
     std::vector<GpuDeviceInfo> devices;
 
+    // 1. Create a temporary Vulkan instance for enumeration.
     VkApplicationInfo app_info{};
     app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     app_info.pApplicationName = "ResonanceNet";
@@ -28,6 +45,7 @@ std::vector<GpuDeviceInfo> VulkanContext::enumerate() {
         return devices;
     }
 
+    // 2. Enumerate physical devices.
     uint32_t device_count = 0;
     vkEnumeratePhysicalDevices(instance, &device_count, nullptr);
 
@@ -45,6 +63,7 @@ std::vector<GpuDeviceInfo> VulkanContext::enumerate() {
             info.compute_capability_major = VK_API_VERSION_MAJOR(props.apiVersion);
             info.compute_capability_minor = VK_API_VERSION_MINOR(props.apiVersion);
 
+            // Sum device-local heap sizes for total memory.
             VkPhysicalDeviceMemoryProperties mem_props{};
             vkGetPhysicalDeviceMemoryProperties(phys_devices[i], &mem_props);
             info.total_memory = 0;
@@ -59,11 +78,12 @@ std::vector<GpuDeviceInfo> VulkanContext::enumerate() {
         }
     }
 
+    // 3. Clean up.
     vkDestroyInstance(instance, nullptr);
     LogPrintf("Vulkan: found %u device(s)", device_count);
     return devices;
 }
 
-}  // namespace rnet::gpu
+} // namespace rnet::gpu
 
-#endif  // RNET_HAS_VULKAN
+#endif // RNET_HAS_VULKAN

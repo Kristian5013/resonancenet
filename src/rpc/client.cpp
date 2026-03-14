@@ -1,3 +1,7 @@
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -24,18 +28,25 @@ static constexpr socket_t INVALID_SOCK = -1;
 
 #include "rpc/client.h"
 
+#include "core/logging.h"
+
 #include <cstring>
 #include <fstream>
 #include <sstream>
 
-#include "core/logging.h"
-
 namespace rnet::rpc {
 
-// ── Winsock init (same as server) ───────────────────────────────────
+// ===========================================================================
+//  Winsock initialisation (client-side)
+// ===========================================================================
 
 #ifdef _WIN32
 namespace {
+
+// ---------------------------------------------------------------------------
+// RAII Winsock bootstrap -- mirrors the server-side initialiser so both
+// sides of the RPC boundary can work independently.
+// ---------------------------------------------------------------------------
 struct WinsockInitClient {
     WinsockInitClient() {
         WSADATA wsa;
@@ -44,50 +55,77 @@ struct WinsockInitClient {
     ~WinsockInitClient() { WSACleanup(); }
 };
 static WinsockInitClient g_winsock_init_client;
+
 }  // anonymous namespace
 #endif
 
-// ── RPCClient ───────────────────────────────────────────────────────
+// ===========================================================================
+//  RPCClient -- lifecycle
+// ===========================================================================
 
 RPCClient::RPCClient() = default;
 RPCClient::~RPCClient() = default;
 
+// ---------------------------------------------------------------------------
+// set_credentials -- store HTTP Basic auth from user/password pair.
+// ---------------------------------------------------------------------------
 void RPCClient::set_credentials(const std::string& user,
                                 const std::string& password) {
+    // 1. Encode "user:password" as Base64 for the Authorization header.
     auth_header_ = "Basic " + base64_encode(user + ":" + password);
 }
 
+// ---------------------------------------------------------------------------
+// load_cookie -- read the .cookie file written by rnetd at startup.
+// Format: "__cookie__:hexstring"
+// ---------------------------------------------------------------------------
 bool RPCClient::load_cookie(const std::filesystem::path& cookie_path) {
+    // 1. Open the cookie file.
     std::ifstream in(cookie_path);
     if (!in) return false;
 
+    // 2. Read the single-line cookie.
     std::string line;
     if (!std::getline(in, line)) return false;
 
-    // Cookie format: "__cookie__:hexstring"
+    // 3. Split on the colon separator.
     auto colon = line.find(':');
     if (colon == std::string::npos) return false;
 
     std::string user = line.substr(0, colon);
     std::string pass = line.substr(colon + 1);
-    // Trim trailing whitespace
+
+    // 4. Trim trailing whitespace.
     while (!pass.empty() && (pass.back() == '\n' || pass.back() == '\r' ||
                              pass.back() == ' ')) {
         pass.pop_back();
     }
 
+    // 5. Store as Basic auth header.
     auth_header_ = "Basic " + base64_encode(user + ":" + pass);
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// auto_auth -- try cookie-based auth, fall back to existing credentials.
+// ---------------------------------------------------------------------------
 bool RPCClient::auto_auth() {
+    // 1. Attempt cookie file in the configured data directory.
     if (!data_dir_.empty()) {
         auto cookie_path = data_dir_ / ".cookie";
         if (load_cookie(cookie_path)) return true;
     }
+    // 2. Fall back to previously set credentials.
     return !auth_header_.empty();
 }
 
+// ===========================================================================
+//  RPCClient -- RPC call / send
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// call -- convenience wrapper: builds an RPCRequest and delegates to send().
+// ---------------------------------------------------------------------------
 core::Result<RPCResponse> RPCClient::call(const std::string& method,
                                           const JsonValue& params) {
     RPCRequest req;
@@ -97,8 +135,11 @@ core::Result<RPCResponse> RPCClient::call(const std::string& method,
     return send(req);
 }
 
+// ---------------------------------------------------------------------------
+// send -- serialise the RPCRequest to JSON-RPC 2.0, POST it, parse reply.
+// ---------------------------------------------------------------------------
 core::Result<RPCResponse> RPCClient::send(const RPCRequest& req) {
-    // Build JSON-RPC request body
+    // 1. Build the JSON-RPC request body.
     JsonValue body = JsonValue::object();
     body.set("jsonrpc", JsonValue("2.0"));
     body.set("method", JsonValue(req.method));
@@ -107,17 +148,19 @@ core::Result<RPCResponse> RPCClient::send(const RPCRequest& req) {
 
     std::string json_body = body.to_string();
 
+    // 2. Perform the HTTP POST.
     auto result = http_post(json_body);
     if (result.is_err()) {
         return core::Result<RPCResponse>::err(result.error());
     }
 
-    // Parse response JSON
+    // 3. Parse the response JSON.
     JsonValue resp_json;
     if (!parse_json(result.value(), resp_json)) {
         return core::Result<RPCResponse>::err("failed to parse response JSON");
     }
 
+    // 4. Extract result / error / id fields.
     RPCResponse response;
     response.result = resp_json["result"];
     response.error = resp_json["error"];
@@ -126,8 +169,18 @@ core::Result<RPCResponse> RPCClient::send(const RPCRequest& req) {
     return core::Result<RPCResponse>::ok(std::move(response));
 }
 
+// ===========================================================================
+//  RPCClient -- HTTP transport
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// http_post -- raw HTTP/1.1 POST over a blocking TCP socket.
+//
+// Design: intentionally minimal (no HTTP library dependency).  The server
+// always responds with Connection: close, so we simply read until EOF.
+// ---------------------------------------------------------------------------
 core::Result<std::string> RPCClient::http_post(const std::string& body) {
-    // Resolve address
+    // 1. Resolve the target address.
     struct addrinfo hints{};
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
@@ -141,6 +194,7 @@ core::Result<std::string> RPCClient::http_post(const std::string& body) {
         return core::Result<std::string>::err(last_error_);
     }
 
+    // 2. Create the TCP socket.
     socket_t sock = ::socket(result->ai_family, result->ai_socktype,
                              result->ai_protocol);
     if (sock == INVALID_SOCK) {
@@ -149,7 +203,7 @@ core::Result<std::string> RPCClient::http_post(const std::string& body) {
         return core::Result<std::string>::err(last_error_);
     }
 
-    // Set timeout
+    // 3. Set send/receive timeouts (30 s).
 #ifdef _WIN32
     DWORD timeout_ms = 30000;
     ::setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
@@ -168,7 +222,7 @@ core::Result<std::string> RPCClient::http_post(const std::string& body) {
                  reinterpret_cast<const char*>(&tv), sizeof(tv));
 #endif
 
-    // Connect
+    // 4. Connect to the server.
     if (::connect(sock, result->ai_addr,
                   static_cast<int>(result->ai_addrlen)) != 0) {
         CLOSE_SOCKET(sock);
@@ -178,7 +232,7 @@ core::Result<std::string> RPCClient::http_post(const std::string& body) {
     }
     ::freeaddrinfo(result);
 
-    // Build HTTP request
+    // 5. Build the HTTP request.
     std::ostringstream http_req;
     http_req << "POST / HTTP/1.1\r\n";
     http_req << "Host: " << host_ << "\r\n";
@@ -193,7 +247,7 @@ core::Result<std::string> RPCClient::http_post(const std::string& body) {
 
     std::string request = http_req.str();
 
-    // Send
+    // 6. Send the request bytes.
     const char* send_ptr = request.c_str();
     size_t send_remaining = request.size();
     while (send_remaining > 0) {
@@ -207,7 +261,7 @@ core::Result<std::string> RPCClient::http_post(const std::string& body) {
         send_remaining -= static_cast<size_t>(sent);
     }
 
-    // Read response
+    // 7. Read the full response (server sends Connection: close).
     std::string response;
     response.reserve(8192);
     char buf[4096];
@@ -218,14 +272,14 @@ core::Result<std::string> RPCClient::http_post(const std::string& body) {
     }
     CLOSE_SOCKET(sock);
 
-    // Parse HTTP response
+    // 8. Locate the header/body boundary.
     auto header_end = response.find("\r\n\r\n");
     if (header_end == std::string::npos) {
         last_error_ = "malformed HTTP response";
         return core::Result<std::string>::err(last_error_);
     }
 
-    // Parse status line
+    // 9. Parse the HTTP status code from the first line.
     auto first_line_end = response.find("\r\n");
     std::string status_line = response.substr(0, first_line_end);
     // "HTTP/1.1 200 OK"
@@ -241,8 +295,10 @@ core::Result<std::string> RPCClient::http_post(const std::string& body) {
         }
     }
 
+    // 10. Extract the response body.
     std::string resp_body = response.substr(header_end + 4);
 
+    // 11. Reject authentication failures early.
     if (last_http_status_ == 401) {
         last_error_ = "authentication failed (HTTP 401)";
         return core::Result<std::string>::err(last_error_);
@@ -251,11 +307,16 @@ core::Result<std::string> RPCClient::http_post(const std::string& body) {
     return core::Result<std::string>::ok(std::move(resp_body));
 }
 
-// ── Base64 ──────────────────────────────────────────────────────────
+// ===========================================================================
+//  Base64 encoder (used for HTTP Basic auth)
+// ===========================================================================
 
 static constexpr char BASE64_TABLE[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+// ---------------------------------------------------------------------------
+// base64_encode -- RFC 4648 standard Base64 encoding.
+// ---------------------------------------------------------------------------
 std::string RPCClient::base64_encode(const std::string& input) {
     std::string out;
     size_t i = 0;
@@ -288,4 +349,4 @@ std::string RPCClient::base64_encode(const std::string& input) {
     return out;
 }
 
-}  // namespace rnet::rpc
+} // namespace rnet::rpc

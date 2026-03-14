@@ -1,6 +1,16 @@
+// Copyright (c) 2024-2026 The ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #include "script/standard.h"
 
 namespace rnet::script {
+
+// ---------------------------------------------------------------------------
+// txout_type_name
+//
+// Human-readable label for each standard output type.
+// ---------------------------------------------------------------------------
 
 std::string_view txout_type_name(TxoutType type) {
     switch (type) {
@@ -16,11 +26,25 @@ std::string_view txout_type_name(TxoutType type) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// solver
+//
+// Template-match a scriptPubKey against known standard output patterns.
+// Returns the type and extracts solutions (hashes, pubkeys).
+//
+// Pattern priority:
+//   1. OP_RETURN (null data)
+//   2. Witness programs (P2WPKH 20B, P2WSH 32B, unknown versions)
+//   3. P2PKH: OP_DUP OP_HASH160 <20B> OP_EQUALVERIFY OP_CHECKSIG
+//   4. P2SH:  OP_HASH160 <20B> OP_EQUAL
+//   5. P2PK:  <33|65|32 byte pubkey> OP_CHECKSIG
+// ---------------------------------------------------------------------------
+
 TxoutType solver(const CScript& script_pub_key,
                  std::vector<std::vector<uint8_t>>& solutions) {
     solutions.clear();
 
-    // OP_RETURN [data]
+    // 1. OP_RETURN [data] -- null data output.
     if (script_pub_key.is_unspendable()) {
         if (script_pub_key.size() > 1) {
             solutions.emplace_back(script_pub_key.begin() + 1,
@@ -29,7 +53,7 @@ TxoutType solver(const CScript& script_pub_key,
         return TxoutType::NULL_DATA;
     }
 
-    // Witness programs: OP_n [2..40 bytes]
+    // 2. Witness programs: OP_n [2..40 bytes].
     int wit_version = -1;
     std::vector<uint8_t> wit_program;
     if (script_pub_key.is_witness_program(wit_version, wit_program)) {
@@ -48,7 +72,7 @@ TxoutType solver(const CScript& script_pub_key,
         return TxoutType::NONSTANDARD;
     }
 
-    // P2PKH: OP_DUP OP_HASH160 [20 bytes] OP_EQUALVERIFY OP_CHECKSIG
+    // 3. P2PKH: OP_DUP OP_HASH160 [20 bytes] OP_EQUALVERIFY OP_CHECKSIG.
     if (script_pub_key.size() == 25 &&
         script_pub_key[0] == static_cast<uint8_t>(Opcode::OP_DUP) &&
         script_pub_key[1] == static_cast<uint8_t>(Opcode::OP_HASH160) &&
@@ -60,15 +84,15 @@ TxoutType solver(const CScript& script_pub_key,
         return TxoutType::PUBKEYHASH;
     }
 
-    // P2SH: OP_HASH160 [20 bytes] OP_EQUAL
+    // 4. P2SH: OP_HASH160 [20 bytes] OP_EQUAL.
     if (script_pub_key.is_pay_to_script_hash()) {
         solutions.emplace_back(script_pub_key.begin() + 2,
                                script_pub_key.begin() + 22);
         return TxoutType::SCRIPTHASH;
     }
 
-    // P2PK: [33 or 65 byte pubkey] OP_CHECKSIG
-    // Also Ed25519: [32 byte pubkey prefix 0x20] OP_CHECKSIG
+    // 5. P2PK: [33|65|32 byte pubkey] OP_CHECKSIG.
+    //    The 32-byte variant supports Ed25519 raw pubkeys.
     if (script_pub_key.size() >= 35) {
         uint8_t pk_len = script_pub_key[0];
         if ((pk_len == 33 || pk_len == 65 || pk_len == 32) &&
@@ -82,6 +106,18 @@ TxoutType solver(const CScript& script_pub_key,
 
     return TxoutType::NONSTANDARD;
 }
+
+// ---------------------------------------------------------------------------
+// get_script_for_destination
+//
+// Build a scriptPubKey from a type and hash/pubkey bytes.
+//
+//   PUBKEYHASH  -->  OP_DUP OP_HASH160 <hash> OP_EQUALVERIFY OP_CHECKSIG
+//   SCRIPTHASH  -->  OP_HASH160 <hash> OP_EQUAL
+//   P2WPKH      -->  OP_0 <20-byte hash>
+//   P2WSH       -->  OP_0 <32-byte hash>
+//   PUBKEY      -->  <pubkey> OP_CHECKSIG
+// ---------------------------------------------------------------------------
 
 CScript get_script_for_destination(TxoutType type,
                                    const std::vector<uint8_t>& hash) {
@@ -102,19 +138,16 @@ CScript get_script_for_destination(TxoutType type,
             break;
 
         case TxoutType::WITNESS_V0_KEYHASH:
-            // OP_0 [20-byte hash]
             script << Opcode::OP_0
                    << hash;
             break;
 
         case TxoutType::WITNESS_V0_SCRIPTHASH:
-            // OP_0 [32-byte hash]
             script << Opcode::OP_0
                    << hash;
             break;
 
         case TxoutType::PUBKEY:
-            // [pubkey] OP_CHECKSIG
             script << hash
                    << Opcode::OP_CHECKSIG;
             break;
@@ -125,11 +158,24 @@ CScript get_script_for_destination(TxoutType type,
     return script;
 }
 
+// ---------------------------------------------------------------------------
+// is_standard_script
+//
+// Returns true if the scriptPubKey matches any recognized standard pattern.
+// ---------------------------------------------------------------------------
+
 bool is_standard_script(const CScript& script_pub_key) {
     std::vector<std::vector<uint8_t>> solutions;
     TxoutType type = solver(script_pub_key, solutions);
     return type != TxoutType::NONSTANDARD;
 }
+
+// ---------------------------------------------------------------------------
+// extract_destination
+//
+// Convenience wrapper: solve the script and return the first solution
+// (the destination hash or pubkey) along with the type.
+// ---------------------------------------------------------------------------
 
 TxoutType extract_destination(const CScript& script_pub_key,
                               std::vector<uint8_t>& hash_out) {
@@ -144,4 +190,4 @@ TxoutType extract_destination(const CScript& script_pub_key,
     return type;
 }
 
-}  // namespace rnet::script
+} // namespace rnet::script

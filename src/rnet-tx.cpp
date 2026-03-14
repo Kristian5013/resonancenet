@@ -1,6 +1,8 @@
-// rnet-tx — Offline transaction utility
-// Creates, signs, and decodes transactions without connecting to rnetd.
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
 
+// Project headers.
 #include "core/config.h"
 #include "core/error.h"
 #include "core/hex.h"
@@ -15,6 +17,7 @@
 #include "primitives/txin.h"
 #include "primitives/txout.h"
 
+// Standard library.
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -26,9 +29,15 @@
 
 using namespace rnet;
 
-// ─── Helpers ────────────────────────────────────────────────────────
+// ===========================================================================
+//  Helpers
+// ===========================================================================
 
-static void print_usage() {
+// ---------------------------------------------------------------------------
+// print_usage
+// ---------------------------------------------------------------------------
+static void print_usage()
+{
     fprintf(stderr,
         "Usage: rnet-tx <command> [options]\n"
         "\n"
@@ -53,15 +62,27 @@ static void print_usage() {
     );
 }
 
-static std::pair<std::string, std::string> split_at(const std::string& s, char delim) {
+// ---------------------------------------------------------------------------
+// split_at
+// ---------------------------------------------------------------------------
+static std::pair<std::string, std::string> split_at(const std::string& s, char delim)
+{
     auto pos = s.find(delim);
     if (pos == std::string::npos) return {s, ""};
     return {s.substr(0, pos), s.substr(pos + 1)};
 }
 
-// ─── decoderawtransaction ───────────────────────────────────────────
+// ===========================================================================
+//  decoderawtransaction
+// ===========================================================================
 
-static int cmd_decode(const std::string& hex_str) {
+// ---------------------------------------------------------------------------
+// cmd_decode
+// ---------------------------------------------------------------------------
+// Deserialises a hex-encoded transaction and prints its fields as JSON.
+// ---------------------------------------------------------------------------
+static int cmd_decode(const std::string& hex_str)
+{
     auto bytes = core::from_hex(hex_str);
     if (bytes.empty()) {
         fprintf(stderr, "Error: invalid hex string\n");
@@ -117,9 +138,18 @@ static int cmd_decode(const std::string& hex_str) {
     return 0;
 }
 
-// ─── createrawtransaction ───────────────────────────────────────────
+// ===========================================================================
+//  createrawtransaction
+// ===========================================================================
 
-static int cmd_create(int argc, char* argv[], int start) {
+// ---------------------------------------------------------------------------
+// cmd_create
+// ---------------------------------------------------------------------------
+// Builds an unsigned transaction from command-line inputs (txid:vout pairs
+// before "--") and outputs (address:amount pairs after "--").
+// ---------------------------------------------------------------------------
+static int cmd_create(int argc, char* argv[], int start)
+{
     primitives::CMutableTransaction mtx;
     mtx.version = primitives::TX_VERSION_DEFAULT;
 
@@ -133,25 +163,24 @@ static int cmd_create(int argc, char* argv[], int start) {
             continue;
         }
         if (reading_inputs) {
+            // 1. Parse input: txid:vout.
             auto [txid_hex, vout_str] = split_at(arg, ':');
             auto txid = uint256::from_hex(txid_hex);
             uint32_t vout = static_cast<uint32_t>(std::atoi(vout_str.c_str()));
             mtx.vin.emplace_back(primitives::COutPoint(txid, vout));
         } else {
+            // 2. Parse output: address:amount.
             auto [addr, amount_str] = split_at(arg, ':');
             int64_t amount = 0;
             if (!primitives::ParseMoney(amount_str, amount)) {
                 fprintf(stderr, "Error: invalid amount '%s'\n", amount_str.c_str());
                 return 1;
             }
-            // For simplicity, store the address as a placeholder script.
-            // In production, this would decode the bech32 address to a script.
+            // P2WPKH placeholder: [0x00][0x14][20-byte-hash].
+            // The actual address decoding would happen here in production.
             std::vector<uint8_t> script;
-            // P2WPKH placeholder: [0x00][0x14][20-byte-hash]
-            // The actual address decoding would happen here
             script.push_back(0x00);
             script.push_back(0x14);
-            // Use address bytes as placeholder hash
             auto addr_bytes = core::from_hex(addr);
             if (addr_bytes.size() >= 20) {
                 script.insert(script.end(), addr_bytes.begin(), addr_bytes.begin() + 20);
@@ -176,9 +205,18 @@ static int cmd_create(int argc, char* argv[], int start) {
     return 0;
 }
 
-// ─── signrawtransaction ─────────────────────────────────────────────
+// ===========================================================================
+//  signrawtransaction
+// ===========================================================================
 
-static int cmd_sign(const std::string& hex_str, const std::string& privkey_hex) {
+// ---------------------------------------------------------------------------
+// cmd_sign
+// ---------------------------------------------------------------------------
+// Signs a raw transaction with an Ed25519 private key.  Adds witness data
+// (signature + pubkey) to each input.
+// ---------------------------------------------------------------------------
+static int cmd_sign(const std::string& hex_str, const std::string& privkey_hex)
+{
     auto bytes = core::from_hex(hex_str);
     if (bytes.empty()) {
         fprintf(stderr, "Error: invalid transaction hex\n");
@@ -191,7 +229,7 @@ static int cmd_sign(const std::string& hex_str, const std::string& privkey_hex) 
         return 1;
     }
 
-    // Derive keypair from seed
+    // 1. Derive keypair from seed.
     auto kp_result = crypto::ed25519_from_seed(seed_bytes);
     if (kp_result.is_err()) {
         fprintf(stderr, "Error: invalid Ed25519 seed: %s\n", kp_result.error().c_str());
@@ -199,20 +237,19 @@ static int cmd_sign(const std::string& hex_str, const std::string& privkey_hex) 
     }
     auto kp = kp_result.value();
 
-    // Deserialize the transaction
+    // 2. Deserialize the transaction.
     core::DataStream ds(bytes);
     primitives::CMutableTransaction mtx;
-    // Read version
     uint8_t ver_buf[4];
     ds.read(ver_buf, 4);
     mtx.version = static_cast<int32_t>(
         ver_buf[0] | (ver_buf[1] << 8) | (ver_buf[2] << 16) | (ver_buf[3] << 24));
 
-    // Compute sighash (simplified: hash of the serialized tx without witness)
-    auto no_witness = core::from_hex(hex_str);  // Use original bytes as sighash input
+    // 3. Compute sighash (simplified: hash of the serialized tx without witness).
+    auto no_witness = core::from_hex(hex_str);
     auto sighash = crypto::keccak256d(no_witness);
 
-    // Sign
+    // 4. Sign.
     auto sig_result = crypto::ed25519_sign(kp.secret, sighash.span());
     if (sig_result.is_err()) {
         fprintf(stderr, "Error: signing failed: %s\n", sig_result.error().c_str());
@@ -221,8 +258,7 @@ static int cmd_sign(const std::string& hex_str, const std::string& privkey_hex) 
 
     auto sig = sig_result.value();
 
-    // For each input, add the signature as witness data
-    // Re-deserialize the full transaction
+    // 5. Re-deserialize the full transaction.
     core::DataStream ds2(bytes);
     primitives::CTransaction tx;
     try {
@@ -232,7 +268,7 @@ static int cmd_sign(const std::string& hex_str, const std::string& privkey_hex) 
         return 1;
     }
 
-    // Rebuild as mutable with witness
+    // 6. Rebuild as mutable with witness.
     primitives::CMutableTransaction signed_tx;
     signed_tx.version = tx.version();
     signed_tx.locktime = tx.locktime();
@@ -243,13 +279,11 @@ static int cmd_sign(const std::string& hex_str, const std::string& privkey_hex) 
         signed_tx.vout.push_back(out);
     }
 
-    // Add witness (signature + pubkey) to each input
+    // 7. Add witness (signature + pubkey) to each input.
     for (auto& in : signed_tx.vin) {
         in.witness.stack.clear();
-        // Push signature
         std::vector<uint8_t> sig_vec(sig.data.begin(), sig.data.end());
         in.witness.stack.push_back(sig_vec);
-        // Push public key
         std::vector<uint8_t> pk_vec(kp.public_key.data.begin(), kp.public_key.data.end());
         in.witness.stack.push_back(pk_vec);
     }
@@ -259,10 +293,19 @@ static int cmd_sign(const std::string& hex_str, const std::string& privkey_hex) 
     return 0;
 }
 
-// ─── createcoinbase ─────────────────────────────────────────────────
+// ===========================================================================
+//  createcoinbase
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// cmd_coinbase
+// ---------------------------------------------------------------------------
+// Creates a coinbase transaction with a BIP34-encoded height in scriptSig
+// and an Ed25519 pubkey output script.
+// ---------------------------------------------------------------------------
 static int cmd_coinbase(const std::string& pubkey_hex, const std::string& amount_str,
-                         const std::string& height_str) {
+                         const std::string& height_str)
+{
     auto pk_result = crypto::Ed25519PublicKey::from_hex(pubkey_hex);
     if (pk_result.is_err()) {
         fprintf(stderr, "Error: invalid public key: %s\n", pk_result.error().c_str());
@@ -281,11 +324,11 @@ static int cmd_coinbase(const std::string& pubkey_hex, const std::string& amount
     primitives::CMutableTransaction coinbase;
     coinbase.version = primitives::TX_VERSION_DEFAULT;
 
-    // Coinbase input: null outpoint, height in scriptSig
+    // 1. Coinbase input: null outpoint, height in scriptSig.
     primitives::COutPoint null_outpoint;
     null_outpoint.set_null();
     std::vector<uint8_t> script_sig;
-    // BIP34: encode height as script number
+    // BIP34: encode height as script number.
     if (height <= 0xFF) {
         script_sig.push_back(1);
         script_sig.push_back(static_cast<uint8_t>(height));
@@ -301,7 +344,7 @@ static int cmd_coinbase(const std::string& pubkey_hex, const std::string& amount
     }
     coinbase.vin.emplace_back(null_outpoint, script_sig);
 
-    // Coinbase output: [0x20][32-byte pubkey][0xAC]
+    // 2. Coinbase output: [0x20][32-byte pubkey][0xAC].
     auto coinbase_script = crypto::ed25519_coinbase_script(pubkey);
     coinbase.vout.emplace_back(amount, coinbase_script);
 
@@ -310,9 +353,18 @@ static int cmd_coinbase(const std::string& pubkey_hex, const std::string& amount
     return 0;
 }
 
-// ─── Main ───────────────────────────────────────────────────────────
+// ===========================================================================
+//  Main
+// ===========================================================================
 
-int main(int argc, char* argv[]) {
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+// Entry point for rnet-tx.  Dispatches to the appropriate subcommand
+// based on the first positional argument.
+// ---------------------------------------------------------------------------
+int main(int argc, char* argv[])
+{
     if (argc < 2) {
         print_usage();
         return 1;

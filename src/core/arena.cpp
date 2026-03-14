@@ -1,3 +1,7 @@
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #include "core/arena.h"
 
 #include <algorithm>
@@ -7,8 +11,18 @@
 
 namespace rnet::core {
 
-// ─── Arena ───────────────────────────────────────────────────────────
+// ===========================================================================
+//  Arena
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// Arena — fixed-capacity bump allocator.
+//
+// A single contiguous buffer allocated at construction.  alloc() bumps
+// an offset pointer (with alignment padding) and returns nullptr when
+// the arena is full.  reset() rewinds the offset without freeing memory,
+// making all prior allocations invalid.
+// ---------------------------------------------------------------------------
 Arena::Arena(size_t capacity)
     : capacity_(capacity), offset_(0) {
     if (capacity > 0) {
@@ -50,16 +64,24 @@ Arena& Arena::operator=(Arena&& other) noexcept {
     return *this;
 }
 
+// ---------------------------------------------------------------------------
+// alloc
+//
+// Bump-allocates `bytes` with the given alignment.  Returns nullptr if
+// the arena cannot satisfy the request.
+// ---------------------------------------------------------------------------
 void* Arena::alloc(size_t bytes, size_t alignment) {
     if (bytes == 0) return nullptr;
 
-    // Align the current offset
+    // 1. Align the current offset.
     size_t aligned_offset = (offset_ + alignment - 1) & ~(alignment - 1);
 
+    // 2. Check remaining capacity.
     if (aligned_offset + bytes > capacity_) {
         return nullptr;
     }
 
+    // 3. Bump the offset and return the pointer.
     void* ptr = buffer_ + aligned_offset;
     offset_ = aligned_offset + bytes;
     return ptr;
@@ -74,21 +96,30 @@ bool Arena::contains(const void* ptr) const {
     return p >= buffer_ && p < buffer_ + capacity_;
 }
 
-// ─── GrowableArena ──────────────────────────────────────────────────
+// ===========================================================================
+//  GrowableArena
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// GrowableArena — chain of Arena blocks that grows on demand.
+//
+// Tries the current block first, then subsequent blocks (useful after
+// reset()), and finally allocates a new block.  Block size is at least
+// block_size_ but may be larger for oversized allocations.
+// ---------------------------------------------------------------------------
 GrowableArena::GrowableArena(size_t block_size)
     : block_size_(block_size) {}
 
 void* GrowableArena::alloc(size_t bytes, size_t alignment) {
     if (bytes == 0) return nullptr;
 
-    // Try current block first
+    // 1. Try current block first.
     if (current_block_ < blocks_.size()) {
         void* ptr = blocks_[current_block_].alloc(bytes, alignment);
         if (ptr) return ptr;
     }
 
-    // Try subsequent existing blocks (after reset)
+    // 2. Try subsequent existing blocks (after reset).
     for (size_t i = current_block_ + 1; i < blocks_.size(); ++i) {
         void* ptr = blocks_[i].alloc(bytes, alignment);
         if (ptr) {
@@ -97,7 +128,7 @@ void* GrowableArena::alloc(size_t bytes, size_t alignment) {
         }
     }
 
-    // Allocate a new block
+    // 3. Allocate a new block.
     size_t min_size = std::max(bytes + alignment, block_size_);
     add_block(min_size);
     current_block_ = blocks_.size() - 1;
@@ -134,4 +165,4 @@ void GrowableArena::add_block(size_t min_size) {
     blocks_.emplace_back(size);
 }
 
-}  // namespace rnet::core
+} // namespace rnet::core

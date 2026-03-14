@@ -1,3 +1,7 @@
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #include "net/protocol.h"
 
 #include <algorithm>
@@ -6,13 +10,32 @@
 
 namespace rnet::net {
 
+// ===========================================================================
+//  CInv
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// to_string
+// ---------------------------------------------------------------------------
+
 std::string CInv::to_string() const {
     return inv_type_string(type) + " " + hash.to_hex().substr(0, 16) + "...";
 }
 
+// ===========================================================================
+//  CNetAddr
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// set_ipv4
+//
+// Design: stores IPv4 as an IPv4-mapped IPv6 address (::ffff:x.x.x.x)
+// so all addresses use the same 16-byte representation.
+// ---------------------------------------------------------------------------
+
 void CNetAddr::set_ipv4(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
     ip.fill(0);
-    // IPv4-mapped IPv6: ::ffff:x.x.x.x
+    // 1. IPv4-mapped IPv6: ::ffff:x.x.x.x
     ip[10] = 0xFF;
     ip[11] = 0xFF;
     ip[12] = a;
@@ -20,6 +43,13 @@ void CNetAddr::set_ipv4(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
     ip[14] = c;
     ip[15] = d;
 }
+
+// ---------------------------------------------------------------------------
+// to_string
+//
+// Design: renders IPv4-mapped addresses in dotted-decimal notation,
+// otherwise uses bracketed hex colon notation for full IPv6.
+// ---------------------------------------------------------------------------
 
 std::string CNetAddr::to_string() const {
     if (is_ipv4()) {
@@ -31,7 +61,7 @@ std::string CNetAddr::to_string() const {
             << ":" << port;
         return oss.str();
     }
-    // Full IPv6
+    // 1. Full IPv6
     std::ostringstream oss;
     oss << "[";
     for (int i = 0; i < 16; i += 2) {
@@ -44,29 +74,56 @@ std::string CNetAddr::to_string() const {
     return oss.str();
 }
 
+// ---------------------------------------------------------------------------
+// is_ipv4
+//
+// Design: checks for the IPv4-mapped IPv6 prefix (10 zero bytes
+// followed by 0xFF 0xFF).
+// ---------------------------------------------------------------------------
+
 bool CNetAddr::is_ipv4() const {
-    // Check for IPv4-mapped IPv6 address
     for (int i = 0; i < 10; ++i) {
         if (ip[static_cast<size_t>(i)] != 0) return false;
     }
     return ip[10] == 0xFF && ip[11] == 0xFF;
 }
 
+// ---------------------------------------------------------------------------
+// is_routable
+// ---------------------------------------------------------------------------
+
 bool CNetAddr::is_routable() const {
     return !is_local() && !ip[12] == 0;
 }
 
+// ---------------------------------------------------------------------------
+// is_local
+//
+// Design: detects 127.0.0.0/8 for IPv4 and ::1 for IPv6.
+// ---------------------------------------------------------------------------
+
 bool CNetAddr::is_local() const {
     if (is_ipv4()) {
-        // 127.0.0.0/8
+        // 1. 127.0.0.0/8
         return ip[12] == 127;
     }
-    // ::1
+    // 2. ::1
     for (int i = 0; i < 15; ++i) {
         if (ip[static_cast<size_t>(i)] != 0) return false;
     }
     return ip[15] == 1;
 }
+
+// ===========================================================================
+//  MessageHeader
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// set_command
+//
+// Design: copies up to COMMAND_SIZE bytes from the string into the
+// fixed-size command array, zero-padding the remainder.
+// ---------------------------------------------------------------------------
 
 void MessageHeader::set_command(std::string_view cmd) {
     command.fill(0);
@@ -74,8 +131,13 @@ void MessageHeader::set_command(std::string_view cmd) {
     std::memcpy(command.data(), cmd.data(), len);
 }
 
+// ---------------------------------------------------------------------------
+// get_command
+//
+// Design: scans for the first null byte to determine string length.
+// ---------------------------------------------------------------------------
+
 std::string MessageHeader::get_command() const {
-    // Find the null terminator or end of array
     size_t len = 0;
     while (len < COMMAND_SIZE && command[len] != 0) {
         ++len;
@@ -83,9 +145,21 @@ std::string MessageHeader::get_command() const {
     return std::string(command.data(), len);
 }
 
+// ---------------------------------------------------------------------------
+// valid_magic
+// ---------------------------------------------------------------------------
+
 bool MessageHeader::valid_magic() const {
     return magic == NETWORK_MAGIC_REF();
 }
+
+// ===========================================================================
+//  Free functions
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// inv_type_string
+// ---------------------------------------------------------------------------
 
 std::string inv_type_string(InvType type) {
     switch (type) {
@@ -100,4 +174,4 @@ std::string inv_type_string(InvType type) {
     }
 }
 
-}  // namespace rnet::net
+} // namespace rnet::net

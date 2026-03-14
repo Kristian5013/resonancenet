@@ -1,11 +1,14 @@
-// rnet-cli — ResonanceNet RPC client
-// Connects to rnetd via JSON-RPC to issue commands.
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
 
+// Project headers.
 #include "core/config.h"
 #include "core/error.h"
 #include "core/hex.h"
 #include "core/logging.h"
 
+// Standard library.
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -16,6 +19,7 @@
 #include <string>
 #include <vector>
 
+// Platform-specific socket headers.
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -27,24 +31,33 @@ using socket_t = SOCKET;
 static constexpr socket_t INVALID_SOCK = INVALID_SOCKET;
 static void close_socket(socket_t s) { closesocket(s); }
 #else
-#include <netdb.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
 #include <arpa/inet.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 using socket_t = int;
 static constexpr socket_t INVALID_SOCK = -1;
 static void close_socket(socket_t s) { close(s); }
 #endif
 
-// ─── Minimal HTTP client ────────────────────────────────────────────
+// ===========================================================================
+//  Minimal HTTP client
+// ===========================================================================
 
 struct HttpResponse {
     int status_code = 0;
     std::string body;
 };
 
-static socket_t connect_to_host(const std::string& host, uint16_t port) {
+// ---------------------------------------------------------------------------
+// connect_to_host
+// ---------------------------------------------------------------------------
+// Opens a TCP connection to the given host:port using getaddrinfo for
+// protocol-agnostic resolution.
+// ---------------------------------------------------------------------------
+static socket_t connect_to_host(const std::string& host, uint16_t port)
+{
     struct addrinfo hints{}, *result = nullptr;
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -70,7 +83,11 @@ static socket_t connect_to_host(const std::string& host, uint16_t port) {
     return sock;
 }
 
-static bool send_all(socket_t sock, const std::string& data) {
+// ---------------------------------------------------------------------------
+// send_all
+// ---------------------------------------------------------------------------
+static bool send_all(socket_t sock, const std::string& data)
+{
     size_t total = 0;
     while (total < data.size()) {
         int sent = send(sock, data.data() + total,
@@ -81,7 +98,11 @@ static bool send_all(socket_t sock, const std::string& data) {
     return true;
 }
 
-static std::string recv_all(socket_t sock) {
+// ---------------------------------------------------------------------------
+// recv_all
+// ---------------------------------------------------------------------------
+static std::string recv_all(socket_t sock)
+{
     std::string result;
     std::array<char, 8192> buf{};
     for (;;) {
@@ -92,7 +113,11 @@ static std::string recv_all(socket_t sock) {
     return result;
 }
 
-static std::string base64_encode(const std::string& input) {
+// ---------------------------------------------------------------------------
+// base64_encode
+// ---------------------------------------------------------------------------
+static std::string base64_encode(const std::string& input)
+{
     static constexpr char table[] =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     std::string output;
@@ -109,10 +134,16 @@ static std::string base64_encode(const std::string& input) {
     return output;
 }
 
+// ---------------------------------------------------------------------------
+// http_post
+// ---------------------------------------------------------------------------
+// Sends an HTTP POST request and returns the parsed response.
+// ---------------------------------------------------------------------------
 static HttpResponse http_post(const std::string& host, uint16_t port,
                                const std::string& path,
                                const std::string& body,
-                               const std::string& auth_header) {
+                               const std::string& auth_header)
+{
     HttpResponse resp;
     socket_t sock = connect_to_host(host, port);
     if (sock == INVALID_SOCK) {
@@ -121,6 +152,7 @@ static HttpResponse http_post(const std::string& host, uint16_t port,
         return resp;
     }
 
+    // 1. Build and send the request.
     std::ostringstream req;
     req << "POST " << path << " HTTP/1.0\r\n"
         << "Host: " << host << ":" << port << "\r\n"
@@ -138,17 +170,17 @@ static HttpResponse http_post(const std::string& host, uint16_t port,
         return resp;
     }
 
-    // Shutdown write side so server knows we're done
+    // 2. Shutdown write side so server knows we are done.
 #ifdef _WIN32
     shutdown(sock, SD_SEND);
 #else
     shutdown(sock, SHUT_WR);
 #endif
 
+    // 3. Receive and parse the response.
     std::string raw = recv_all(sock);
     close_socket(sock);
 
-    // Parse HTTP response
     auto header_end = raw.find("\r\n\r\n");
     if (header_end == std::string::npos) {
         resp.status_code = -3;
@@ -156,7 +188,7 @@ static HttpResponse http_post(const std::string& host, uint16_t port,
         return resp;
     }
 
-    // Parse status line: "HTTP/1.x NNN ..."
+    // Parse status line: "HTTP/1.x NNN ...".
     auto first_line_end = raw.find("\r\n");
     std::string status_line = raw.substr(0, first_line_end);
     auto space1 = status_line.find(' ');
@@ -167,21 +199,30 @@ static HttpResponse http_post(const std::string& host, uint16_t port,
     return resp;
 }
 
-// ─── JSON-RPC helpers (minimal, no external dep) ────────────────────
+// ===========================================================================
+//  JSON-RPC helpers (minimal, no external dep)
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// build_json_rpc
+// ---------------------------------------------------------------------------
+// Constructs a JSON-RPC 1.0 request body with auto-detection of parameter
+// types (number, boolean, null, or string).
+// ---------------------------------------------------------------------------
 static std::string build_json_rpc(const std::string& method,
                                    const std::vector<std::string>& params,
-                                   int id = 1) {
+                                   int id = 1)
+{
     std::ostringstream ss;
     ss << "{\"jsonrpc\":\"1.0\",\"id\":" << id
        << ",\"method\":\"" << method << "\",\"params\":[";
     for (size_t i = 0; i < params.size(); ++i) {
         if (i > 0) ss << ",";
-        // Try to detect if param is a number or boolean
         const auto& p = params[i];
         if (p == "true" || p == "false" || p == "null") {
             ss << p;
         } else {
+            // 1. Detect if param is a number.
             bool is_number = !p.empty();
             bool has_dot = false;
             for (size_t j = 0; j < p.size(); ++j) {
@@ -193,7 +234,7 @@ static std::string build_json_rpc(const std::string& method,
             if (is_number && !p.empty()) {
                 ss << p;
             } else {
-                // Escape as JSON string
+                // 2. Escape as JSON string.
                 ss << "\"";
                 for (char c : p) {
                     if (c == '\"') ss << "\\\"";
@@ -211,9 +252,15 @@ static std::string build_json_rpc(const std::string& method,
     return ss.str();
 }
 
-// Extract "result" or "error" from JSON-RPC response (very basic parser)
+// ---------------------------------------------------------------------------
+// extract_json_field
+// ---------------------------------------------------------------------------
+// Very basic JSON field extractor -- handles strings, objects, arrays,
+// null, numbers, and booleans.
+// ---------------------------------------------------------------------------
 static std::string extract_json_field(const std::string& json,
-                                       const std::string& field) {
+                                       const std::string& field)
+{
     std::string key = "\"" + field + "\"";
     auto pos = json.find(key);
     if (pos == std::string::npos) return "";
@@ -224,7 +271,7 @@ static std::string extract_json_field(const std::string& json,
     if (pos >= json.size()) return "";
 
     if (json[pos] == '"') {
-        // String value
+        // String value.
         pos++;
         std::string result;
         while (pos < json.size() && json[pos] != '"') {
@@ -240,7 +287,7 @@ static std::string extract_json_field(const std::string& json,
         }
         return result;
     } else if (json[pos] == '{' || json[pos] == '[') {
-        // Object or array — find matching brace
+        // Object or array -- find matching brace.
         int depth = 1;
         char open = json[pos], close_c = (open == '{') ? '}' : ']';
         size_t start = pos;
@@ -254,21 +301,29 @@ static std::string extract_json_field(const std::string& json,
     } else if (json.substr(pos, 4) == "null") {
         return "null";
     } else {
-        // Number or boolean
+        // Number or boolean.
         size_t start = pos;
         while (pos < json.size() && json[pos] != ',' && json[pos] != '}') pos++;
         std::string val = json.substr(start, pos - start);
-        // Trim trailing whitespace
         while (!val.empty() && (val.back() == ' ' || val.back() == '\r' || val.back() == '\n'))
             val.pop_back();
         return val;
     }
 }
 
-// ─── Chat REPL mode ─────────────────────────────────────────────────
+// ===========================================================================
+//  Chat REPL mode
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// run_chat_mode
+// ---------------------------------------------------------------------------
+// Interactive AI chat loop: sends user messages via the "chat" RPC method
+// and prints responses until the user types "exit" or "quit".
+// ---------------------------------------------------------------------------
 static int run_chat_mode(const std::string& host, uint16_t port,
-                          const std::string& auth) {
+                          const std::string& auth)
+{
     fprintf(stderr, "ResonanceNet AI Chat (connected to %s:%u)\n", host.c_str(), port);
     fprintf(stderr, "Type your message and press Enter. Type 'exit' to quit.\n\n");
 
@@ -300,7 +355,9 @@ static int run_chat_mode(const std::string& host, uint16_t port,
     return 0;
 }
 
-// ─── Argument parsing ───────────────────────────────────────────────
+// ===========================================================================
+//  Argument parsing
+// ===========================================================================
 
 struct CliConfig {
     std::string host = "127.0.0.1";
@@ -313,7 +370,11 @@ struct CliConfig {
     bool chat_mode = false;
 };
 
-static void print_usage() {
+// ---------------------------------------------------------------------------
+// print_usage
+// ---------------------------------------------------------------------------
+static void print_usage()
+{
     fprintf(stderr,
         "Usage: rnet-cli [options] <command> [params...]\n"
         "\n"
@@ -341,7 +402,11 @@ static void print_usage() {
     );
 }
 
-static CliConfig parse_cli_args(int argc, char* argv[]) {
+// ---------------------------------------------------------------------------
+// parse_cli_args
+// ---------------------------------------------------------------------------
+static CliConfig parse_cli_args(int argc, char* argv[])
+{
     CliConfig cfg;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -372,7 +437,11 @@ static CliConfig parse_cli_args(int argc, char* argv[]) {
     return cfg;
 }
 
-static std::string read_cookie_file(const std::string& path) {
+// ---------------------------------------------------------------------------
+// read_cookie_file
+// ---------------------------------------------------------------------------
+static std::string read_cookie_file(const std::string& path)
+{
     FILE* f = fopen(path.c_str(), "r");
     if (!f) return "";
     std::array<char, 512> buf{};
@@ -382,9 +451,18 @@ static std::string read_cookie_file(const std::string& path) {
     return std::string(buf.data());
 }
 
-// ─── Main ───────────────────────────────────────────────────────────
+// ===========================================================================
+//  Main
+// ===========================================================================
 
-int main(int argc, char* argv[]) {
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+// Entry point for rnet-cli.  Parses arguments, builds auth credentials,
+// then dispatches to either chat REPL mode or a single JSON-RPC call.
+// ---------------------------------------------------------------------------
+int main(int argc, char* argv[])
+{
 #ifdef _WIN32
     WSADATA wsa_data;
     WSAStartup(MAKEWORD(2, 2), &wsa_data);
@@ -397,7 +475,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Build auth header
+    // 1. Build auth header.
     std::string auth;
     if (!cfg.rpcuser.empty()) {
         auth = base64_encode(cfg.rpcuser + ":" + cfg.rpcpassword);
@@ -408,7 +486,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Chat mode
+    // 2. Chat mode.
     if (cfg.chat_mode) {
         int rc = run_chat_mode(cfg.host, cfg.port, auth);
 #ifdef _WIN32
@@ -417,7 +495,7 @@ int main(int argc, char* argv[]) {
         return rc;
     }
 
-    // Single RPC call
+    // 3. Single RPC call.
     std::string rpc_body = build_json_rpc(cfg.method, cfg.params);
     auto resp = http_post(cfg.host, cfg.port, "/", rpc_body, auth);
 
@@ -438,7 +516,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Parse result
+    // 4. Parse result.
     std::string error_val = extract_json_field(resp.body, "error");
     if (!error_val.empty() && error_val != "null") {
         std::string code = extract_json_field(error_val, "code");

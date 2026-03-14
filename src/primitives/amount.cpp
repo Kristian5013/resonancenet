@@ -1,3 +1,7 @@
+// Copyright (c) 2025 The ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #include "primitives/amount.h"
 
 #include <algorithm>
@@ -7,18 +11,29 @@
 
 namespace rnet::primitives {
 
-std::string FormatMoney(int64_t amount) {
+// ===========================================================================
+//  Money formatting and parsing
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// FormatMoney
+//   Converts a satoshi-denominated int64 to a fixed-point string with
+//   exactly 8 decimal places (e.g. 123456789 -> "1.23456789").
+// ---------------------------------------------------------------------------
+std::string FormatMoney(int64_t amount)
+{
     bool negative = amount < 0;
     int64_t abs_val = negative ? -amount : amount;
 
     int64_t whole = abs_val / COIN;
     int64_t frac = abs_val % COIN;
 
-    // Format fractional part with exactly 8 digits
+    // 1. Format fractional part with exactly 8 digits
     char frac_buf[16];
     std::snprintf(frac_buf, sizeof(frac_buf), "%08lld",
                   static_cast<long long>(frac));
 
+    // 2. Assemble result
     std::string result;
     if (negative) {
         result += '-';
@@ -29,9 +44,16 @@ std::string FormatMoney(int64_t amount) {
     return result;
 }
 
-bool ParseMoney(const std::string& str, int64_t& amount_out) {
+// ---------------------------------------------------------------------------
+// ParseMoney
+//   Parses a decimal string into a satoshi-denominated int64.  Rejects
+//   more than 8 fractional digits and values exceeding MAX_MONEY.
+// ---------------------------------------------------------------------------
+bool ParseMoney(const std::string& str, int64_t& amount_out)
+{
     if (str.empty()) return false;
 
+    // 1. Handle optional leading minus sign
     bool negative = false;
     size_t pos = 0;
     if (str[0] == '-') {
@@ -39,7 +61,7 @@ bool ParseMoney(const std::string& str, int64_t& amount_out) {
         pos = 1;
     }
 
-    // Find decimal point
+    // 2. Find decimal point
     auto dot_pos = str.find('.', pos);
 
     std::string whole_str;
@@ -56,7 +78,7 @@ bool ParseMoney(const std::string& str, int64_t& amount_out) {
     if (whole_str.empty() && frac_str.empty()) return false;
     if (whole_str.empty()) whole_str = "0";
 
-    // Validate digits
+    // 3. Validate digits
     for (char c : whole_str) {
         if (c < '0' || c > '9') return false;
     }
@@ -64,27 +86,29 @@ bool ParseMoney(const std::string& str, int64_t& amount_out) {
         if (c < '0' || c > '9') return false;
     }
 
-    // Pad or truncate fractional part to 8 digits
+    // 4. Pad or reject fractional part (must be <= 8 digits)
     if (frac_str.size() > 8) {
-        return false;  // Too many decimal places
+        return false;
     }
     while (frac_str.size() < 8) {
         frac_str += '0';
     }
 
+    // 5. Convert whole part with overflow detection
     int64_t whole = 0;
     for (char c : whole_str) {
         int64_t prev = whole;
         whole = whole * 10 + (c - '0');
-        if (whole / 10 != prev) return false;  // Overflow
+        if (whole / 10 != prev) return false;
     }
 
+    // 6. Convert fractional part
     int64_t frac = 0;
     for (char c : frac_str) {
         frac = frac * 10 + (c - '0');
     }
 
-    // Check overflow before multiplication
+    // 7. Check overflow before final multiplication
     if (whole > MAX_MONEY / COIN) return false;
     int64_t result = whole * COIN + frac;
     if (result < 0 || result > MAX_MONEY) return false;
@@ -93,4 +117,4 @@ bool ParseMoney(const std::string& str, int64_t& amount_out) {
     return true;
 }
 
-}  // namespace rnet::primitives
+} // namespace rnet::primitives

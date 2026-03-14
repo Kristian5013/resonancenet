@@ -1,24 +1,38 @@
+// Copyright (c) 2025 The ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #include "primitives/block.h"
 
 #include "crypto/keccak.h"
 
 namespace rnet::primitives {
 
-rnet::uint256 CBlock::compute_merkle_root() const {
+// ===========================================================================
+//  CBlock
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// compute_merkle_root
+//   Builds a binary Merkle tree from transaction ids.  Odd-length levels
+//   are padded by duplicating the last leaf.  Each pair is hashed with
+//   Keccak-256d(left || right).
+// ---------------------------------------------------------------------------
+rnet::uint256 CBlock::compute_merkle_root() const
+{
     if (vtx.empty()) {
         return rnet::uint256{};
     }
 
-    // Collect transaction ids
+    // 1. Collect transaction ids as leaves
     std::vector<rnet::uint256> leaves;
     leaves.reserve(vtx.size());
     for (const auto& tx : vtx) {
         leaves.push_back(tx->txid());
     }
 
-    // Build merkle tree iteratively
+    // 2. Build merkle tree iteratively
     while (leaves.size() > 1) {
-        // If odd number, duplicate the last element
         if (leaves.size() % 2 != 0) {
             leaves.push_back(leaves.back());
         }
@@ -27,7 +41,6 @@ rnet::uint256 CBlock::compute_merkle_root() const {
         next_level.reserve(leaves.size() / 2);
 
         for (size_t i = 0; i < leaves.size(); i += 2) {
-            // Concatenate two hashes and compute keccak256d
             std::vector<uint8_t> combined(64);
             std::memcpy(combined.data(), leaves[i].data(), 32);
             std::memcpy(combined.data() + 32, leaves[i + 1].data(), 32);
@@ -41,7 +54,12 @@ rnet::uint256 CBlock::compute_merkle_root() const {
     return leaves[0];
 }
 
-size_t CBlock::get_block_size() const {
+// ---------------------------------------------------------------------------
+// get_block_size
+//   Sum of serialised sizes of all transactions (no witness discount).
+// ---------------------------------------------------------------------------
+size_t CBlock::get_block_size() const
+{
     size_t total = 0;
     for (const auto& tx : vtx) {
         total += tx->get_total_size();
@@ -49,7 +67,12 @@ size_t CBlock::get_block_size() const {
     return total;
 }
 
-size_t CBlock::get_block_weight() const {
+// ---------------------------------------------------------------------------
+// get_block_weight
+//   Sum of segwit-style weights of all transactions.
+// ---------------------------------------------------------------------------
+size_t CBlock::get_block_weight() const
+{
     size_t total = 0;
     for (const auto& tx : vtx) {
         total += tx->get_weight();
@@ -57,7 +80,11 @@ size_t CBlock::get_block_weight() const {
     return total;
 }
 
-std::string CBlock::to_string() const {
+// ---------------------------------------------------------------------------
+// to_string
+// ---------------------------------------------------------------------------
+std::string CBlock::to_string() const
+{
     std::string result = "CBlock(";
     result += CBlockHeader::to_string();
     result += ", txs=" + std::to_string(vtx.size());
@@ -65,4 +92,4 @@ std::string CBlock::to_string() const {
     return result;
 }
 
-}  // namespace rnet::primitives
+} // namespace rnet::primitives

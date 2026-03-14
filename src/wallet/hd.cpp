@@ -1,3 +1,7 @@
+// Copyright (c) 2025-2026 The ResonanceNet Core developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #include "wallet/hd.h"
 
 #include "core/logging.h"
@@ -7,16 +11,39 @@
 
 namespace rnet::wallet {
 
+// ===========================================================================
+//  HDKeyManager -- BIP32 hierarchical-deterministic key derivation
+// ===========================================================================
+//
+//  Derivation path: m/44'/9555'/account'/chain/index
+//
+//    - coin_type 9555 is the ResonanceNet registered type.
+//    - chain 0 = external (receive), chain 1 = internal (change).
+//    - 24-word mnemonic (256 bits entropy) via BIP39.
+//    - Ed25519 keypairs derived from the 32-byte child private key.
+
+// ---------------------------------------------------------------------------
+// HDState::wipe -- zero mnemonic, seed, and master key in memory
+// ---------------------------------------------------------------------------
+
 void HDState::wipe() {
     crypto::secure_wipe(seed.data(), seed.size());
     mnemonic.clear();
     master_key = crypto::ExtKey{};
 }
 
+// ---------------------------------------------------------------------------
+// Destructor -- wipe sensitive material
+// ---------------------------------------------------------------------------
+
 HDKeyManager::~HDKeyManager() {
     LOCK(mutex_);
     state_.wipe();
 }
+
+// ---------------------------------------------------------------------------
+// create -- generate a fresh 24-word mnemonic and derive the master key
+// ---------------------------------------------------------------------------
 
 Result<std::string> HDKeyManager::create(const std::string& passphrase) {
     LOCK(mutex_);
@@ -24,7 +51,7 @@ Result<std::string> HDKeyManager::create(const std::string& passphrase) {
         return Result<std::string>::err("HD wallet already initialized");
     }
 
-    // Generate 24-word mnemonic (256 bits entropy)
+    // 1. Generate 24-word mnemonic (256 bits entropy).
     auto mnemonic_result = crypto::generate_mnemonic(24);
     if (!mnemonic_result) {
         return Result<std::string>::err("mnemonic generation failed: " + mnemonic_result.error());
@@ -32,14 +59,14 @@ Result<std::string> HDKeyManager::create(const std::string& passphrase) {
 
     state_.mnemonic = mnemonic_result.value();
 
-    // Derive seed from mnemonic + passphrase
+    // 2. Derive seed from mnemonic + passphrase.
     auto seed_result = crypto::mnemonic_to_seed(state_.mnemonic, passphrase);
     if (!seed_result) {
         return Result<std::string>::err("seed derivation failed: " + seed_result.error());
     }
     state_.seed = seed_result.value();
 
-    // Derive master key
+    // 3. Derive master key from seed.
     auto master_result = crypto::master_key_from_seed(
         std::span<const uint8_t>(state_.seed.data(), state_.seed.size()));
     if (!master_result) {
@@ -47,6 +74,7 @@ Result<std::string> HDKeyManager::create(const std::string& passphrase) {
     }
     state_.master_key = master_result.value();
 
+    // 4. Initialise derivation counters.
     state_.account = 0;
     state_.next_external_index = 0;
     state_.next_internal_index = 0;
@@ -56,6 +84,10 @@ Result<std::string> HDKeyManager::create(const std::string& passphrase) {
     return Result<std::string>::ok(state_.mnemonic);
 }
 
+// ---------------------------------------------------------------------------
+// restore -- rebuild from an existing mnemonic
+// ---------------------------------------------------------------------------
+
 Result<void> HDKeyManager::restore(const std::string& mnemonic,
                                    const std::string& passphrase) {
     LOCK(mutex_);
@@ -63,18 +95,21 @@ Result<void> HDKeyManager::restore(const std::string& mnemonic,
         return Result<void>::err("HD wallet already initialized");
     }
 
+    // 1. Validate the mnemonic words and checksum.
     if (!crypto::validate_mnemonic(mnemonic)) {
         return Result<void>::err("invalid mnemonic");
     }
 
     state_.mnemonic = mnemonic;
 
+    // 2. Derive seed.
     auto seed_result = crypto::mnemonic_to_seed(mnemonic, passphrase);
     if (!seed_result) {
         return Result<void>::err("seed derivation failed: " + seed_result.error());
     }
     state_.seed = seed_result.value();
 
+    // 3. Derive master key.
     auto master_result = crypto::master_key_from_seed(
         std::span<const uint8_t>(state_.seed.data(), state_.seed.size()));
     if (!master_result) {
@@ -82,6 +117,7 @@ Result<void> HDKeyManager::restore(const std::string& mnemonic,
     }
     state_.master_key = master_result.value();
 
+    // 4. Reset counters (caller rescans to discover used keys).
     state_.account = 0;
     state_.next_external_index = 0;
     state_.next_internal_index = 0;
@@ -90,6 +126,10 @@ Result<void> HDKeyManager::restore(const std::string& mnemonic,
     LogPrint(WALLET, "HD wallet restored from mnemonic");
     return Result<void>::ok();
 }
+
+// ---------------------------------------------------------------------------
+// Accessors
+// ---------------------------------------------------------------------------
 
 bool HDKeyManager::is_initialized() const {
     LOCK(mutex_);
@@ -103,6 +143,10 @@ Result<std::string> HDKeyManager::get_mnemonic() const {
     }
     return Result<std::string>::ok(state_.mnemonic);
 }
+
+// ---------------------------------------------------------------------------
+// derive_next_external / derive_next_internal -- auto-increment index
+// ---------------------------------------------------------------------------
 
 Result<WalletKey> HDKeyManager::derive_next_external() {
     LOCK(mutex_);
@@ -130,6 +174,10 @@ Result<WalletKey> HDKeyManager::derive_next_internal() {
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// derive_key -- derive at an explicit chain + index (no counter bump)
+// ---------------------------------------------------------------------------
+
 Result<WalletKey> HDKeyManager::derive_key(HDChain chain, uint32_t index) const {
     LOCK(mutex_);
     if (!initialized_) {
@@ -137,6 +185,10 @@ Result<WalletKey> HDKeyManager::derive_key(HDChain chain, uint32_t index) const 
     }
     return derive_at(static_cast<uint32_t>(chain), index);
 }
+
+// ---------------------------------------------------------------------------
+// State accessors
+// ---------------------------------------------------------------------------
 
 uint32_t HDKeyManager::get_account() const {
     LOCK(mutex_);
@@ -159,8 +211,15 @@ void HDKeyManager::set_state(HDState s) {
     initialized_ = true;
 }
 
+// ---------------------------------------------------------------------------
+// derive_at -- core derivation: m/44'/9555'/account'/chain/index
+// ---------------------------------------------------------------------------
+//  Uses crypto::derive_rnet_key for the BIP32 path, then converts the
+//  32-byte child private key into an Ed25519 keypair via ed25519_from_seed.
+// ---------------------------------------------------------------------------
+
 Result<WalletKey> HDKeyManager::derive_at(uint32_t chain, uint32_t index) const {
-    // Path: m/44'/9555'/account'/chain/index
+    // 1. BIP32 derivation along m/44'/9555'/account'/chain/index.
     auto key_result = crypto::derive_rnet_key(
         state_.master_key, state_.account, chain, index);
     if (!key_result) {
@@ -168,19 +227,20 @@ Result<WalletKey> HDKeyManager::derive_at(uint32_t chain, uint32_t index) const 
     }
     auto& ext_key = key_result.value();
 
-    // Get public key from derived private key
+    // 2. Extract public key from the extended key.
     auto pubkey_result = ext_key.get_pubkey();
     if (!pubkey_result) {
         return Result<WalletKey>::err("pubkey derivation failed: " + pubkey_result.error());
     }
 
-    // Build Ed25519 keypair from derived key
+    // 3. Build Ed25519 keypair from the 32-byte derived seed.
     auto kp_result = crypto::ed25519_from_seed(
         std::span<const uint8_t>(ext_key.key.data(), ext_key.key.size()));
     if (!kp_result) {
         return Result<WalletKey>::err("ed25519 keypair from seed failed: " + kp_result.error());
     }
 
+    // 4. Populate WalletKey with the derived material.
     WalletKey wk;
     wk.secret = kp_result.value().secret;
     wk.pubkey = kp_result.value().public_key;
@@ -194,4 +254,4 @@ Result<WalletKey> HDKeyManager::derive_at(uint32_t chain, uint32_t index) const 
     return Result<WalletKey>::ok(std::move(wk));
 }
 
-}  // namespace rnet::wallet
+} // namespace rnet::wallet

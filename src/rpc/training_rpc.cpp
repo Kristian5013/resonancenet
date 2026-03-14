@@ -1,3 +1,7 @@
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #include "rpc/training_rpc.h"
 
 #include "chain/block_index.h"
@@ -8,12 +12,23 @@
 
 namespace rnet::rpc {
 
-// ── gettraininginfo ─────────────────────────────────────────────────
+// ===========================================================================
+//  Training RPC handlers
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// rpc_gettraininginfo
+//
+// Returns Proof-of-Training state at the chain tip: val_loss, train_steps,
+// model parameter count, loss improvement ratio, and a 20-block loss
+// history for trend analysis.
+// ---------------------------------------------------------------------------
 
 static JsonValue rpc_gettraininginfo(const RPCRequest& req,
                                      node::NodeContext& ctx) {
     JsonValue result = JsonValue::object();
 
+    // 1. Handle missing chainstate with zeroed defaults.
     if (!ctx.chainstate || !ctx.chainstate->tip()) {
         result.set("height", JsonValue(static_cast<int64_t>(0)));
         result.set("val_loss", JsonValue(0.0));
@@ -26,6 +41,7 @@ static JsonValue rpc_gettraininginfo(const RPCRequest& req,
         return result;
     }
 
+    // 2. Read training fields from the tip header.
     auto* tip = ctx.chainstate->tip();
     const auto& hdr = tip->header;
 
@@ -42,12 +58,12 @@ static JsonValue rpc_gettraininginfo(const RPCRequest& req,
     result.set("stagnation_count",
                JsonValue(static_cast<int64_t>(hdr.stagnation_count)));
 
-    // Compute model parameter count from header config
+    // 3. Compute model parameter count from header config.
     uint64_t param_count = hdr.model_param_count();
     result.set("model_params",
                JsonValue(static_cast<int64_t>(param_count)));
 
-    // Loss improvement ratio (for gauging training progress)
+    // 4. Loss improvement ratio (for gauging training progress).
     if (hdr.prev_val_loss > 0.0f && hdr.val_loss > 0.0f) {
         double improvement = static_cast<double>(hdr.prev_val_loss - hdr.val_loss)
                            / static_cast<double>(hdr.prev_val_loss);
@@ -56,7 +72,7 @@ static JsonValue rpc_gettraininginfo(const RPCRequest& req,
         result.set("loss_improvement", JsonValue(0.0));
     }
 
-    // Training history: last N blocks' val_loss
+    // 5. Training history: last 20 blocks' val_loss.
     JsonValue loss_history = JsonValue::array();
     const chain::CBlockIndex* cur = tip;
     for (int i = 0; i < 20 && cur; ++i) {
@@ -74,12 +90,19 @@ static JsonValue rpc_gettraininginfo(const RPCRequest& req,
     return result;
 }
 
-// ── getmodelstate ───────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// rpc_getmodelstate
+//
+// Returns the current neural network architecture parameters: d_model,
+// n_layers, n_slots, d_ff, vocab_size, sequence length, convolution
+// branches, and kernel sizes.
+// ---------------------------------------------------------------------------
 
 static JsonValue rpc_getmodelstate(const RPCRequest& req,
                                    node::NodeContext& ctx) {
     JsonValue result = JsonValue::object();
 
+    // 1. Return defaults when chainstate is unavailable.
     if (!ctx.chainstate || !ctx.chainstate->tip()) {
         result.set("d_model", JsonValue(static_cast<int64_t>(384)));
         result.set("n_layers", JsonValue(static_cast<int64_t>(6)));
@@ -92,6 +115,7 @@ static JsonValue rpc_getmodelstate(const RPCRequest& req,
         return result;
     }
 
+    // 2. Read architecture dimensions from the tip header.
     const auto& hdr = ctx.chainstate->tip()->header;
 
     result.set("d_model", JsonValue(static_cast<int64_t>(hdr.d_model)));
@@ -107,7 +131,7 @@ static JsonValue rpc_getmodelstate(const RPCRequest& req,
     result.set("model_params",
                JsonValue(static_cast<int64_t>(hdr.model_param_count())));
 
-    // Kernel sizes
+    // 3. Enumerate kernel sizes from header array.
     JsonValue kernels = JsonValue::array();
     for (int i = 0; i < hdr.n_conv_branches && i < 8; ++i) {
         if (hdr.kernel_sizes[i] == 0) break;
@@ -118,12 +142,19 @@ static JsonValue rpc_getmodelstate(const RPCRequest& req,
     return result;
 }
 
-// ── getgrowthinfo ───────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// rpc_getgrowthinfo
+//
+// Reports model growth events: current dimensions, stagnation counter,
+// total growth event count (full chain walk), and the last 10 growth
+// events with their heights and dimensions.
+// ---------------------------------------------------------------------------
 
 static JsonValue rpc_getgrowthinfo(const RPCRequest& req,
                                    node::NodeContext& ctx) {
     JsonValue result = JsonValue::object();
 
+    // 1. Return defaults when chainstate is unavailable.
     if (!ctx.chainstate || !ctx.chainstate->tip()) {
         result.set("growth_events", JsonValue(static_cast<int64_t>(0)));
         result.set("current_d_model", JsonValue(static_cast<int64_t>(384)));
@@ -133,6 +164,7 @@ static JsonValue rpc_getgrowthinfo(const RPCRequest& req,
         return result;
     }
 
+    // 2. Populate current dimensions from tip header.
     const auto& hdr = ctx.chainstate->tip()->header;
 
     result.set("current_d_model",
@@ -144,7 +176,7 @@ static JsonValue rpc_getgrowthinfo(const RPCRequest& req,
     result.set("growth_delta",
                JsonValue(static_cast<int64_t>(hdr.growth_delta)));
 
-    // Count growth events in chain history
+    // 3. Count growth events across the entire chain.
     int growth_events = 0;
     const chain::CBlockIndex* cur = ctx.chainstate->tip();
     uint32_t prev_d_model = 384;
@@ -165,7 +197,7 @@ static JsonValue rpc_getgrowthinfo(const RPCRequest& req,
     result.set("growth_events",
                JsonValue(static_cast<int64_t>(growth_events)));
 
-    // Growth history: list recent growth events
+    // 4. Build growth history: last 10 growth events.
     JsonValue history = JsonValue::array();
     cur = ctx.chainstate->tip();
     int found = 0;
@@ -193,7 +225,9 @@ static JsonValue rpc_getgrowthinfo(const RPCRequest& req,
     return result;
 }
 
-// ── Registration ────────────────────────────────────────────────────
+// ===========================================================================
+//  Registration
+// ===========================================================================
 
 void register_training_rpcs(RPCTable& table) {
     table.register_command({
@@ -221,4 +255,4 @@ void register_training_rpcs(RPCTable& table) {
     });
 }
 
-}  // namespace rnet::rpc
+} // namespace rnet::rpc

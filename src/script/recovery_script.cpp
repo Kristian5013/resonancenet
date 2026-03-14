@@ -1,9 +1,31 @@
+// Copyright (c) 2024-2026 The ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #include "script/recovery_script.h"
 
 #include "crypto/hash.h"
 #include "crypto/keccak.h"
 
 namespace rnet::script {
+
+// ---------------------------------------------------------------------------
+// build_recovery_script
+//
+// Constructs a Bitcoin-style recovery script with two spend paths:
+//
+//   OP_IF
+//     <owner P2PKH spend>          -- normal path
+//   OP_ELSE
+//     <timelock> OP_CSV OP_DROP
+//     <recovery condition>         -- heartbeat / social / emission
+//   OP_ENDIF
+//
+// Recovery types:
+//   HEARTBEAT  -- single recovery key after inactivity interval
+//   SOCIAL     -- M-of-N guardian multisig after waiting period
+//   EMISSION   -- anyone-can-spend (coins return to mining) after inactivity
+// ---------------------------------------------------------------------------
 
 CScript build_recovery_script(
     const std::vector<uint8_t>& owner_pubkey_hash,
@@ -12,7 +34,7 @@ CScript build_recovery_script(
 
     CScript script;
 
-    // Normal spend path (owner)
+    // 1. Normal spend path (owner P2PKH).
     script << Opcode::OP_IF;
     script << Opcode::OP_DUP;
     script << Opcode::OP_HASH160;
@@ -20,19 +42,19 @@ CScript build_recovery_script(
     script << Opcode::OP_EQUALVERIFY;
     script << Opcode::OP_CHECKSIG;
 
-    // Recovery path
+    // 2. Recovery path (time-locked alternative).
     script << Opcode::OP_ELSE;
 
     switch (type) {
         case RecoveryType::HEARTBEAT: {
             const auto& hp = std::get<HeartbeatPolicy>(policy);
 
-            // Require sequence lock (relative timelock)
+            // 2a. Require relative timelock (sequence lock).
             script << static_cast<int64_t>(hp.interval);
             script << Opcode::OP_CHECKSEQUENCEVERIFY;
             script << Opcode::OP_DROP;
 
-            // Recovery key can spend
+            // 2b. Recovery key P2PKH.
             script << Opcode::OP_DUP;
             script << Opcode::OP_HASH160;
             script << hp.recovery_pubkey_hash;
@@ -44,12 +66,12 @@ CScript build_recovery_script(
         case RecoveryType::SOCIAL: {
             const auto& sp = std::get<SocialPolicy>(policy);
 
-            // Require waiting period
+            // 2a. Require waiting period.
             script << static_cast<int64_t>(sp.waiting_period);
             script << Opcode::OP_CHECKSEQUENCEVERIFY;
             script << Opcode::OP_DROP;
 
-            // Multisig of guardians
+            // 2b. M-of-N guardian multisig.
             script << static_cast<int64_t>(sp.threshold);
             for (const auto& guardian_pk : sp.guardian_pubkeys) {
                 std::vector<uint8_t> pk(guardian_pk.begin(), guardian_pk.end());
@@ -63,13 +85,12 @@ CScript build_recovery_script(
         case RecoveryType::EMISSION: {
             const auto& ep = std::get<EmissionPolicy>(policy);
 
-            // Require inactivity period
+            // 2a. Require inactivity period.
             script << static_cast<int64_t>(ep.inactivity_period);
             script << Opcode::OP_CHECKSEQUENCEVERIFY;
             script << Opcode::OP_DROP;
 
-            // After inactivity, anyone can spend (coins return to mining).
-            // Use OP_TRUE to allow spending by miners.
+            // 2b. Anyone-can-spend (coins return to mining rewards).
             script << Opcode::OP_TRUE;
             break;
         }
@@ -79,23 +100,33 @@ CScript build_recovery_script(
     return script;
 }
 
+// ---------------------------------------------------------------------------
+// parse_recovery_script
+//
+// Reverse-engineers a recovery script to extract its type and policy.
+// Walks the bytecode past the OP_IF/OP_ELSE boundary, then identifies
+// the recovery variant by the opcodes that follow the timelock.
+//
+//   OP_TRUE                     --> EMISSION
+//   threshold + pubkeys + CMS   --> SOCIAL
+//   OP_DUP (P2PKH pattern)      --> HEARTBEAT
+// ---------------------------------------------------------------------------
+
 bool parse_recovery_script(const CScript& script,
                            RecoveryType& type,
                            RecoveryPolicy& policy) {
-    // Basic validation: must start with OP_IF and end with OP_ENDIF
+    // 1. Basic structure validation.
     if (script.size() < 10) return false;
     if (script[0] != static_cast<uint8_t>(Opcode::OP_IF)) return false;
     if (script.back() != static_cast<uint8_t>(Opcode::OP_ENDIF)) return false;
 
-    // Walk through the script to find the OP_ELSE boundary
+    // 2. Walk to the OP_ELSE boundary.
     ScriptIterator it(script);
     Opcode op;
     std::vector<uint8_t> data;
 
-    // Skip OP_IF
     if (!it.next(op, data) || op != Opcode::OP_IF) return false;
 
-    // Skip the owner spend path until OP_ELSE
     int depth = 1;
     while (it.next(op, data)) {
         if (op == Opcode::OP_IF || op == Opcode::OP_NOTIF) ++depth;
@@ -105,8 +136,7 @@ bool parse_recovery_script(const CScript& script,
 
     if (op != Opcode::OP_ELSE) return false;
 
-    // Parse the recovery path
-    // First element should be the timelock value
+    // 3. Parse the timelock value.
     if (!it.next(op, data)) return false;
 
     int64_t timelock = 0;
@@ -121,21 +151,19 @@ bool parse_recovery_script(const CScript& script,
         }
     }
 
-    // Next should be OP_CHECKSEQUENCEVERIFY
+    // 4. Expect OP_CHECKSEQUENCEVERIFY OP_DROP.
     if (!it.next(op, data) || op != Opcode::OP_CHECKSEQUENCEVERIFY) {
         return false;
     }
-
-    // Next should be OP_DROP
     if (!it.next(op, data) || op != Opcode::OP_DROP) {
         return false;
     }
 
-    // Now determine the recovery type based on what follows.
+    // 5. Determine recovery type from what follows.
     size_t saved_pos = it.pos();
     if (!it.next(op, data)) return false;
 
-    // Check for OP_TRUE (emission)
+    // 5a. OP_TRUE -> emission (anyone-can-spend after inactivity).
     if (op == Opcode::OP_TRUE || op == Opcode::OP_1) {
         type = RecoveryType::EMISSION;
         EmissionPolicy ep;
@@ -144,15 +172,13 @@ bool parse_recovery_script(const CScript& script,
         return true;
     }
 
-    // Check for threshold number (social recovery starts with a number)
+    // 5b. Threshold number -> social recovery (M-of-N multisig).
     int threshold = decode_op_n(op);
     if (threshold > 0 && data.empty()) {
-        // Could be social recovery: threshold + pubkeys + n + OP_CHECKMULTISIG
         SocialPolicy sp;
         sp.threshold = static_cast<uint8_t>(threshold);
         sp.waiting_period = static_cast<uint64_t>(timelock);
 
-        // Read guardian pubkeys
         while (it.next(op, data)) {
             if (data.size() == 32) {
                 std::array<uint8_t, 32> pk;
@@ -161,9 +187,8 @@ bool parse_recovery_script(const CScript& script,
             } else if (op == Opcode::OP_CHECKMULTISIG) {
                 break;
             } else {
-                // This might be the N count
                 int n = decode_op_n(op);
-                if (n > 0) continue;  // skip the count
+                if (n > 0) continue;
                 break;
             }
         }
@@ -176,9 +201,8 @@ bool parse_recovery_script(const CScript& script,
         return false;
     }
 
-    // Otherwise, it's a heartbeat (P2PKH-style recovery spend)
+    // 5c. OP_DUP -> heartbeat (single recovery key P2PKH).
     if (op == Opcode::OP_DUP) {
-        // OP_DUP OP_HASH160 <hash> OP_EQUALVERIFY OP_CHECKSIG
         if (!it.next(op, data) || op != Opcode::OP_HASH160) return false;
         if (!it.next(op, data) || data.size() != 20) return false;
 
@@ -194,12 +218,19 @@ bool parse_recovery_script(const CScript& script,
     return false;
 }
 
+// ---------------------------------------------------------------------------
+// build_recovery_p2wsh
+//
+// Wrap a recovery script as P2WSH:  OP_0 [32-byte Keccak256d(script)]
+// ---------------------------------------------------------------------------
+
 CScript build_recovery_p2wsh(const CScript& recovery_script) {
-    // P2WSH = OP_0 [32-byte keccak256d(script)]
+    // 1. Hash the recovery script with Keccak256d.
     auto script_hash = rnet::crypto::keccak256d(
         std::span<const uint8_t>(recovery_script.data(),
                                  recovery_script.size()));
 
+    // 2. Build OP_0 <32-byte hash>.
     CScript p2wsh;
     p2wsh << Opcode::OP_0;
     std::vector<uint8_t> hash_vec(script_hash.begin(), script_hash.end());
@@ -207,60 +238,83 @@ CScript build_recovery_p2wsh(const CScript& recovery_script) {
     return p2wsh;
 }
 
+// ---------------------------------------------------------------------------
+// build_owner_spend_witness
+//
+// Witness stack for the owner (IF) branch:
+//   [ signature, OP_TRUE (0x01), recovery_script ]
+// ---------------------------------------------------------------------------
+
 std::vector<std::vector<uint8_t>> build_owner_spend_witness(
     const std::vector<uint8_t>& signature,
     const CScript& recovery_script) {
     std::vector<std::vector<uint8_t>> witness;
 
-    // signature
+    // 1. Signature.
     witness.push_back(signature);
 
-    // OP_TRUE to take the IF branch
+    // 2. OP_TRUE to select the IF branch.
     witness.push_back({0x01});
 
-    // The recovery script itself (as the witness script)
+    // 3. The recovery script (witness script for P2WSH).
     witness.emplace_back(recovery_script.begin(), recovery_script.end());
 
     return witness;
 }
+
+// ---------------------------------------------------------------------------
+// build_heartbeat_recovery_witness
+//
+// Witness stack for heartbeat recovery (ELSE branch):
+//   [ signature, <empty> (OP_FALSE), recovery_script ]
+// ---------------------------------------------------------------------------
 
 std::vector<std::vector<uint8_t>> build_heartbeat_recovery_witness(
     const std::vector<uint8_t>& signature,
     const CScript& recovery_script) {
     std::vector<std::vector<uint8_t>> witness;
 
-    // signature
+    // 1. Signature.
     witness.push_back(signature);
 
-    // OP_FALSE to take the ELSE branch
-    witness.emplace_back();  // empty = false
+    // 2. Empty element (OP_FALSE) to select the ELSE branch.
+    witness.emplace_back();
 
-    // The recovery script itself
+    // 3. The recovery script.
     witness.emplace_back(recovery_script.begin(), recovery_script.end());
 
     return witness;
 }
+
+// ---------------------------------------------------------------------------
+// build_social_recovery_witness
+//
+// Witness stack for social recovery (ELSE branch, multisig):
+//   [ <dummy>, sig1, sig2, ..., <empty> (OP_FALSE), recovery_script ]
+//
+// The leading dummy element works around the CHECKMULTISIG off-by-one bug.
+// ---------------------------------------------------------------------------
 
 std::vector<std::vector<uint8_t>> build_social_recovery_witness(
     const std::vector<std::vector<uint8_t>>& signatures,
     const CScript& recovery_script) {
     std::vector<std::vector<uint8_t>> witness;
 
-    // Dummy element for CHECKMULTISIG bug
+    // 1. Dummy element for CHECKMULTISIG bug.
     witness.emplace_back();
 
-    // Guardian signatures
+    // 2. Guardian signatures.
     for (const auto& sig : signatures) {
         witness.push_back(sig);
     }
 
-    // OP_FALSE to take the ELSE branch
-    witness.emplace_back();  // empty = false
+    // 3. Empty element (OP_FALSE) to select the ELSE branch.
+    witness.emplace_back();
 
-    // The recovery script itself
+    // 4. The recovery script.
     witness.emplace_back(recovery_script.begin(), recovery_script.end());
 
     return witness;
 }
 
-}  // namespace rnet::script
+} // namespace rnet::script

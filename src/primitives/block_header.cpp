@@ -1,3 +1,7 @@
+// Copyright (c) 2025 The ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #include "primitives/block_header.h"
 
 #include "core/stream.h"
@@ -5,9 +9,21 @@
 
 namespace rnet::primitives {
 
-std::vector<uint8_t> CBlockHeader::serialize_unsigned() const {
+// ===========================================================================
+//  CBlockHeader
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// serialize_unsigned
+//   Produces the canonical byte representation used for hashing.  The miner
+//   signature is deliberately excluded so the hash commits to everything
+//   the signature covers.
+// ---------------------------------------------------------------------------
+std::vector<uint8_t> CBlockHeader::serialize_unsigned() const
+{
     core::DataStream ss;
 
+    // 1. Serialize every field except signature
     core::Serialize(ss, version);
     core::Serialize(ss, height);
     ss << prev_hash;
@@ -29,21 +45,29 @@ std::vector<uint8_t> CBlockHeader::serialize_unsigned() const {
     core::Serialize(ss, growth_delta);
     core::Serialize(ss, timestamp);
     core::Serialize(ss, miner_pubkey);
-    // NOTE: signature is NOT included in unsigned serialization
 
     return std::vector<uint8_t>(ss.data(), ss.data() + ss.size());
 }
 
-rnet::uint256 CBlockHeader::hash() const {
+// ---------------------------------------------------------------------------
+// hash
+//   Keccak-256d of the unsigned serialisation.
+// ---------------------------------------------------------------------------
+rnet::uint256 CBlockHeader::hash() const
+{
     auto data = serialize_unsigned();
     return crypto::keccak256d(std::span<const uint8_t>(data));
 }
 
-uint64_t CBlockHeader::model_param_count() const {
-    // Rough parameter count for a transformer model:
-    // Embedding: vocab_size * d_model
-    // Each layer: 4 * d_model^2 (attention) + 2 * d_model * d_ff (FFN) + norms
-    // Output: d_model * vocab_size
+// ---------------------------------------------------------------------------
+// model_param_count
+//   Rough transformer parameter estimate:
+//     Embedding:  vocab_size * d_model
+//     Per-layer:  4*d_model^2 (attention) + 2*d_model*d_ff (FFN) + norms
+//     Output:     d_model * vocab_size
+// ---------------------------------------------------------------------------
+uint64_t CBlockHeader::model_param_count() const
+{
     uint64_t embed = static_cast<uint64_t>(vocab_size) * d_model;
     uint64_t per_layer = 4ULL * d_model * d_model +
                          2ULL * d_model * d_ff +
@@ -54,7 +78,11 @@ uint64_t CBlockHeader::model_param_count() const {
     return embed + layers_total + output;
 }
 
-std::string CBlockHeader::to_string() const {
+// ---------------------------------------------------------------------------
+// to_string
+// ---------------------------------------------------------------------------
+std::string CBlockHeader::to_string() const
+{
     std::string result = "CBlockHeader(";
     result += "ver=" + std::to_string(version);
     result += ", height=" + std::to_string(height);
@@ -68,4 +96,4 @@ std::string CBlockHeader::to_string() const {
     return result;
 }
 
-}  // namespace rnet::primitives
+} // namespace rnet::primitives

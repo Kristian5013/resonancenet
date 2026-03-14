@@ -1,6 +1,8 @@
-#include "miner/training_solver.h"
+// Copyright (c) 2024-2026 The ResonanceNet Developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#include <sstream>
+#include "miner/training_solver.h"
 
 #include "core/logging.h"
 #include "core/random.h"
@@ -9,32 +11,72 @@
 #include "training/checkpoint_io.h"
 #include "training/model_config.h"
 
+#include <sstream>
+
 namespace rnet::miner {
 
+// ---------------------------------------------------------------------------
+// TrainingSolver (constructor)
+// ---------------------------------------------------------------------------
 TrainingSolver::TrainingSolver(gpu::GpuBackend& backend,
                                const consensus::ConsensusParams& params)
     : backend_(backend)
     , params_(params)
     , engine_(backend) {}
 
+// ---------------------------------------------------------------------------
+// ~TrainingSolver
+// ---------------------------------------------------------------------------
 TrainingSolver::~TrainingSolver() = default;
 
+// ---------------------------------------------------------------------------
+// set_output_dir
+// ---------------------------------------------------------------------------
 void TrainingSolver::set_output_dir(const std::filesystem::path& dir) {
     output_dir_ = dir;
 }
 
+// ---------------------------------------------------------------------------
+// is_interrupted
+// ---------------------------------------------------------------------------
 bool TrainingSolver::is_interrupted() const {
     return interrupted_.load(std::memory_order_relaxed);
 }
 
+// ---------------------------------------------------------------------------
+// interrupt
+// ---------------------------------------------------------------------------
 void TrainingSolver::interrupt() {
     interrupted_.store(true, std::memory_order_relaxed);
 }
 
+// ---------------------------------------------------------------------------
+// reset_interrupt
+// ---------------------------------------------------------------------------
 void TrainingSolver::reset_interrupt() {
     interrupted_.store(false, std::memory_order_relaxed);
 }
 
+// ---------------------------------------------------------------------------
+// solve
+// ---------------------------------------------------------------------------
+// Core Proof-of-Training mining procedure.
+//
+// Workflow:
+//   1. Validate step count against consensus bounds
+//   2. Load parent checkpoint into training engine
+//   3. Check for model growth event (d_model += 2 on improvement)
+//   4. Train for N steps on consensus dataset
+//   5. Evaluate on validation set
+//   6. Accept if val_loss < parent_val_loss (block found)
+//   7. Save checkpoint and compute Keccak-256d hash
+//
+// Success criterion:
+//   val_loss_new < val_loss_parent
+//
+// Improvement metric:
+//   improvement = (parent_loss - val_loss) / parent_loss
+// ---------------------------------------------------------------------------
 Result<SolverResult> TrainingSolver::solve(
     const primitives::CBlockHeader& parent_header,
     const std::filesystem::path& checkpoint_path,
@@ -44,7 +86,7 @@ Result<SolverResult> TrainingSolver::solve(
 
     core::Timer timer;
 
-    // Validate step count
+    // 1. Validate step count against consensus bounds.
     if (n_steps < params_.min_steps_per_block) {
         return Result<SolverResult>::err("step count below minimum: " +
             std::to_string(n_steps) + " < " +
@@ -56,7 +98,7 @@ Result<SolverResult> TrainingSolver::solve(
             std::to_string(params_.max_steps_per_block));
     }
 
-    // Step 1: Derive model config from parent header
+    // 2. Load parent checkpoint into the training engine.
     auto parent_config = training::ModelConfig::from_block_header(parent_header);
 
     LogPrint(MINING, "TrainingSolver: loading checkpoint for height %llu, "
@@ -65,7 +107,6 @@ Result<SolverResult> TrainingSolver::solve(
              parent_config.d_model, parent_config.n_layers,
              parent_header.val_loss);
 
-    // Step 2: Load parent checkpoint into the training engine
     auto init_result = engine_.init(parent_config);
     if (init_result.is_err()) {
         return Result<SolverResult>::err("failed to init engine: " + init_result.error());
@@ -80,7 +121,7 @@ Result<SolverResult> TrainingSolver::solve(
         return Result<SolverResult>::err("interrupted before training");
     }
 
-    // Step 3: Check for growth event
+    // 3. Check for model growth event (d_model += 2 on improvement).
     consensus::GrowthState gstate{
         parent_header.d_model,
         parent_header.n_layers,
@@ -88,7 +129,7 @@ Result<SolverResult> TrainingSolver::solve(
         parent_header.val_loss
     };
 
-    // We optimistically assume improvement (growth is computed pre-training).
+    // Optimistically assume improvement — growth is computed pre-training.
     auto growth = consensus::GrowthPolicy::compute_growth(gstate, true);
 
     training::ModelConfig new_config = parent_config;
@@ -113,7 +154,7 @@ Result<SolverResult> TrainingSolver::solve(
         return Result<SolverResult>::err("interrupted before training");
     }
 
-    // Step 4: Train for N steps
+    // 4. Train for N steps on the consensus dataset.
     LogPrint(MINING, "TrainingSolver: training for %d steps...", n_steps);
 
     train_data.reset();
@@ -129,7 +170,7 @@ Result<SolverResult> TrainingSolver::solve(
         return Result<SolverResult>::err("interrupted after training");
     }
 
-    // Step 5: Evaluate on validation set
+    // 5. Evaluate on the validation set.
     LogPrint(MINING, "TrainingSolver: evaluating on validation set...");
 
     val_data.reset();
@@ -147,14 +188,17 @@ Result<SolverResult> TrainingSolver::solve(
              (val_loss < parent_loss) ? "YES" : "NO",
              timer.elapsed_sec());
 
-    // Step 6: Check if we improved
+    // 6. Accept if val_loss < parent_val_loss (block found).
+    //
+    //    val_loss_new < val_loss_parent  =>  improvement > 0
+    //
     if (val_loss >= parent_loss) {
         return Result<SolverResult>::err("no improvement: val_loss=" +
             std::to_string(val_loss) + " >= parent_loss=" +
             std::to_string(parent_loss));
     }
 
-    // Step 7: Save checkpoint
+    // 7. Save checkpoint and compute Keccak-256d hash.
     auto ckpt_path = make_checkpoint_path(parent_header.height + 1);
     auto save_result = engine_.save_checkpoint(ckpt_path);
     if (save_result.is_err()) {
@@ -162,14 +206,16 @@ Result<SolverResult> TrainingSolver::solve(
             save_result.error());
     }
 
-    // Step 8: Hash the checkpoint
     auto hash_result = hash_checkpoint(ckpt_path);
     if (hash_result.is_err()) {
         return Result<SolverResult>::err("failed to hash checkpoint: " +
             hash_result.error());
     }
 
-    // Build result
+    // Build result.
+    //
+    //   improvement = (parent_loss - val_loss) / parent_loss
+    //
     SolverResult result;
     result.val_loss = val_loss;
     result.improvement = (parent_loss - val_loss) / parent_loss;
@@ -188,6 +234,9 @@ Result<SolverResult> TrainingSolver::solve(
     return Result<SolverResult>::ok(std::move(result));
 }
 
+// ---------------------------------------------------------------------------
+// hash_checkpoint
+// ---------------------------------------------------------------------------
 Result<rnet::uint256> TrainingSolver::hash_checkpoint(
     const std::filesystem::path& path) {
     auto result = crypto::keccak256d_file(path);
@@ -197,6 +246,9 @@ Result<rnet::uint256> TrainingSolver::hash_checkpoint(
     return Result<rnet::uint256>::ok(result.value());
 }
 
+// ---------------------------------------------------------------------------
+// make_checkpoint_path
+// ---------------------------------------------------------------------------
 std::filesystem::path TrainingSolver::make_checkpoint_path(uint64_t height) {
     std::ostringstream oss;
     oss << "checkpoint_" << height << "_"
@@ -204,4 +256,4 @@ std::filesystem::path TrainingSolver::make_checkpoint_path(uint64_t height) {
     return output_dir_ / oss.str();
 }
 
-}  // namespace rnet::miner
+} // namespace rnet::miner

@@ -1,4 +1,11 @@
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
+// Own header.
 #include "context.h"
+
+// Project headers.
 #include "../core/logging.h"
 
 #ifdef RNET_HAS_CUDA
@@ -15,9 +22,17 @@
 
 namespace rnet::gpu {
 
-std::vector<GpuDeviceInfo> GpuContext::enumerate_devices() {
+// ---------------------------------------------------------------------------
+// GpuContext::enumerate_devices
+// ---------------------------------------------------------------------------
+// Collects device info from every compiled-in backend and appends a CPU
+// fallback entry at the end.
+// ---------------------------------------------------------------------------
+std::vector<GpuDeviceInfo> GpuContext::enumerate_devices()
+{
     std::vector<GpuDeviceInfo> devices;
 
+    // 1. Probe each available backend.
 #ifdef RNET_HAS_CUDA
     {
         auto cuda_devs = CudaContext::enumerate();
@@ -39,7 +54,7 @@ std::vector<GpuDeviceInfo> GpuContext::enumerate_devices() {
     }
 #endif
 
-    // Always add a CPU fallback device
+    // 2. Always add a CPU fallback device.
     GpuDeviceInfo cpu_info;
     cpu_info.name = "CPU Fallback";
     cpu_info.total_memory = 0;
@@ -52,7 +67,14 @@ std::vector<GpuDeviceInfo> GpuContext::enumerate_devices() {
     return devices;
 }
 
-std::unique_ptr<GpuBackend> GpuContext::create_for_device(int device_id) {
+// ---------------------------------------------------------------------------
+// GpuContext::create_for_device
+// ---------------------------------------------------------------------------
+// Creates a backend for the device at the given index, or falls back to CPU
+// if the index is out of range.
+// ---------------------------------------------------------------------------
+std::unique_ptr<GpuBackend> GpuContext::create_for_device(int device_id)
+{
     auto devices = enumerate_devices();
     if (device_id < 0 || device_id >= static_cast<int>(devices.size())) {
         LogPrintf("GPU: device_id %d out of range (%d devices), using CPU fallback",
@@ -62,4 +84,4 @@ std::unique_ptr<GpuBackend> GpuContext::create_for_device(int device_id) {
     return GpuBackend::create(devices[device_id].backend_type);
 }
 
-}  // namespace rnet::gpu
+} // namespace rnet::gpu

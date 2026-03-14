@@ -1,16 +1,32 @@
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
+// Own header.
 #include "training/checkpoint_io.h"
 
+// Project headers.
+#include "crypto/keccak.h"
+
+// Standard library.
 #include <cstdio>
 #include <cstring>
-
-#include "crypto/keccak.h"
 
 namespace rnet::training {
 
 namespace {
 
-/// Write a little-endian uint32 to a file and hasher.
-void write_u32(FILE* f, rnet::crypto::KeccakHasher& hasher, uint32_t v) {
+// ===========================================================================
+//  Binary I/O helpers
+// ===========================================================================
+// Every read/write function feeds bytes into the Keccak hasher so the final
+// checksum covers the entire file content excluding itself.
+
+// ---------------------------------------------------------------------------
+// write_u32 / write_u64 / write_u8 / write_bytes
+// ---------------------------------------------------------------------------
+void write_u32(FILE* f, rnet::crypto::KeccakHasher& hasher, uint32_t v)
+{
     uint8_t buf[4];
     buf[0] = static_cast<uint8_t>(v & 0xFF);
     buf[1] = static_cast<uint8_t>((v >> 8) & 0xFF);
@@ -20,8 +36,8 @@ void write_u32(FILE* f, rnet::crypto::KeccakHasher& hasher, uint32_t v) {
     hasher.write({buf, 4});
 }
 
-/// Write a little-endian uint64 to a file and hasher.
-void write_u64(FILE* f, rnet::crypto::KeccakHasher& hasher, uint64_t v) {
+void write_u64(FILE* f, rnet::crypto::KeccakHasher& hasher, uint64_t v)
+{
     uint8_t buf[8];
     for (int i = 0; i < 8; ++i) {
         buf[i] = static_cast<uint8_t>((v >> (i * 8)) & 0xFF);
@@ -30,21 +46,24 @@ void write_u64(FILE* f, rnet::crypto::KeccakHasher& hasher, uint64_t v) {
     hasher.write({buf, 8});
 }
 
-/// Write a single byte to a file and hasher.
-void write_u8(FILE* f, rnet::crypto::KeccakHasher& hasher, uint8_t v) {
+void write_u8(FILE* f, rnet::crypto::KeccakHasher& hasher, uint8_t v)
+{
     std::fwrite(&v, 1, 1, f);
     hasher.write({&v, 1});
 }
 
-/// Write raw bytes to a file and hasher.
 void write_bytes(FILE* f, rnet::crypto::KeccakHasher& hasher,
-                 const void* data, size_t len) {
+                 const void* data, size_t len)
+{
     std::fwrite(data, 1, len, f);
     hasher.write({static_cast<const uint8_t*>(data), len});
 }
 
-/// Read a little-endian uint32 from a file and feed to hasher.
-uint32_t read_u32(FILE* f, rnet::crypto::KeccakHasher& hasher) {
+// ---------------------------------------------------------------------------
+// read_u32 / read_u64 / read_u8 / read_bytes
+// ---------------------------------------------------------------------------
+uint32_t read_u32(FILE* f, rnet::crypto::KeccakHasher& hasher)
+{
     uint8_t buf[4];
     std::fread(buf, 1, 4, f);
     hasher.write({buf, 4});
@@ -54,8 +73,8 @@ uint32_t read_u32(FILE* f, rnet::crypto::KeccakHasher& hasher) {
          | (static_cast<uint32_t>(buf[3]) << 24);
 }
 
-/// Read a little-endian uint64 from a file and feed to hasher.
-uint64_t read_u64(FILE* f, rnet::crypto::KeccakHasher& hasher) {
+uint64_t read_u64(FILE* f, rnet::crypto::KeccakHasher& hasher)
+{
     uint8_t buf[8];
     std::fread(buf, 1, 8, f);
     hasher.write({buf, 8});
@@ -66,26 +85,33 @@ uint64_t read_u64(FILE* f, rnet::crypto::KeccakHasher& hasher) {
     return v;
 }
 
-/// Read a single byte from a file and feed to hasher.
-uint8_t read_u8(FILE* f, rnet::crypto::KeccakHasher& hasher) {
+uint8_t read_u8(FILE* f, rnet::crypto::KeccakHasher& hasher)
+{
     uint8_t v = 0;
     std::fread(&v, 1, 1, f);
     hasher.write({&v, 1});
     return v;
 }
 
-/// Read raw bytes from a file and feed to hasher.
 bool read_bytes(FILE* f, rnet::crypto::KeccakHasher& hasher,
-                void* dst, size_t len) {
+                void* dst, size_t len)
+{
     size_t got = std::fread(dst, 1, len, f);
     if (got != len) return false;
     hasher.write({static_cast<const uint8_t*>(dst), len});
     return true;
 }
 
-/// Write the ModelConfig fields to file and hasher.
+// ===========================================================================
+//  Config serialisation
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// write_config / read_config
+// ---------------------------------------------------------------------------
 void write_config(FILE* f, rnet::crypto::KeccakHasher& hasher,
-                  const ModelConfig& cfg) {
+                  const ModelConfig& cfg)
+{
     write_u32(f, hasher, cfg.d_model);
     write_u32(f, hasher, cfg.n_layers);
     write_u32(f, hasher, cfg.n_slots);
@@ -98,8 +124,8 @@ void write_config(FILE* f, rnet::crypto::KeccakHasher& hasher,
     }
 }
 
-/// Read the ModelConfig fields from file and hasher.
-ModelConfig read_config(FILE* f, rnet::crypto::KeccakHasher& hasher) {
+ModelConfig read_config(FILE* f, rnet::crypto::KeccakHasher& hasher)
+{
     ModelConfig cfg;
     cfg.d_model = read_u32(f, hasher);
     cfg.n_layers = read_u32(f, hasher);
@@ -114,32 +140,53 @@ ModelConfig read_config(FILE* f, rnet::crypto::KeccakHasher& hasher) {
     return cfg;
 }
 
-/// Read the common header portion, populating hasher as we go.
-CheckpointHeader read_header_impl(FILE* f, rnet::crypto::KeccakHasher& hasher) {
+// ===========================================================================
+//  Header reading
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// read_header_impl
+// ---------------------------------------------------------------------------
+// Reads the common header portion (magic, version, config, step, tensor
+// count), feeding every byte into the hasher.
+// ---------------------------------------------------------------------------
+CheckpointHeader read_header_impl(FILE* f, rnet::crypto::KeccakHasher& hasher)
+{
     CheckpointHeader hdr;
 
-    // Magic
+    // 1. Magic.
     char magic[4];
     std::fread(magic, 1, 4, f);
     hasher.write({reinterpret_cast<const uint8_t*>(magic), 4});
     std::memcpy(hdr.magic.data(), magic, 4);
 
-    // Version
+    // 2. Version.
     hdr.version = read_u32(f, hasher);
 
-    // Config
+    // 3. Config.
     hdr.config = read_config(f, hasher);
 
-    // Step and tensor count
+    // 4. Step and tensor count.
     hdr.step = read_u64(f, hasher);
     hdr.n_tensors = read_u64(f, hasher);
 
     return hdr;
 }
 
-}  // namespace
+} // namespace
 
-Result<CheckpointHeader> read_checkpoint_header(const std::filesystem::path& path) {
+// ===========================================================================
+//  Public API
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// read_checkpoint_header
+// ---------------------------------------------------------------------------
+// Reads only the header from a checkpoint file and validates the magic
+// bytes and version number.
+// ---------------------------------------------------------------------------
+Result<CheckpointHeader> read_checkpoint_header(const std::filesystem::path& path)
+{
 #ifdef _WIN32
     FILE* f = _wfopen(path.c_str(), L"rb");
 #else
@@ -153,9 +200,12 @@ Result<CheckpointHeader> read_checkpoint_header(const std::filesystem::path& pat
     auto hdr = read_header_impl(f, hasher);
     std::fclose(f);
 
+    // 1. Validate magic.
     if (std::memcmp(hdr.magic.data(), "RNET", 4) != 0) {
         return Result<CheckpointHeader>::err("Invalid checkpoint magic bytes");
     }
+
+    // 2. Validate version.
     if (hdr.version != 1) {
         return Result<CheckpointHeader>::err("Unsupported checkpoint version: " +
                                               std::to_string(hdr.version));
@@ -164,7 +214,14 @@ Result<CheckpointHeader> read_checkpoint_header(const std::filesystem::path& pat
     return Result<CheckpointHeader>::ok(std::move(hdr));
 }
 
-Result<std::vector<TensorEntry>> read_checkpoint(const std::filesystem::path& path) {
+// ---------------------------------------------------------------------------
+// read_checkpoint
+// ---------------------------------------------------------------------------
+// Reads the full checkpoint (header + all tensor entries) and verifies the
+// trailing Keccak-256d checksum.
+// ---------------------------------------------------------------------------
+Result<std::vector<TensorEntry>> read_checkpoint(const std::filesystem::path& path)
+{
 #ifdef _WIN32
     FILE* f = _wfopen(path.c_str(), L"rb");
 #else
@@ -178,22 +235,23 @@ Result<std::vector<TensorEntry>> read_checkpoint(const std::filesystem::path& pa
     rnet::crypto::KeccakHasher hasher;
     auto hdr = read_header_impl(f, hasher);
 
+    // 1. Validate magic.
     if (std::memcmp(hdr.magic.data(), "RNET", 4) != 0) {
         std::fclose(f);
         return Result<std::vector<TensorEntry>>::err("Invalid checkpoint magic bytes");
     }
 
+    // 2. Read tensor entries.
     std::vector<TensorEntry> tensors;
     tensors.reserve(static_cast<size_t>(hdr.n_tensors));
 
-    // Streaming read buffer for large tensor data
     constexpr size_t STREAM_BUF_SIZE = 65536;
     std::vector<uint8_t> stream_buf(STREAM_BUF_SIZE);
 
     for (uint64_t i = 0; i < hdr.n_tensors; ++i) {
         TensorEntry entry;
 
-        // Name
+        // Name.
         uint32_t name_len = read_u32(f, hasher);
         entry.name.resize(name_len);
         if (!read_bytes(f, hasher, entry.name.data(), name_len)) {
@@ -202,7 +260,7 @@ Result<std::vector<TensorEntry>> read_checkpoint(const std::filesystem::path& pa
                 "Truncated checkpoint at tensor name " + std::to_string(i));
         }
 
-        // Shape
+        // Shape.
         uint32_t shape_dims = read_u32(f, hasher);
         entry.shape.resize(shape_dims);
         for (uint32_t d = 0; d < shape_dims; ++d) {
@@ -210,11 +268,10 @@ Result<std::vector<TensorEntry>> read_checkpoint(const std::filesystem::path& pa
             entry.shape[d] = static_cast<int64_t>(raw);
         }
 
-        // Data
+        // Data (streamed in chunks for large tensors).
         uint64_t data_bytes = read_u64(f, hasher);
         entry.data.resize(static_cast<size_t>(data_bytes));
 
-        // Stream in chunks for large tensors
         size_t remaining = static_cast<size_t>(data_bytes);
         size_t offset = 0;
         while (remaining > 0) {
@@ -233,7 +290,7 @@ Result<std::vector<TensorEntry>> read_checkpoint(const std::filesystem::path& pa
         tensors.push_back(std::move(entry));
     }
 
-    // Verify checksum
+    // 3. Verify checksum.
     rnet::uint256 computed = hasher.finalize_double();
 
     uint8_t stored_hash[32];
@@ -250,9 +307,16 @@ Result<std::vector<TensorEntry>> read_checkpoint(const std::filesystem::path& pa
     return Result<std::vector<TensorEntry>>::ok(std::move(tensors));
 }
 
+// ---------------------------------------------------------------------------
+// write_checkpoint
+// ---------------------------------------------------------------------------
+// Writes a complete checkpoint file: header, tensor entries, and a trailing
+// Keccak-256d checksum covering all preceding bytes.
+// ---------------------------------------------------------------------------
 Result<void> write_checkpoint(const std::filesystem::path& path,
                                const CheckpointHeader& header,
-                               const std::vector<TensorEntry>& tensors) {
+                               const std::vector<TensorEntry>& tensors)
+{
 #ifdef _WIN32
     FILE* f = _wfopen(path.c_str(), L"wb");
 #else
@@ -264,32 +328,32 @@ Result<void> write_checkpoint(const std::filesystem::path& path,
 
     rnet::crypto::KeccakHasher hasher;
 
-    // Magic
+    // 1. Magic.
     write_bytes(f, hasher, header.magic.data(), 4);
 
-    // Version
+    // 2. Version.
     write_u32(f, hasher, header.version);
 
-    // Config
+    // 3. Config.
     write_config(f, hasher, header.config);
 
-    // Step and tensor count
+    // 4. Step and tensor count.
     write_u64(f, hasher, header.step);
     write_u64(f, hasher, static_cast<uint64_t>(tensors.size()));
 
-    // Tensors
+    // 5. Tensors.
     for (const auto& entry : tensors) {
-        // Name
+        // Name.
         write_u32(f, hasher, static_cast<uint32_t>(entry.name.size()));
         write_bytes(f, hasher, entry.name.data(), entry.name.size());
 
-        // Shape
+        // Shape.
         write_u32(f, hasher, static_cast<uint32_t>(entry.shape.size()));
         for (auto dim : entry.shape) {
             write_u64(f, hasher, static_cast<uint64_t>(dim));
         }
 
-        // Data (streamed in chunks)
+        // Data (streamed in chunks).
         write_u64(f, hasher, static_cast<uint64_t>(entry.data.size()));
         constexpr size_t CHUNK_SIZE = 65536;
         size_t remaining = entry.data.size();
@@ -303,7 +367,7 @@ Result<void> write_checkpoint(const std::filesystem::path& path,
         }
     }
 
-    // Checksum: keccak256d of all preceding bytes
+    // 6. Checksum: keccak256d of all preceding bytes.
     rnet::uint256 checksum = hasher.finalize_double();
     std::fwrite(checksum.data(), 1, 32, f);
 
@@ -311,4 +375,4 @@ Result<void> write_checkpoint(const std::filesystem::path& path,
     return Result<void>::ok();
 }
 
-}  // namespace rnet::training
+} // namespace rnet::training

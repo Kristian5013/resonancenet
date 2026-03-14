@@ -1,9 +1,27 @@
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #include "core/sync.h"
 
 namespace rnet::core {
 
+// ===========================================================================
+//  Lock-order tracking (debug builds only)
+// ===========================================================================
+
 #ifdef RNET_DEBUG_LOCKORDER
 
+// ---------------------------------------------------------------------------
+// LockOrderTracker
+//
+// Records the order in which mutexes are acquired per-thread.  If
+// thread A locks (M1 then M2) and thread B later locks (M2 then M1),
+// check_order fires an assertion — signalling a potential deadlock.
+//
+// Only compiled when RNET_DEBUG_LOCKORDER is defined; zero overhead in
+// release builds.
+// ---------------------------------------------------------------------------
 LockOrderTracker& LockOrderTracker::instance() {
     static LockOrderTracker tracker;
     return tracker;
@@ -43,14 +61,14 @@ void LockOrderTracker::check_order(const void* mutex_addr,
     auto tid = std::this_thread::get_id();
     auto& locks = held_locks_[tid];
 
-    // For each lock already held by this thread, record ordering
+    // 1. For each lock already held, record the forward ordering and
+    //    check for the reverse ordering having been observed previously.
     for (const auto& held : locks) {
         auto pair_fwd = std::make_pair(held.addr, mutex_addr);
         auto pair_rev = std::make_pair(mutex_addr, held.addr);
 
-        // Check if reverse ordering was ever observed
         if (observed_order_.count(pair_rev)) {
-            // Potential deadlock detected. In debug builds, assert.
+            // 2. Potential deadlock detected.
             assert(false &&
                 "Lock order inversion detected! Potential deadlock.");
         }
@@ -60,10 +78,18 @@ void LockOrderTracker::check_order(const void* mutex_addr,
     track_lock(mutex_addr, name, file, line);
 }
 
-#endif  // RNET_DEBUG_LOCKORDER
+#endif // RNET_DEBUG_LOCKORDER
 
-// ─── Debug helpers (always available) ────────────────────────────────
+// ===========================================================================
+//  Debug helpers (always available)
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// Lock/unlock counters for diagnostics.
+//
+// Incremented by debug-instrumented lock wrappers.  Useful for
+// profiling lock contention in non-release builds.
+// ---------------------------------------------------------------------------
 static std::mutex g_global_mutex;
 static std::atomic<int64_t> g_lock_count{0};
 static std::atomic<int64_t> g_unlock_count{0};
@@ -91,6 +117,6 @@ void reset_lock_stats() {
     g_unlock_count.store(0, std::memory_order_relaxed);
 }
 
-}  // namespace debug
+} // namespace debug
 
-}  // namespace rnet::core
+} // namespace rnet::core

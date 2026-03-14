@@ -1,3 +1,7 @@
+// Copyright (c) 2025-2026 The ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #include "rpc/rawtransaction.h"
 
 #include "chain/chainstate.h"
@@ -8,25 +12,42 @@
 #include "primitives/amount.h"
 #include "primitives/transaction.h"
 
+#include <cstdint>
+#include <memory>
+#include <span>
+#include <string>
+
 namespace rnet::rpc {
 
-// ── getrawtransaction ───────────────────────────────────────────────
+// ===========================================================================
+//  Raw Transaction RPCs
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+//  rpc_getrawtransaction
+//
+//  Design: Looks up a transaction by txid. Checks mempool first, then
+//  confirmed storage (TODO). Returns raw hex or verbose JSON decode.
+// ---------------------------------------------------------------------------
 
 static JsonValue rpc_getrawtransaction(const RPCRequest& req,
                                        node::NodeContext& ctx) {
+    // 1. Extract and validate the txid parameter
     const auto& txid_param = get_param(req, 0);
     if (!txid_param.is_string()) {
         return make_rpc_error(RPC_INVALID_PARAMS, "txid required (hex string)");
     }
 
+    // 2. Parse optional verbose flag
     bool verbose = false;
     const auto& verb_param = get_param_optional(req, 1);
     if (verb_param.is_bool()) verbose = verb_param.as_bool();
     if (verb_param.is_int()) verbose = verb_param.as_int() != 0;
 
+    // 3. Parse the txid
     auto txid = rnet::uint256::from_hex(txid_param.as_string());
 
-    // Check mempool first
+    // 4. Check mempool first
     primitives::CTransactionRef tx;
     if (ctx.mempool) {
         tx = ctx.mempool->get(txid);
@@ -34,20 +55,21 @@ static JsonValue rpc_getrawtransaction(const RPCRequest& req,
 
     // TODO: look up confirmed transactions in the block storage
 
+    // 5. Return error if not found
     if (!tx) {
         return make_rpc_error(RPC_INVALID_ADDRESS_OR_KEY,
                               "No such mempool or blockchain transaction");
     }
 
+    // 6. Non-verbose: return raw serialized hex
     if (!verbose) {
-        // Return raw serialized hex
         core::DataStream ss;
         tx->serialize(ss);
         auto sp = ss.span();
         return JsonValue(bytes_to_hex(sp.data(), sp.size()));
     }
 
-    // Verbose: decode the transaction
+    // 7. Verbose: decode the transaction into JSON
     JsonValue result = JsonValue::object();
     result.set("txid", JsonValue(tx->txid().to_hex()));
     result.set("wtxid", JsonValue(tx->wtxid().to_hex()));
@@ -57,7 +79,7 @@ static JsonValue rpc_getrawtransaction(const RPCRequest& req,
     result.set("weight", JsonValue(static_cast<int64_t>(tx->get_weight())));
     result.set("locktime", JsonValue(static_cast<int64_t>(tx->locktime())));
 
-    // Inputs
+    // 8. Build inputs array
     JsonValue vin = JsonValue::array();
     for (size_t i = 0; i < tx->vin().size(); ++i) {
         const auto& input = tx->vin()[i];
@@ -76,7 +98,7 @@ static JsonValue rpc_getrawtransaction(const RPCRequest& req,
     }
     result.set("vin", std::move(vin));
 
-    // Outputs
+    // 9. Build outputs array
     JsonValue vout = JsonValue::array();
     for (size_t i = 0; i < tx->vout().size(); ++i) {
         const auto& output = tx->vout()[i];
@@ -97,10 +119,17 @@ static JsonValue rpc_getrawtransaction(const RPCRequest& req,
     return result;
 }
 
-// ── createrawtransaction ────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+//  rpc_createrawtransaction
+//
+//  Design: Constructs an unsigned transaction from JSON inputs/outputs.
+//  Inputs specify previous outpoints; outputs map addresses to amounts.
+//  Returns the serialized transaction as a hex string.
+// ---------------------------------------------------------------------------
 
 static JsonValue rpc_createrawtransaction(const RPCRequest& req,
                                           node::NodeContext& ctx) {
+    // 1. Validate parameters
     const auto& inputs_param = get_param(req, 0);
     const auto& outputs_param = get_param(req, 1);
 
@@ -113,15 +142,16 @@ static JsonValue rpc_createrawtransaction(const RPCRequest& req,
                               "outputs required as second argument");
     }
 
+    // 2. Create mutable transaction
     primitives::CMutableTransaction mtx;
 
-    // Optional locktime
+    // 3. Apply optional locktime
     const auto& locktime_param = get_param_optional(req, 2);
     if (locktime_param.is_int()) {
         mtx.locktime = static_cast<uint32_t>(locktime_param.as_int());
     }
 
-    // Parse inputs
+    // 4. Parse inputs array
     for (size_t i = 0; i < inputs_param.size(); ++i) {
         const auto& inp = inputs_param[i];
         if (!inp.is_object()) continue;
@@ -146,7 +176,7 @@ static JsonValue rpc_createrawtransaction(const RPCRequest& req,
         mtx.vin.push_back(std::move(txin));
     }
 
-    // Parse outputs — object format: {"address": amount, ...}
+    // 5. Parse outputs — object format: {"address": amount, ...}
     if (outputs_param.is_object()) {
         for (const auto& [addr, amt] : outputs_param.as_object()) {
             primitives::CTxOut txout;
@@ -165,26 +195,96 @@ static JsonValue rpc_createrawtransaction(const RPCRequest& req,
         }
     }
 
-    // Serialize and return hex
+    // 6. Serialize and return hex
     auto data = mtx.serialize_with_witness();
     return JsonValue(bytes_to_hex(data.data(), data.size()));
 }
 
-// ── decoderawtransaction ────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+//  rpc_sendrawtransaction
+//
+//  Design: Deserializes a hex-encoded signed transaction, submits it to the
+//  local mempool, and returns the txid on success. Relay to peers is TODO.
+// ---------------------------------------------------------------------------
 
-static JsonValue rpc_decoderawtransaction(const RPCRequest& req,
-                                          node::NodeContext& ctx) {
+static JsonValue rpc_sendrawtransaction(const RPCRequest& req,
+                                        node::NodeContext& ctx) {
+    // 1. Validate hex parameter
     const auto& hex_param = get_param(req, 0);
     if (!hex_param.is_string()) {
         return make_rpc_error(RPC_INVALID_PARAMS, "hex string required");
     }
 
+    // 2. Decode hex to bytes
     auto bytes = hex_to_bytes(hex_param.as_string());
     if (bytes.empty()) {
         return make_rpc_error(RPC_DESERIALIZATION_ERROR,
                               "invalid hex encoding");
     }
 
+    // 3. Deserialize the transaction
+    core::DataStream ss(std::span<const uint8_t>(bytes.data(), bytes.size()));
+    auto tx = std::make_shared<primitives::CTransaction>();
+    try {
+        const_cast<primitives::CTransaction&>(*tx).unserialize(ss);
+    } catch (...) {
+        return make_rpc_error(RPC_DESERIALIZATION_ERROR,
+                              "TX decode failed");
+    }
+
+    // 4. Verify mempool is available
+    if (!ctx.mempool) {
+        return make_rpc_error(RPC_INTERNAL_ERROR, "mempool not available");
+    }
+
+    // 5. Add to mempool (fee=0 placeholder, would need proper fee calculation)
+    int height = 0;
+    float val_loss = 0.0f;
+    if (ctx.chainstate && ctx.chainstate->tip()) {
+        height = ctx.chainstate->tip()->height;
+        val_loss = ctx.chainstate->tip()->val_loss;
+    }
+
+    auto result = ctx.mempool->add_tx(tx, 0, height, val_loss);
+    if (result.is_err()) {
+        return make_rpc_error(RPC_VERIFY_REJECTED, result.error());
+    }
+
+    // 6. Log and return txid
+    LogPrint(RPC, "TX submitted via RPC: %s", tx->txid().to_hex().c_str());
+
+    // TODO: relay to connected peers via connman
+
+    return JsonValue(tx->txid().to_hex());
+}
+
+// ===========================================================================
+//  Transaction Decoding
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+//  rpc_decoderawtransaction
+//
+//  Design: Parses a hex-encoded raw transaction and returns a structured
+//  JSON object with txid, version, inputs, outputs, and weight metrics.
+// ---------------------------------------------------------------------------
+
+static JsonValue rpc_decoderawtransaction(const RPCRequest& req,
+                                          node::NodeContext& ctx) {
+    // 1. Validate hex parameter
+    const auto& hex_param = get_param(req, 0);
+    if (!hex_param.is_string()) {
+        return make_rpc_error(RPC_INVALID_PARAMS, "hex string required");
+    }
+
+    // 2. Decode hex to bytes
+    auto bytes = hex_to_bytes(hex_param.as_string());
+    if (bytes.empty()) {
+        return make_rpc_error(RPC_DESERIALIZATION_ERROR,
+                              "invalid hex encoding");
+    }
+
+    // 3. Deserialize the transaction
     core::DataStream ss(std::span<const uint8_t>(bytes.data(), bytes.size()));
     primitives::CTransaction tx;
     try {
@@ -194,6 +294,7 @@ static JsonValue rpc_decoderawtransaction(const RPCRequest& req,
                               "TX decode failed");
     }
 
+    // 4. Build top-level fields
     JsonValue result = JsonValue::object();
     result.set("txid", JsonValue(tx.txid().to_hex()));
     result.set("wtxid", JsonValue(tx.wtxid().to_hex()));
@@ -203,7 +304,7 @@ static JsonValue rpc_decoderawtransaction(const RPCRequest& req,
     result.set("weight", JsonValue(static_cast<int64_t>(tx.get_weight())));
     result.set("locktime", JsonValue(static_cast<int64_t>(tx.locktime())));
 
-    // Inputs
+    // 5. Build inputs array
     JsonValue vin = JsonValue::array();
     for (size_t i = 0; i < tx.vin().size(); ++i) {
         const auto& input = tx.vin()[i];
@@ -221,7 +322,7 @@ static JsonValue rpc_decoderawtransaction(const RPCRequest& req,
     }
     result.set("vin", std::move(vin));
 
-    // Outputs
+    // 6. Build outputs array
     JsonValue vout = JsonValue::array();
     for (size_t i = 0; i < tx.vout().size(); ++i) {
         const auto& output = tx.vout()[i];
@@ -240,57 +341,19 @@ static JsonValue rpc_decoderawtransaction(const RPCRequest& req,
     return result;
 }
 
-// ── sendrawtransaction ──────────────────────────────────────────────
+// ===========================================================================
+//  Registration
+// ===========================================================================
 
-static JsonValue rpc_sendrawtransaction(const RPCRequest& req,
-                                        node::NodeContext& ctx) {
-    const auto& hex_param = get_param(req, 0);
-    if (!hex_param.is_string()) {
-        return make_rpc_error(RPC_INVALID_PARAMS, "hex string required");
-    }
-
-    auto bytes = hex_to_bytes(hex_param.as_string());
-    if (bytes.empty()) {
-        return make_rpc_error(RPC_DESERIALIZATION_ERROR,
-                              "invalid hex encoding");
-    }
-
-    core::DataStream ss(std::span<const uint8_t>(bytes.data(), bytes.size()));
-    auto tx = std::make_shared<primitives::CTransaction>();
-    try {
-        const_cast<primitives::CTransaction&>(*tx).unserialize(ss);
-    } catch (...) {
-        return make_rpc_error(RPC_DESERIALIZATION_ERROR,
-                              "TX decode failed");
-    }
-
-    if (!ctx.mempool) {
-        return make_rpc_error(RPC_INTERNAL_ERROR, "mempool not available");
-    }
-
-    // Add to mempool (fee=0 placeholder, would need proper fee calculation)
-    int height = 0;
-    float val_loss = 0.0f;
-    if (ctx.chainstate && ctx.chainstate->tip()) {
-        height = ctx.chainstate->tip()->height;
-        val_loss = ctx.chainstate->tip()->val_loss;
-    }
-
-    auto result = ctx.mempool->add_tx(tx, 0, height, val_loss);
-    if (result.is_err()) {
-        return make_rpc_error(RPC_VERIFY_REJECTED, result.error());
-    }
-
-    LogPrint(RPC, "TX submitted via RPC: %s", tx->txid().to_hex().c_str());
-
-    // TODO: relay to connected peers via connman
-
-    return JsonValue(tx->txid().to_hex());
-}
-
-// ── Registration ────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+//  register_rawtransaction_rpcs
+//
+//  Design: Registers all raw-transaction RPC commands into the global table.
+//  Each entry specifies name, handler, help text, and category.
+// ---------------------------------------------------------------------------
 
 void register_rawtransaction_rpcs(RPCTable& table) {
+    // 1. getrawtransaction — fetch and optionally decode a tx by txid
     table.register_command({
         "getrawtransaction",
         rpc_getrawtransaction,
@@ -299,6 +362,7 @@ void register_rawtransaction_rpcs(RPCTable& table) {
         "Rawtransactions"
     });
 
+    // 2. createrawtransaction — build an unsigned tx from inputs/outputs
     table.register_command({
         "createrawtransaction",
         rpc_createrawtransaction,
@@ -307,6 +371,7 @@ void register_rawtransaction_rpcs(RPCTable& table) {
         "Rawtransactions"
     });
 
+    // 3. decoderawtransaction — parse hex into structured JSON
     table.register_command({
         "decoderawtransaction",
         rpc_decoderawtransaction,
@@ -315,6 +380,7 @@ void register_rawtransaction_rpcs(RPCTable& table) {
         "Rawtransactions"
     });
 
+    // 4. sendrawtransaction — submit a signed tx to the mempool
     table.register_command({
         "sendrawtransaction",
         rpc_sendrawtransaction,
@@ -324,4 +390,4 @@ void register_rawtransaction_rpcs(RPCTable& table) {
     });
 }
 
-}  // namespace rnet::rpc
+} // namespace rnet::rpc

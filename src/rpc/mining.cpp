@@ -1,3 +1,7 @@
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #include "rpc/mining.h"
 
 #include "chain/chainstate.h"
@@ -15,14 +19,25 @@
 #include "primitives/txin.h"
 #include "primitives/txout.h"
 
+#include <string>
+#include <vector>
+
 namespace rnet::rpc {
 
-// ── getmininginfo ───────────────────────────────────────────────────
+// ===========================================================================
+//  getmininginfo
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// Returns mining-related information including PoT (Proof-of-Training)
+// metrics.  Unlike Bitcoin's hashrate-centric view, ResonanceNet mining
+// info centres on val_loss, d_model and growth-policy state.
+// ---------------------------------------------------------------------------
 static JsonValue rpc_getmininginfo(const RPCRequest& req,
                                    node::NodeContext& ctx) {
     JsonValue result = JsonValue::object();
 
+    // 1. Gather chain-tip metrics (height, val_loss, architecture dims).
     int height = 0;
     float val_loss = 0.0f;
     uint32_t d_model = 384;
@@ -38,17 +53,19 @@ static JsonValue rpc_getmininginfo(const RPCRequest& req,
         }
     }
 
+    // 2. Standard Bitcoin-style fields.
     result.set("blocks", JsonValue(static_cast<int64_t>(height)));
     result.set("currentblockweight", JsonValue(static_cast<int64_t>(0)));
     result.set("currentblocktx", JsonValue(static_cast<int64_t>(0)));
 
-    // PoT-specific mining info
+    // 3. PoT-specific mining info.
     result.set("val_loss", JsonValue(static_cast<double>(val_loss)));
     result.set("d_model", JsonValue(static_cast<int64_t>(d_model)));
     result.set("n_layers", JsonValue(static_cast<int64_t>(n_layers)));
     result.set("model_params",
                JsonValue(static_cast<int64_t>(0)));  // Would compute from config
 
+    // 4. Network activity.
     result.set("networkhashps", JsonValue(0.0));  // PoT equivalent: training rate
     result.set("pooledtx", JsonValue(static_cast<int64_t>(
         ctx.mempool ? ctx.mempool->size() : 0)));
@@ -57,10 +74,19 @@ static JsonValue rpc_getmininginfo(const RPCRequest& req,
     return result;
 }
 
-// ── getblocktemplate ────────────────────────────────────────────────
+// ===========================================================================
+//  getblocktemplate
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// Returns everything a miner needs to construct the next block.  Extends the
+// Bitcoin getblocktemplate schema with PoT fields: current_val_loss,
+// checkpoint_hash, dataset_hash, architecture dimensions and stagnation
+// count so the miner can configure its training run.
+// ---------------------------------------------------------------------------
 static JsonValue rpc_getblocktemplate(const RPCRequest& req,
                                       node::NodeContext& ctx) {
+    // 1. Validate chainstate availability.
     if (!ctx.chainstate) {
         return make_rpc_error(RPC_INTERNAL_ERROR, "chainstate not available");
     }
@@ -72,14 +98,14 @@ static JsonValue rpc_getblocktemplate(const RPCRequest& req,
 
     JsonValue result = JsonValue::object();
 
-    // Template fields
+    // 2. Standard template fields.
     result.set("version", JsonValue(static_cast<int64_t>(tip->header.version)));
     result.set("previousblockhash", JsonValue(tip->block_hash.to_hex()));
     result.set("height", JsonValue(static_cast<int64_t>(tip->height + 1)));
     result.set("curtime", JsonValue(static_cast<int64_t>(core::get_time())));
     result.set("mintime", JsonValue(static_cast<int64_t>(tip->timestamp + 1)));
 
-    // PoT fields for the template
+    // 3. PoT fields for the template.
     result.set("current_val_loss",
                JsonValue(static_cast<double>(tip->val_loss)));
     result.set("checkpoint_hash", JsonValue(tip->header.checkpoint_hash.to_hex()));
@@ -92,7 +118,7 @@ static JsonValue rpc_getblocktemplate(const RPCRequest& req,
     result.set("stagnation_count",
                JsonValue(static_cast<int64_t>(tip->header.stagnation_count)));
 
-    // Transactions available from mempool
+    // 4. Transactions available from mempool.
     JsonValue transactions = JsonValue::array();
     if (ctx.mempool) {
         auto sorted = ctx.mempool->get_sorted_txs();
@@ -107,26 +133,36 @@ static JsonValue rpc_getblocktemplate(const RPCRequest& req,
     }
     result.set("transactions", std::move(transactions));
 
-    // Coinbase info
+    // 5. Coinbase info.
     result.set("coinbasevalue", JsonValue(static_cast<int64_t>(0)));
 
     return result;
 }
 
-// ── submitblock ─────────────────────────────────────────────────────
+// ===========================================================================
+//  submitblock
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// Accepts a hex-encoded serialised block and submits it to the chainstate
+// for validation and connection.  Returns JSON null on success (Bitcoin
+// convention) or an RPC error on failure.
+// ---------------------------------------------------------------------------
 static JsonValue rpc_submitblock(const RPCRequest& req,
                                  node::NodeContext& ctx) {
+    // 1. Validate hex parameter.
     const auto& hex_param = get_param(req, 0);
     if (!hex_param.is_string()) {
         return make_rpc_error(RPC_INVALID_PARAMS,
                               "hex block data required");
     }
 
+    // 2. Validate chainstate.
     if (!ctx.chainstate) {
         return make_rpc_error(RPC_INTERNAL_ERROR, "chainstate not available");
     }
 
+    // 3. Decode hex data.
     const std::string& hex_data = hex_param.as_string();
     if (!is_valid_hex(hex_data)) {
         return make_rpc_error(RPC_DESERIALIZATION_ERROR,
@@ -139,7 +175,7 @@ static JsonValue rpc_submitblock(const RPCRequest& req,
                               "failed to decode hex data");
     }
 
-    // Deserialize the block
+    // 4. Deserialise the block.
     core::DataStream ss(std::span<const uint8_t>(bytes.data(), bytes.size()));
     primitives::CBlock block;
     try {
@@ -149,7 +185,7 @@ static JsonValue rpc_submitblock(const RPCRequest& req,
                               "block decode failed");
     }
 
-    // Submit to chainstate
+    // 5. Submit to chainstate.
     auto result = ctx.chainstate->accept_block(block);
     if (result.is_err()) {
         return make_rpc_error(RPC_VERIFY_ERROR, result.error());
@@ -158,14 +194,28 @@ static JsonValue rpc_submitblock(const RPCRequest& req,
     LogPrint(RPC, "Block submitted via RPC: height=%d",
              result.value()->height);
 
-    // Success returns null (Bitcoin convention)
+    // 6. Success returns null (Bitcoin convention).
     return JsonValue();
 }
 
-// ── generate (regtest only) ─────────────────────────────────────────
+// ===========================================================================
+//  generate (regtest only)
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// Instantly generates nblocks blocks on regtest by simulating a 1% val_loss
+// improvement per block and applying the growth policy.  Each block contains
+// a minimal coinbase paying to an unspendable key.  This is the primary
+// mechanism for integration testing without real GPU training.
+//
+// Arguments:
+//   nblocks (int) - number of blocks to generate, 1-1000 (default 1)
+//
+// Returns: JSON array of generated block hashes.
+// ---------------------------------------------------------------------------
 static JsonValue rpc_generate(const RPCRequest& req,
                                node::NodeContext& ctx) {
+    // 1. Restrict to regtest.
     if (ctx.network != "regtest") {
         return make_rpc_error(RPC_MISC_ERROR,
                               "generate is only available in regtest mode");
@@ -174,7 +224,7 @@ static JsonValue rpc_generate(const RPCRequest& req,
         return make_rpc_error(RPC_INTERNAL_ERROR, "chainstate not available");
     }
 
-    // Parse nblocks (default 1)
+    // 2. Parse nblocks (default 1).
     int nblocks = 1;
     const auto& p0 = get_param(req, 0);
     if (p0.is_number()) {
@@ -189,6 +239,7 @@ static JsonValue rpc_generate(const RPCRequest& req,
     JsonValue hashes = JsonValue::array();
 
     for (int i = 0; i < nblocks; ++i) {
+        // 3. Fetch current tip.
         auto* tip = ctx.chainstate->tip();
         if (!tip) {
             return make_rpc_error(RPC_INTERNAL_ERROR, "no chain tip");
@@ -196,7 +247,7 @@ static JsonValue rpc_generate(const RPCRequest& req,
 
         primitives::CBlock block;
 
-        // Header fields
+        // 4. Header fields.
         block.version = 1;
         block.height = tip->height + 1;
         block.prev_hash = tip->block_hash;
@@ -205,12 +256,12 @@ static JsonValue rpc_generate(const RPCRequest& req,
             block.timestamp = tip->timestamp + 1;
         }
 
-        // PoT fields: simulate slight improvement
+        // 5. PoT fields: simulate slight improvement (1% per block).
         block.prev_val_loss = tip->val_loss;
-        block.val_loss = tip->val_loss * 0.99f;  // 1% improvement
+        block.val_loss = tip->val_loss * 0.99f;
         block.train_steps = static_cast<uint32_t>(params.min_steps_per_block);
 
-        // Growth fields — must match growth policy exactly
+        // 6. Growth fields -- must match growth policy exactly.
         bool loss_improved = block.val_loss < tip->val_loss;
         consensus::GrowthState gstate{};
         gstate.d_model = tip->d_model;
@@ -231,7 +282,7 @@ static JsonValue rpc_generate(const RPCRequest& req,
         block.stagnation_count = growth.new_stagnation;
         block.growth_delta = growth.delta_d_model;
 
-        // Coinbase transaction
+        // 7. Coinbase transaction.
         consensus::EmissionState emission{};
         auto reward = consensus::compute_block_reward(
             block.height, loss_improved ? 0.01f : 0.0f, emission, params);
@@ -239,7 +290,7 @@ static JsonValue rpc_generate(const RPCRequest& req,
         primitives::CMutableTransaction mtx;
         mtx.version = 1;
 
-        // Coinbase input
+        // 8. Coinbase input (null outpoint, height message as script_sig).
         primitives::COutPoint null_outpoint;
         null_outpoint.set_null();
         std::string height_msg = "regtest block " + std::to_string(block.height);
@@ -247,7 +298,7 @@ static JsonValue rpc_generate(const RPCRequest& req,
         primitives::CTxIn coinbase_in(null_outpoint, std::move(script_sig), 0xFFFFFFFF);
         mtx.vin.push_back(std::move(coinbase_in));
 
-        // Coinbase output (to unspendable key, like genesis)
+        // 9. Coinbase output (unspendable key: [0x20][32-byte zero pubkey][0xAC]).
         std::vector<uint8_t> coinbase_script;
         coinbase_script.push_back(0x20);
         coinbase_script.resize(33, 0x00);
@@ -259,10 +310,9 @@ static JsonValue rpc_generate(const RPCRequest& req,
 
         block.vtx.push_back(primitives::MakeTransactionRef(std::move(mtx)));
 
-        // Merkle root
+        // 10. Compute merkle root and submit.
         block.merkle_root = consensus::block_merkle_root(block);
 
-        // Submit
         auto result = ctx.chainstate->accept_block(block);
         if (result.is_err()) {
             return make_rpc_error(RPC_VERIFY_ERROR,
@@ -280,8 +330,13 @@ static JsonValue rpc_generate(const RPCRequest& req,
     return hashes;
 }
 
-// ── Registration ────────────────────────────────────────────────────
+// ===========================================================================
+//  Registration
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// Registers all mining-related RPCs into the global RPC dispatch table.
+// ---------------------------------------------------------------------------
 void register_mining_rpcs(RPCTable& table) {
     table.register_command({
         "getmininginfo",
@@ -317,4 +372,4 @@ void register_mining_rpcs(RPCTable& table) {
     });
 }
 
-}  // namespace rnet::rpc
+} // namespace rnet::rpc

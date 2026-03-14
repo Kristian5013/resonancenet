@@ -1,3 +1,7 @@
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #include "miner/worker.h"
 
 #include "core/logging.h"
@@ -5,8 +9,35 @@
 #include "core/time.h"
 #include "miner/difficulty.h"
 
+#include <chrono>
+#include <string>
+#include <thread>
+
 namespace rnet::miner {
 
+// ---------------------------------------------------------------------------
+// Worker training loop  (Proof-of-Training mining)
+//
+// Each MiningWorker runs a dedicated thread that repeats this cycle:
+//
+//   1. Snapshot the current block template and parent checkpoint.
+//   2. Load training / validation data (once, then reuse).
+//   3. Run the TrainingSolver for N gradient-descent steps starting
+//      from the parent checkpoint.
+//   4. Evaluate the resulting model on the held-out validation set.
+//   5. PoT success criterion: val_loss_new < val_loss_parent.
+//      If satisfied, assemble the solved block and invoke the
+//      block-found callback so the Miner can relay it to the node.
+//
+// The solver is interruptible: when the chain tip changes the Miner
+// calls update_template() which sets a new template and interrupts
+// the solver, causing the worker to restart from step 1 with the
+// updated state.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// MiningWorker::MiningWorker
+// ---------------------------------------------------------------------------
 MiningWorker::MiningWorker(int id,
                            gpu::GpuBackend& backend,
                            const consensus::ConsensusParams& params)
@@ -15,20 +46,28 @@ MiningWorker::MiningWorker(int id,
     , params_(params)
     , solver_(backend, params) {}
 
+// ---------------------------------------------------------------------------
+// MiningWorker::~MiningWorker
+// ---------------------------------------------------------------------------
 MiningWorker::~MiningWorker() {
     stop();
 }
 
+// ---------------------------------------------------------------------------
+// MiningWorker::start
+// ---------------------------------------------------------------------------
 void MiningWorker::start(BlockFoundCallback callback) {
     if (running_.load()) {
         return;
     }
 
+    // 1. Store the block-found callback.
     {
         LOCK(mutex_);
         callback_ = std::move(callback);
     }
 
+    // 2. Reset control flags and launch the thread.
     stop_requested_.store(false);
     running_.store(true);
 
@@ -38,10 +77,15 @@ void MiningWorker::start(BlockFoundCallback callback) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// MiningWorker::stop
+// ---------------------------------------------------------------------------
 void MiningWorker::stop() {
+    // 1. Request the run-loop to exit and interrupt the solver.
     stop_requested_.store(true);
     solver_.interrupt();
 
+    // 2. Wait for the thread to finish.
     if (thread_.joinable()) {
         thread_.join();
     }
@@ -49,13 +93,19 @@ void MiningWorker::stop() {
     running_.store(false);
 }
 
+// ---------------------------------------------------------------------------
+// MiningWorker::update_template
+// ---------------------------------------------------------------------------
 void MiningWorker::update_template(std::shared_ptr<BlockTemplate> tmpl) {
     LOCK(mutex_);
     current_template_ = std::move(tmpl);
-    // Interrupt current solve so worker picks up new template
+    // Interrupt current solve so worker picks up new template.
     solver_.interrupt();
 }
 
+// ---------------------------------------------------------------------------
+// MiningWorker::set_data_paths
+// ---------------------------------------------------------------------------
 void MiningWorker::set_data_paths(const std::filesystem::path& train_data_path,
                                   const std::filesystem::path& val_data_path) {
     LOCK(mutex_);
@@ -64,32 +114,47 @@ void MiningWorker::set_data_paths(const std::filesystem::path& train_data_path,
     data_loaded_ = false;
 }
 
+// ---------------------------------------------------------------------------
+// MiningWorker::set_checkpoint_dir
+// ---------------------------------------------------------------------------
 void MiningWorker::set_checkpoint_dir(const std::filesystem::path& dir) {
     LOCK(mutex_);
     checkpoint_dir_ = dir;
     solver_.set_output_dir(dir);
 }
 
+// ---------------------------------------------------------------------------
+// MiningWorker::set_parent_checkpoint
+// ---------------------------------------------------------------------------
 void MiningWorker::set_parent_checkpoint(const std::filesystem::path& path) {
     LOCK(mutex_);
     parent_checkpoint_ = path;
 }
 
+// ---------------------------------------------------------------------------
+// MiningWorker::set_steps_per_attempt
+// ---------------------------------------------------------------------------
 void MiningWorker::set_steps_per_attempt(int steps) {
     LOCK(mutex_);
     steps_per_attempt_ = steps;
 }
 
+// ---------------------------------------------------------------------------
+// MiningWorker::stats
+// ---------------------------------------------------------------------------
 WorkerStats MiningWorker::stats() const {
     LOCK(mutex_);
     return stats_;
 }
 
+// ---------------------------------------------------------------------------
+// MiningWorker::run
+// ---------------------------------------------------------------------------
 void MiningWorker::run() {
     LogPrint(MINING, "MiningWorker[%d]: started", id_);
 
     while (!stop_requested_.load()) {
-        // Snapshot current state under lock
+        // 1. Snapshot current state under lock.
         std::shared_ptr<BlockTemplate> tmpl;
         std::filesystem::path ckpt_path;
         int steps = 0;
@@ -101,13 +166,13 @@ void MiningWorker::run() {
             steps = steps_per_attempt_;
         }
 
-        // Wait if we don't have a template yet
+        // 2. Wait if we don't have a template yet.
         if (!tmpl || ckpt_path.empty() || steps <= 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             continue;
         }
 
-        // Load data if not yet loaded
+        // 3. Load training and validation data (one-time).
         if (!data_loaded_) {
             std::filesystem::path train_path, val_path;
             {
@@ -137,7 +202,7 @@ void MiningWorker::run() {
             }
         }
 
-        // Get suggested step count if not explicitly set
+        // 4. Fall back to a heuristic step count if none was configured.
         if (steps <= 0) {
             steps = suggest_step_count(
                 tmpl->block.prev_val_loss,
@@ -145,7 +210,7 @@ void MiningWorker::run() {
                 params_);
         }
 
-        // Reset solver interrupt flag
+        // 5. Reset the solver interrupt flag and start the timer.
         solver_.reset_interrupt();
 
         core::Timer timer;
@@ -156,11 +221,10 @@ void MiningWorker::run() {
                  static_cast<unsigned long long>(tmpl->block.height),
                  steps);
 
-        // Attempt to solve
+        // 6. Run the training solver: load checkpoint, train, evaluate.
+        //    The solver returns Ok(solution) when val_loss_new < val_loss_parent,
+        //    or Err when the attempt did not beat the parent.
         auto result = solver_.solve(
-            // Use the template's parent header info
-            // The template block has height = parent_height + 1,
-            // so we reconstruct a parent-like header from the template.
             [&]() -> primitives::CBlockHeader {
                 primitives::CBlockHeader parent;
                 parent.height = tmpl->block.height - 1;
@@ -187,6 +251,7 @@ void MiningWorker::run() {
 
         double elapsed = timer.elapsed_sec();
 
+        // 7. Update attempt statistics.
         {
             LOCK(mutex_);
             stats_.attempts++;
@@ -194,19 +259,21 @@ void MiningWorker::run() {
             stats_.total_time_sec += elapsed;
         }
 
+        // 8. If the solver found a valid solution, assemble the block.
         if (result.is_ok()) {
             auto& sol = result.value();
 
-            // Fill in the template block with solver results
+            // 8a. Copy template block and fill in solver results.
             primitives::CBlock found_block = tmpl->block;
             found_block.checkpoint_hash = sol.checkpoint_hash;
             found_block.dataset_hash = sol.dataset_hash;
             found_block.val_loss = sol.val_loss;
             found_block.train_steps = sol.train_steps;
 
-            // Recompute merkle root (it shouldn't change but ensure consistency)
+            // 8b. Recompute merkle root for consistency.
             found_block.merkle_root = found_block.compute_merkle_root();
 
+            // 8c. Record the solution in worker stats.
             {
                 LOCK(mutex_);
                 stats_.solutions_found++;
@@ -215,7 +282,7 @@ void MiningWorker::run() {
                 }
             }
 
-            // Invoke callback
+            // 8d. Invoke the block-found callback outside the lock.
             BlockFoundCallback cb;
             {
                 LOCK(mutex_);
@@ -233,4 +300,4 @@ void MiningWorker::run() {
     LogPrint(MINING, "MiningWorker[%d]: stopped", id_);
 }
 
-}  // namespace rnet::miner
+} // namespace rnet::miner

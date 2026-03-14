@@ -1,73 +1,142 @@
-#include "lightning/invoice.h"
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
 
-#include <algorithm>
-#include <chrono>
-#include <cstring>
-#include <sstream>
+#include "lightning/invoice.h"
 
 #include "core/bech32.h"
 #include "core/stream.h"
 #include "core/serialize.h"
 #include "crypto/keccak.h"
 
+#include <algorithm>
+#include <chrono>
+#include <cstring>
+#include <sstream>
+
+// ---------------------------------------------------------------------------
+// Design note — BOLT11-style encoding with "rnt" prefix
+//
+//   HRP format:   "rnt"  (mainnet)  |  "trnt" (testnet)  |  "rrnt" (regtest)
+//                 optionally followed by the amount in resonances.
+//
+//   Data payload (5-bit groups):
+//     [timestamp: 7 x 5-bit]  [tagged fields...]  [signature: 104 x 5-bit]
+//
+//   Tagged fields:
+//     tag=1   payment_hash (32 bytes)      tag=13  description (UTF-8)
+//     tag=19  payee_pubkey (32 bytes)      tag=23  description_hash
+//     tag=6   expiry (seconds)             tag=24  min_cltv_expiry
+//     tag=3   route_hint                   tag=9   feature_bits
+//
+//   Signature is Ed25519 over Keccak256d(hrp || data5_before_sig).
+//   The result is bech32-encoded into a single printable string.
+// ---------------------------------------------------------------------------
+
 namespace rnet::lightning {
 
-// ── Builder ─────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Invoice::set_payment_hash
+// ---------------------------------------------------------------------------
 
 Invoice& Invoice::set_payment_hash(const uint256& hash) {
     payment_hash_ = hash;
     return *this;
 }
 
+// ---------------------------------------------------------------------------
+// Invoice::set_amount
+// ---------------------------------------------------------------------------
+
 Invoice& Invoice::set_amount(int64_t amount_resonances) {
     amount_ = amount_resonances;
     return *this;
 }
+
+// ---------------------------------------------------------------------------
+// Invoice::set_description
+// ---------------------------------------------------------------------------
 
 Invoice& Invoice::set_description(std::string desc) {
     description_ = std::move(desc);
     return *this;
 }
 
+// ---------------------------------------------------------------------------
+// Invoice::set_description_hash
+// ---------------------------------------------------------------------------
+
 Invoice& Invoice::set_description_hash(const uint256& hash) {
     description_hash_ = hash;
     return *this;
 }
+
+// ---------------------------------------------------------------------------
+// Invoice::set_payee
+// ---------------------------------------------------------------------------
 
 Invoice& Invoice::set_payee(const crypto::Ed25519PublicKey& pubkey) {
     payee_ = pubkey;
     return *this;
 }
 
+// ---------------------------------------------------------------------------
+// Invoice::set_expiry
+// ---------------------------------------------------------------------------
+
 Invoice& Invoice::set_expiry(uint32_t seconds) {
     expiry_ = seconds;
     return *this;
 }
+
+// ---------------------------------------------------------------------------
+// Invoice::set_min_cltv_expiry
+// ---------------------------------------------------------------------------
 
 Invoice& Invoice::set_min_cltv_expiry(uint32_t delta) {
     min_cltv_expiry_ = delta;
     return *this;
 }
 
+// ---------------------------------------------------------------------------
+// Invoice::set_timestamp
+// ---------------------------------------------------------------------------
+
 Invoice& Invoice::set_timestamp(uint64_t unix_time) {
     timestamp_ = unix_time;
     return *this;
 }
+
+// ---------------------------------------------------------------------------
+// Invoice::set_testnet
+// ---------------------------------------------------------------------------
 
 Invoice& Invoice::set_testnet(bool is_testnet) {
     is_testnet_ = is_testnet;
     return *this;
 }
 
+// ---------------------------------------------------------------------------
+// Invoice::set_regtest
+// ---------------------------------------------------------------------------
+
 Invoice& Invoice::set_regtest(bool is_regtest) {
     is_regtest_ = is_regtest;
     return *this;
 }
 
+// ---------------------------------------------------------------------------
+// Invoice::add_route_hint
+// ---------------------------------------------------------------------------
+
 Invoice& Invoice::add_route_hint(RouteHint hint) {
     route_hints_.push_back(std::move(hint));
     return *this;
 }
+
+// ---------------------------------------------------------------------------
+// Invoice::set_preimage
+// ---------------------------------------------------------------------------
 
 Invoice& Invoice::set_preimage(const uint256& preimage) {
     has_preimage_ = true;
@@ -75,36 +144,43 @@ Invoice& Invoice::set_preimage(const uint256& preimage) {
     return *this;
 }
 
-// ── Helper: encode tagged field as 5-bit groups ─────────────────────
+// ---------------------------------------------------------------------------
+// write_tagged_field  (file-local helper)
+// ---------------------------------------------------------------------------
 
 static void write_tagged_field(std::vector<uint8_t>& out5bit,
                                 uint8_t tag,
                                 const std::vector<uint8_t>& data8bit) {
-    // Convert data to 5-bit groups
+    // 1. Convert 8-bit data to 5-bit groups.
     auto data5 = core::convert_bits(
         std::span<const uint8_t>(data8bit), 8, 5, true);
 
     uint16_t data_len = static_cast<uint16_t>(data5.size());
 
-    // Tag (5 bits)
+    // 2. Write tag (5 bits).
     out5bit.push_back(tag & 0x1F);
-    // Length: 2 x 5-bit values (big-endian)
+
+    // 3. Write length as 2 x 5-bit values (big-endian).
     out5bit.push_back(static_cast<uint8_t>((data_len >> 5) & 0x1F));
     out5bit.push_back(static_cast<uint8_t>(data_len & 0x1F));
-    // Data
+
+    // 4. Append data groups.
     out5bit.insert(out5bit.end(), data5.begin(), data5.end());
 }
 
-// ── Encoding ────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Invoice::encode
+// ---------------------------------------------------------------------------
 
 Result<std::string> Invoice::encode(
     const crypto::Ed25519SecretKey& signing_key) const {
 
+    // 1. Payment hash is mandatory.
     if (payment_hash_.is_zero()) {
         return Result<std::string>::err("Payment hash is required");
     }
 
-    // Determine HRP
+    // 2. Determine HRP based on network.
     std::string hrp_str;
     if (is_regtest_) {
         hrp_str = INVOICE_HRP_REGTEST;
@@ -114,21 +190,18 @@ Result<std::string> Invoice::encode(
         hrp_str = INVOICE_HRP_MAINNET;
     }
 
-    // Append amount to HRP if present
+    // 3. Append amount to HRP if present.
     if (amount_.has_value()) {
-        // Encode amount in resonances; use multiplier suffixes
         int64_t amt = *amount_;
         if (amt > 0) {
-            // Express in RNT with appropriate suffix
-            // For simplicity, we encode as raw resonance count
             hrp_str += std::to_string(amt);
         }
     }
 
-    // Build 5-bit data
+    // 4. Build 5-bit data payload.
     std::vector<uint8_t> data5;
 
-    // Timestamp (35 bits = 7 x 5-bit groups)
+    // 5. Timestamp (35 bits = 7 x 5-bit groups).
     uint64_t ts = timestamp_;
     if (ts == 0) {
         auto now = std::chrono::system_clock::now();
@@ -140,12 +213,12 @@ Result<std::string> Invoice::encode(
         data5.push_back(static_cast<uint8_t>((ts >> (i * 5)) & 0x1F));
     }
 
-    // Payment hash (tag 1)
+    // 6. Payment hash (tag 1).
     std::vector<uint8_t> ph_bytes(payment_hash_.begin(), payment_hash_.end());
     write_tagged_field(data5, static_cast<uint8_t>(InvoiceTag::PAYMENT_HASH),
                        ph_bytes);
 
-    // Description or description hash
+    // 7. Description or description hash.
     if (!description_.empty()) {
         std::vector<uint8_t> desc_bytes(description_.begin(),
                                          description_.end());
@@ -159,14 +232,14 @@ Result<std::string> Invoice::encode(
                            dh_bytes);
     }
 
-    // Payee public key (tag 19)
+    // 8. Payee public key (tag 19).
     if (!payee_.is_zero()) {
         std::vector<uint8_t> pk_bytes(payee_.data.begin(), payee_.data.end());
         write_tagged_field(data5, static_cast<uint8_t>(InvoiceTag::PAYEE_PUBKEY),
                            pk_bytes);
     }
 
-    // Expiry (tag 6)
+    // 9. Expiry (tag 6) — only if non-default.
     if (expiry_ != 3600) {
         core::DataStream es;
         core::ser_write_u32(es, expiry_);
@@ -174,7 +247,7 @@ Result<std::string> Invoice::encode(
                            es.vch());
     }
 
-    // Min CLTV expiry (tag 24)
+    // 10. Min CLTV expiry (tag 24) — only if non-default.
     if (min_cltv_expiry_ != DEFAULT_CLTV_EXPIRY_DELTA) {
         core::DataStream cs;
         core::ser_write_u32(cs, min_cltv_expiry_);
@@ -183,7 +256,7 @@ Result<std::string> Invoice::encode(
                            cs.vch());
     }
 
-    // Route hints (tag 3)
+    // 11. Route hints (tag 3).
     for (const auto& hint : route_hints_) {
         core::DataStream rs;
         rs.write(hint.node_id.data.data(), 32);
@@ -195,8 +268,7 @@ Result<std::string> Invoice::encode(
                            rs.vch());
     }
 
-    // Sign the data
-    // The message to sign is: hrp bytes + data5 (before signature)
+    // 12. Sign: message = hrp bytes || data5 (before signature).
     core::DataStream sign_data;
     sign_data.write(reinterpret_cast<const uint8_t*>(hrp_str.data()),
                      hrp_str.size());
@@ -211,7 +283,7 @@ Result<std::string> Invoice::encode(
                                          sig_result.error());
     }
 
-    // Append signature as 5-bit groups (64 bytes + 1 recovery byte)
+    // 13. Append signature as 5-bit groups (64 bytes + 1 recovery byte).
     std::vector<uint8_t> sig_bytes(sig_result.value().data.begin(),
                                     sig_result.value().data.end());
     sig_bytes.push_back(0);  // Recovery flag
@@ -219,7 +291,7 @@ Result<std::string> Invoice::encode(
         std::span<const uint8_t>(sig_bytes), 8, 5, true);
     data5.insert(data5.end(), sig5.begin(), sig5.end());
 
-    // Encode as bech32
+    // 14. Final bech32 encoding.
     std::string encoded = core::bech32_encode(hrp_str, data5,
                                                core::Bech32Encoding::BECH32);
     if (encoded.empty()) {
@@ -229,9 +301,12 @@ Result<std::string> Invoice::encode(
     return Result<std::string>::ok(std::move(encoded));
 }
 
-// ── Decoding ────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Invoice::decode
+// ---------------------------------------------------------------------------
 
 Result<Invoice> Invoice::decode(std::string_view invoice_str) {
+    // 1. Decode from bech32.
     auto decoded = core::bech32_decode(invoice_str);
     if (decoded.encoding == core::Bech32Encoding::INVALID) {
         return Result<Invoice>::err("Invalid bech32 encoding");
@@ -239,11 +314,10 @@ Result<Invoice> Invoice::decode(std::string_view invoice_str) {
 
     Invoice inv;
 
-    // Parse HRP
+    // 2. Parse HRP to determine network and optional amount.
     const std::string& hrp = decoded.hrp;
     if (hrp.substr(0, 4) == INVOICE_HRP_REGTEST) {
         inv.is_regtest_ = true;
-        // Parse amount from remaining HRP
         if (hrp.size() > 4) {
             std::string amt_str = hrp.substr(4);
             try {
@@ -276,16 +350,16 @@ Result<Invoice> Invoice::decode(std::string_view invoice_str) {
         return Result<Invoice>::err("Invoice data too short");
     }
 
-    // Parse timestamp (first 7 x 5-bit groups)
+    // 3. Parse timestamp (first 7 x 5-bit groups).
     inv.timestamp_ = 0;
     for (int i = 0; i < 7; ++i) {
         inv.timestamp_ = (inv.timestamp_ << 5) | data5[static_cast<size_t>(i)];
     }
 
-    // Determine where signature starts (last 104 x 5-bit groups = 65 bytes)
+    // 4. Determine where signature starts (last 104 x 5-bit groups = 65 bytes).
     size_t sig_start = data5.size() >= 104 ? data5.size() - 104 : data5.size();
 
-    // Parse tagged fields
+    // 5. Parse tagged fields between timestamp and signature.
     size_t pos = 7;
     while (pos + 3 <= sig_start) {
         uint8_t tag = data5[pos];
@@ -295,7 +369,7 @@ Result<Invoice> Invoice::decode(std::string_view invoice_str) {
 
         if (pos + data_len > sig_start) break;
 
-        // Convert 5-bit data back to 8-bit
+        // 6. Convert 5-bit field data back to 8-bit.
         std::vector<uint8_t> field5(data5.begin() + static_cast<int64_t>(pos),
                                      data5.begin() + static_cast<int64_t>(pos + data_len));
         auto field8 = core::convert_bits(
@@ -355,7 +429,7 @@ Result<Invoice> Invoice::decode(std::string_view invoice_str) {
         pos += data_len;
     }
 
-    // Parse signature (last 104 x 5-bit groups)
+    // 7. Parse signature (last 104 x 5-bit groups).
     if (sig_start < data5.size()) {
         std::vector<uint8_t> sig5(data5.begin() + static_cast<int64_t>(sig_start),
                                    data5.end());
@@ -369,16 +443,23 @@ Result<Invoice> Invoice::decode(std::string_view invoice_str) {
     return Result<Invoice>::ok(std::move(inv));
 }
 
-// ── Queries ─────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Invoice::is_expired
+// ---------------------------------------------------------------------------
 
 bool Invoice::is_expired(uint64_t current_time) const {
     return current_time > timestamp_ + expiry_;
 }
 
+// ---------------------------------------------------------------------------
+// Invoice::verify_signature
+// ---------------------------------------------------------------------------
+
 bool Invoice::verify_signature() const {
+    // 1. Payee must be known.
     if (payee_.is_zero()) return false;
 
-    // Reconstruct the signed message
+    // 2. Reconstruct the HRP that was signed.
     std::string hrp_str;
     if (is_regtest_) {
         hrp_str = INVOICE_HRP_REGTEST;
@@ -391,10 +472,14 @@ bool Invoice::verify_signature() const {
         hrp_str += std::to_string(*amount_);
     }
 
-    // We would need to reconstruct the 5-bit data to verify.
-    // For now, return true if the signature is non-zero.
+    // 3. Full verification requires reconstructing the 5-bit data.
+    //    For now, return true if the signature is non-zero.
     return !signature_.is_zero();
 }
+
+// ---------------------------------------------------------------------------
+// Invoice::hrp
+// ---------------------------------------------------------------------------
 
 std::string_view Invoice::hrp() const {
     if (is_regtest_) return INVOICE_HRP_REGTEST;
@@ -402,4 +487,4 @@ std::string_view Invoice::hrp() const {
     return INVOICE_HRP_MAINNET;
 }
 
-}  // namespace rnet::lightning
+} // namespace rnet::lightning

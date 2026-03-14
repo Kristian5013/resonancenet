@@ -1,3 +1,7 @@
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #include "core/config.h"
 
 #include <algorithm>
@@ -7,49 +11,86 @@
 
 namespace rnet::core {
 
+// ===========================================================================
+//  Argument name normalisation
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// normalize_name
+//   Strips leading dashes so that "--foo", "-foo", and "foo" all resolve
+//   to the same canonical key.
+// ---------------------------------------------------------------------------
 std::string ArgsManager::normalize_name(std::string_view name) {
-    // Strip leading dashes
+    // 1. Strip leading dashes
     while (!name.empty() && name.front() == '-') {
         name.remove_prefix(1);
     }
     return std::string(name);
 }
 
+// ===========================================================================
+//  Argument registration
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// add_arg
+//   Registers an argument definition (help text + whether it takes a value)
+//   for later use by the help-message generator.
+// ---------------------------------------------------------------------------
 void ArgsManager::add_arg(const std::string& name,
                            const std::string& help,
                            bool has_value) {
     std::lock_guard<std::mutex> lock(mutex_);
+    // 1. Normalise the name and store the definition
     auto norm = normalize_name(name);
     arg_defs_[norm] = {help, has_value};
 }
 
+// ===========================================================================
+//  Command-line parsing
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// parse_args  (argc/argv overload)
+//   Convenience wrapper that converts C-style argc/argv into a vector and
+//   forwards to the main parse_args implementation.
+// ---------------------------------------------------------------------------
 Result<void> ArgsManager::parse_args(int argc,
                                       const char* const argv[]) {
+    // 1. Copy argv into a vector of strings
     std::vector<std::string> args;
     args.reserve(static_cast<size_t>(argc));
     for (int i = 0; i < argc; ++i) {
         args.emplace_back(argv[i]);
     }
+    // 2. Delegate to the vector overload
     return parse_args(args);
 }
 
+// ---------------------------------------------------------------------------
+// parse_args  (vector overload)
+//   Main parser.  Handles -key=value, boolean flags (-key defaults to "1"),
+//   and -noXXX negation.  Positional arguments are collected separately.
+// ---------------------------------------------------------------------------
 Result<void> ArgsManager::parse_args(
     const std::vector<std::string>& args) {
     std::lock_guard<std::mutex> lock(mutex_);
+    // 1. Reset all prior state
     args_.clear();
     negated_args_.clear();
     positional_args_.clear();
 
-    // Skip argv[0] (program name)
+    // 2. Skip argv[0] (program name)
     for (size_t i = 1; i < args.size(); ++i) {
         const auto& arg = args[i];
 
+        // 3. Non-dash tokens are positional
         if (arg.empty() || arg[0] != '-') {
             positional_args_.push_back(arg);
             continue;
         }
 
-        // Split on '='
+        // 4. Split on '='
         auto eq_pos = arg.find('=');
         std::string name_part;
         std::string value_part;
@@ -64,7 +105,7 @@ Result<void> ArgsManager::parse_args(
 
         auto norm = normalize_name(name_part);
 
-        // Handle -noXXX negation
+        // 5. Handle -noXXX negation
         if (norm.size() > 2 && norm.substr(0, 2) == "no") {
             std::string base = norm.substr(2);
             negated_args_.insert(base);
@@ -72,13 +113,25 @@ Result<void> ArgsManager::parse_args(
             continue;
         }
 
+        // 6. Store the value
         args_[norm].push_back(value_part);
     }
 
     return Result<void>::ok();
 }
 
+// ===========================================================================
+//  Config-file parsing
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// read_config_file
+//   INI-style reader.  Supports [section] headers, # and ; comments,
+//   inline comments (outside quotes), and key=value pairs.  Section-prefixed
+//   keys become "section.key".
+// ---------------------------------------------------------------------------
 Result<void> ArgsManager::read_config_file(const std::string& path) {
+    // 1. Open the file
     std::ifstream file(path);
     if (!file.is_open()) {
         return Result<void>::err("Cannot open config file: " + path);
@@ -93,15 +146,15 @@ Result<void> ArgsManager::read_config_file(const std::string& path) {
     while (std::getline(file, line)) {
         ++line_num;
 
-        // Trim whitespace
+        // 2. Trim leading whitespace
         auto start = line.find_first_not_of(" \t\r\n");
         if (start == std::string::npos) continue;
         line = line.substr(start);
 
-        // Skip comments
+        // 3. Skip full-line comments
         if (line[0] == '#' || line[0] == ';') continue;
 
-        // Remove inline comments (but not inside quotes)
+        // 4. Remove inline comments (but not inside quotes)
         bool in_quotes = false;
         for (size_t i = 0; i < line.size(); ++i) {
             if (line[i] == '"') in_quotes = !in_quotes;
@@ -111,7 +164,7 @@ Result<void> ArgsManager::read_config_file(const std::string& path) {
             }
         }
 
-        // Trim trailing whitespace
+        // 5. Trim trailing whitespace
         auto end = line.find_last_not_of(" \t\r\n");
         if (end != std::string::npos) {
             line = line.substr(0, end + 1);
@@ -119,10 +172,9 @@ Result<void> ArgsManager::read_config_file(const std::string& path) {
 
         if (line.empty()) continue;
 
-        // Handle [section] headers
+        // 6. Handle [section] headers
         if (line.front() == '[' && line.back() == ']') {
             current_section = line.substr(1, line.size() - 2);
-            // Trim section name
             auto sec_start = current_section.find_first_not_of(" \t");
             auto sec_end = current_section.find_last_not_of(" \t");
             if (sec_start != std::string::npos) {
@@ -132,7 +184,7 @@ Result<void> ArgsManager::read_config_file(const std::string& path) {
             continue;
         }
 
-        // Parse key=value
+        // 7. Parse key=value
         auto eq_pos = line.find('=');
         std::string key_str;
         std::string val_str;
@@ -145,7 +197,7 @@ Result<void> ArgsManager::read_config_file(const std::string& path) {
             val_str = line.substr(eq_pos + 1);
         }
 
-        // Trim key and value
+        // 8. Trim key and value
         auto key_end = key_str.find_last_not_of(" \t");
         if (key_end != std::string::npos) {
             key_str = key_str.substr(0, key_end + 1);
@@ -159,14 +211,14 @@ Result<void> ArgsManager::read_config_file(const std::string& path) {
             val_str = val_str.substr(0, val_end + 1);
         }
 
-        // Strip quotes from value
+        // 9. Strip surrounding quotes from value
         if (val_str.size() >= 2 &&
             val_str.front() == '"' && val_str.back() == '"') {
             val_str = val_str.substr(1, val_str.size() - 2);
         }
 
-        // Prefix with section if present (e.g., [test] port=1234
-        // becomes test.port=1234)
+        // 10. Prefix with section if present (e.g., [test] port=1234
+        //     becomes test.port=1234)
         auto name = normalize_name(key_str);
         if (!current_section.empty()) {
             name = current_section + "." + name;
@@ -178,23 +230,32 @@ Result<void> ArgsManager::read_config_file(const std::string& path) {
     return Result<void>::ok();
 }
 
+// ===========================================================================
+//  Value retrieval (internal + public)
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// get_internal
+//   Priority-ordered lookup: command-line > config file > defaults.
+//   Caller must already hold mutex_.
+// ---------------------------------------------------------------------------
 std::optional<std::string> ArgsManager::get_internal(
     const std::string& name) const {
     auto norm = normalize_name(name);
 
-    // Command-line takes priority
+    // 1. Command-line takes priority
     auto it = args_.find(norm);
     if (it != args_.end() && !it->second.empty()) {
         return it->second.back();
     }
 
-    // Then config file
+    // 2. Then config file
     auto cit = config_args_.find(norm);
     if (cit != config_args_.end() && !cit->second.empty()) {
         return cit->second.back();
     }
 
-    // Then defaults
+    // 3. Then defaults
     auto dit = defaults_.find(norm);
     if (dit != defaults_.end()) {
         return dit->second;
@@ -203,12 +264,21 @@ std::optional<std::string> ArgsManager::get_internal(
     return std::nullopt;
 }
 
+// ---------------------------------------------------------------------------
+// get_arg
+//   Thread-safe string lookup.
+// ---------------------------------------------------------------------------
 std::optional<std::string> ArgsManager::get_arg(
     const std::string& name) const {
     std::lock_guard<std::mutex> lock(mutex_);
     return get_internal(name);
 }
 
+// ---------------------------------------------------------------------------
+// get_int_arg
+//   Returns the argument parsed as int64_t, or nullopt on missing / bad
+//   format.  Uses std::from_chars for zero-allocation parsing.
+// ---------------------------------------------------------------------------
 std::optional<int64_t> ArgsManager::get_int_arg(
     const std::string& name) const {
     auto val = get_arg(name);
@@ -221,13 +291,20 @@ std::optional<int64_t> ArgsManager::get_int_arg(
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// get_bool_arg
+//   Checks for -noXXX negation first, then interprets "0"/"false"/"no"
+//   as false.  Everything else (including the bare-flag default "1") is true.
+// ---------------------------------------------------------------------------
 bool ArgsManager::get_bool_arg(const std::string& name,
                                 bool default_val) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto norm = normalize_name(name);
 
+    // 1. Negated via -noXXX
     if (negated_args_.count(norm)) return false;
 
+    // 2. Explicit value
     auto val = get_internal(norm);
     if (!val) return default_val;
 
@@ -235,6 +312,10 @@ bool ArgsManager::get_bool_arg(const std::string& name,
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// get_double_arg
+//   Returns the argument parsed as double, or nullopt on failure.
+// ---------------------------------------------------------------------------
 std::optional<double> ArgsManager::get_double_arg(
     const std::string& name) const {
     auto val = get_arg(name);
@@ -247,18 +328,25 @@ std::optional<double> ArgsManager::get_double_arg(
     }
 }
 
+// ---------------------------------------------------------------------------
+// get_args
+//   Returns ALL values for a given key (command-line + config), preserving
+//   order within each source.  Useful for multi-value flags like -connect.
+// ---------------------------------------------------------------------------
 std::vector<std::string> ArgsManager::get_args(
     const std::string& name) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto norm = normalize_name(name);
     std::vector<std::string> result;
 
+    // 1. Command-line values first
     auto it = args_.find(norm);
     if (it != args_.end()) {
         result.insert(result.end(),
                       it->second.begin(), it->second.end());
     }
 
+    // 2. Config-file values second
     auto cit = config_args_.find(norm);
     if (cit != config_args_.end()) {
         result.insert(result.end(),
@@ -268,30 +356,56 @@ std::vector<std::string> ArgsManager::get_args(
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// is_set
+//   Returns true if the key was specified on the command line or in the
+//   config file (defaults do not count).
+// ---------------------------------------------------------------------------
 bool ArgsManager::is_set(const std::string& name) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto norm = normalize_name(name);
     return args_.count(norm) > 0 || config_args_.count(norm) > 0;
 }
 
+// ---------------------------------------------------------------------------
+// get_data_dir
+//   Returns the -datadir value, or empty string if unset.
+// ---------------------------------------------------------------------------
 std::string ArgsManager::get_data_dir() const {
     auto dir = get_arg("datadir");
     if (dir) return *dir;
     return "";
 }
 
+// ===========================================================================
+//  Mutation helpers
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// set_default
+//   Sets a default value (lowest priority in the lookup chain).
+// ---------------------------------------------------------------------------
 void ArgsManager::set_default(const std::string& name,
                                const std::string& value) {
     std::lock_guard<std::mutex> lock(mutex_);
     defaults_[normalize_name(name)] = value;
 }
 
+// ---------------------------------------------------------------------------
+// force_set
+//   Overwrites the command-line slot for a key.  Useful for tests or
+//   programmatic overrides.
+// ---------------------------------------------------------------------------
 void ArgsManager::force_set(const std::string& name,
                              const std::string& value) {
     std::lock_guard<std::mutex> lock(mutex_);
     args_[normalize_name(name)] = {value};
 }
 
+// ---------------------------------------------------------------------------
+// clear
+//   Resets all state (command-line, config, negated, positional).
+// ---------------------------------------------------------------------------
 void ArgsManager::clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     args_.clear();
@@ -300,6 +414,14 @@ void ArgsManager::clear() {
     positional_args_.clear();
 }
 
+// ===========================================================================
+//  Help / diagnostics
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// get_help_message
+//   Builds a human-readable help string from registered argument definitions.
+// ---------------------------------------------------------------------------
 std::string ArgsManager::get_help_message() const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::ostringstream oss;
@@ -318,19 +440,34 @@ std::string ArgsManager::get_help_message() const {
     return oss.str();
 }
 
+// ---------------------------------------------------------------------------
+// get_network
+//   Determines the active network from boolean flags.
+// ---------------------------------------------------------------------------
 std::string ArgsManager::get_network() const {
     if (get_bool_arg("regtest")) return "regtest";
     if (get_bool_arg("testnet")) return "testnet";
     return "main";
 }
 
+// ---------------------------------------------------------------------------
+// get_positional_args
+//   Returns non-flag arguments collected during parsing.
+// ---------------------------------------------------------------------------
 const std::vector<std::string>&
 ArgsManager::get_positional_args() const {
     return positional_args_;
 }
 
-// ─── Utility: dump all settings ──────────────────────────────────────
+// ===========================================================================
+//  Dump / serialisation
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// dump_settings
+//   Produces a human-readable dump of all settings grouped by source
+//   (command-line, config file, defaults).
+// ---------------------------------------------------------------------------
 std::string ArgsManager::dump_settings() const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::ostringstream oss;
@@ -357,6 +494,11 @@ std::string ArgsManager::dump_settings() const {
     return oss.str();
 }
 
+// ---------------------------------------------------------------------------
+// generate_default_config
+//   Emits a commented INI template suitable for resonance.conf, with each
+//   registered argument and its default value (if any).
+// ---------------------------------------------------------------------------
 std::string ArgsManager::generate_default_config() const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::ostringstream oss;
@@ -385,24 +527,29 @@ std::string ArgsManager::generate_default_config() const {
     return oss.str();
 }
 
+// ---------------------------------------------------------------------------
+// get_all_settings
+//   Merges all sources into a flat map with proper priority:
+//   defaults (lowest) < config file < command-line (highest).
+// ---------------------------------------------------------------------------
 std::map<std::string, std::string>
 ArgsManager::get_all_settings() const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::map<std::string, std::string> result;
 
-    // Defaults first (lowest priority)
+    // 1. Defaults first (lowest priority)
     for (const auto& [name, val] : defaults_) {
         result[name] = val;
     }
 
-    // Config file (medium priority)
+    // 2. Config file (medium priority)
     for (const auto& [name, values] : config_args_) {
         if (!values.empty()) {
             result[name] = values.back();
         }
     }
 
-    // Command-line (highest priority)
+    // 3. Command-line (highest priority)
     for (const auto& [name, values] : args_) {
         if (!values.empty()) {
             result[name] = values.back();
@@ -412,4 +559,4 @@ ArgsManager::get_all_settings() const {
     return result;
 }
 
-}  // namespace rnet::core
+} // namespace rnet::core

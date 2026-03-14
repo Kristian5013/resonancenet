@@ -1,4 +1,9 @@
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #include "core/thread.h"
+
 #include "core/logging.h"
 
 #include <deque>
@@ -12,14 +17,26 @@
 
 namespace rnet::core {
 
+// ===========================================================================
+//  Thread naming
+// ===========================================================================
+
 static thread_local std::string t_thread_name = "unknown";
 
+// ---------------------------------------------------------------------------
+// set_thread_name / get_thread_name
+//
+// Sets both the application-level thread-local name and the OS-level
+// thread description (visible in debuggers and profilers).
+// Windows: SetThreadDescription (Win10 1607+).
+// Linux:   pthread_setname_np (max 15 chars + null).
+// macOS:   pthread_setname_np (current thread variant).
+// ---------------------------------------------------------------------------
 void set_thread_name(const std::string& name) {
     t_thread_name = name;
 
 #ifdef _WIN32
-    // Windows: SetThreadDescription (Windows 10 1607+)
-    // Convert to wide string
+    // 1. Convert UTF-8 name to wide string for Win32 API.
     int len = MultiByteToWideChar(CP_UTF8, 0, name.c_str(),
                                    -1, nullptr, 0);
     if (len > 0) {
@@ -29,7 +46,7 @@ void set_thread_name(const std::string& name) {
         SetThreadDescription(GetCurrentThread(), wide.data());
     }
 #elif defined(__linux__)
-    // Linux: pthread_setname_np (max 16 chars including null)
+    // 1. Truncate to 15 chars (pthread_setname_np limit).
     std::string truncated = name.substr(0, 15);
     pthread_setname_np(pthread_self(), truncated.c_str());
 #elif defined(__APPLE__)
@@ -41,6 +58,13 @@ std::string get_thread_name() {
     return t_thread_name;
 }
 
+// ---------------------------------------------------------------------------
+// trace_thread
+//
+// Wraps a thread body with name-setting, logging, and exception handling.
+// All application threads should be launched through this function or
+// through ThreadGroup::create_thread (which calls this internally).
+// ---------------------------------------------------------------------------
 void trace_thread(const std::string& name,
                   std::function<void()> fn) {
     set_thread_name(name);
@@ -55,8 +79,16 @@ void trace_thread(const std::string& name,
     }
 }
 
-// ─── ShutdownFlag ────────────────────────────────────────────────────
+// ===========================================================================
+//  ShutdownFlag
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// ShutdownFlag — process-wide atomic boolean for cooperative shutdown.
+//
+// All long-running loops check shutdown_requested() and exit cleanly
+// when it becomes true.
+// ---------------------------------------------------------------------------
 ShutdownFlag& ShutdownFlag::instance() {
     static ShutdownFlag flag;
     return flag;
@@ -82,8 +114,16 @@ void request_shutdown() {
     ShutdownFlag::instance().request_shutdown();
 }
 
-// ─── ThreadGroup ─────────────────────────────────────────────────────
+// ===========================================================================
+//  ThreadGroup
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// ThreadGroup — named-thread collection with join-all-on-destruct.
+//
+// Each thread is launched via trace_thread for uniform logging and
+// exception safety.
+// ---------------------------------------------------------------------------
 ThreadGroup::~ThreadGroup() {
     join_all();
 }
@@ -115,13 +155,27 @@ bool ThreadGroup::all_done() const {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// get_num_cores
+//
+// Returns hardware concurrency, falling back to 1 if the OS reports 0.
+// ---------------------------------------------------------------------------
 unsigned int get_num_cores() {
     unsigned int cores = std::thread::hardware_concurrency();
     return cores > 0 ? cores : 1;
 }
 
-// ─── WorkQueue ───────────────────────────────────────────────────────
+// ===========================================================================
+//  WorkQueue
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// WorkQueue — bounded, blocking FIFO for work items.
+//
+// Producers call enqueue(); consumer threads call run() which blocks
+// until work is available or shutdown is signalled.  max_depth of 0
+// means unlimited depth.
+// ---------------------------------------------------------------------------
 WorkQueue::WorkQueue(size_t max_depth)
     : max_depth_(max_depth) {}
 
@@ -146,14 +200,17 @@ void WorkQueue::run() {
     while (true) {
         std::function<void()> fn;
         {
+            // 1. Wait for work or shutdown signal.
             std::unique_lock<std::mutex> lock(mutex_);
             cv_.wait(lock, [this]() {
                 return shutdown_ || !queue_.empty();
             });
             if (shutdown_ && queue_.empty()) return;
+            // 2. Dequeue one item.
             fn = std::move(queue_.front());
             queue_.pop_front();
         }
+        // 3. Execute outside the lock.
         try {
             fn();
         } catch (const std::exception& e) {
@@ -182,8 +239,17 @@ bool WorkQueue::is_shutdown() const {
     return shutdown_;
 }
 
-// ─── ThreadPool ──────────────────────────────────────────────────────
+// ===========================================================================
+//  ThreadPool
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// ThreadPool — fixed-size pool backed by a shared WorkQueue.
+//
+// Defaults to hardware_concurrency threads if num_threads is 0.
+// Destruction calls stop() which drains remaining work and joins all
+// worker threads.
+// ---------------------------------------------------------------------------
 ThreadPool::ThreadPool(size_t num_threads)
     : queue_(0) {
     if (num_threads == 0) {
@@ -220,4 +286,4 @@ size_t ThreadPool::num_threads() const {
     return workers_.size();
 }
 
-}  // namespace rnet::core
+} // namespace rnet::core

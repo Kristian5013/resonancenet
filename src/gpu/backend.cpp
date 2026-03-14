@@ -1,4 +1,11 @@
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
+// Own header.
 #include "backend.h"
+
+// Project headers.
 #include "../core/logging.h"
 
 #ifdef RNET_HAS_CUDA
@@ -17,7 +24,14 @@
 
 namespace rnet::gpu {
 
-std::unique_ptr<GpuBackend> GpuBackend::create(GpuBackendType type) {
+// ---------------------------------------------------------------------------
+// GpuBackend::create
+// ---------------------------------------------------------------------------
+// Factory: instantiates the requested backend type, or falls back to CPU if
+// the requested type was not compiled in.
+// ---------------------------------------------------------------------------
+std::unique_ptr<GpuBackend> GpuBackend::create(GpuBackendType type)
+{
     switch (type) {
 #ifdef RNET_HAS_CUDA
         case GpuBackendType::CUDA:
@@ -40,7 +54,14 @@ std::unique_ptr<GpuBackend> GpuBackend::create(GpuBackendType type) {
     }
 }
 
-GpuBackendType GpuBackend::auto_detect() {
+// ---------------------------------------------------------------------------
+// GpuBackend::auto_detect
+// ---------------------------------------------------------------------------
+// Returns the best available backend type in priority order:
+// CUDA > Metal > Vulkan > CPU fallback.
+// ---------------------------------------------------------------------------
+GpuBackendType GpuBackend::auto_detect()
+{
 #ifdef RNET_HAS_CUDA
     return GpuBackendType::CUDA;
 #elif defined(RNET_HAS_METAL)
@@ -52,8 +73,12 @@ GpuBackendType GpuBackend::auto_detect() {
 #endif
 }
 
-std::unique_ptr<GpuBackend> GpuBackend::create_best() {
+// ---------------------------------------------------------------------------
+// GpuBackend::create_best
+// ---------------------------------------------------------------------------
+std::unique_ptr<GpuBackend> GpuBackend::create_best()
+{
     return create(auto_detect());
 }
 
-}  // namespace rnet::gpu
+} // namespace rnet::gpu

@@ -1,6 +1,8 @@
-// rnet-miner — Standalone mining client
-// Connects to rnetd via RPC for block templates, trains locally, submits blocks.
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
 
+// Project headers.
 #include "core/config.h"
 #include "core/error.h"
 #include "core/hex.h"
@@ -8,7 +10,9 @@
 #include "crypto/ed25519.h"
 #include "crypto/keccak.h"
 
+// Standard library.
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -17,8 +21,8 @@
 #include <sstream>
 #include <string>
 #include <thread>
-#include <atomic>
 
+// Platform-specific socket headers.
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -30,19 +34,25 @@ using socket_t = SOCKET;
 static constexpr socket_t INVALID_SOCK = INVALID_SOCKET;
 static void close_socket(socket_t s) { closesocket(s); }
 #else
-#include <netdb.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
 #include <csignal>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 using socket_t = int;
 static constexpr socket_t INVALID_SOCK = -1;
 static void close_socket(socket_t s) { close(s); }
 #endif
 
-// ─── Minimal RPC client (same as rnet-cli) ──────────────────────────
+// ===========================================================================
+//  Minimal RPC client (same pattern as rnet-cli)
+// ===========================================================================
 
-static socket_t connect_to_host(const std::string& host, uint16_t port) {
+// ---------------------------------------------------------------------------
+// connect_to_host
+// ---------------------------------------------------------------------------
+static socket_t connect_to_host(const std::string& host, uint16_t port)
+{
     struct addrinfo hints{}, *result = nullptr;
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -62,7 +72,11 @@ static socket_t connect_to_host(const std::string& host, uint16_t port) {
     return sock;
 }
 
-static bool send_all(socket_t sock, const std::string& data) {
+// ---------------------------------------------------------------------------
+// send_all
+// ---------------------------------------------------------------------------
+static bool send_all(socket_t sock, const std::string& data)
+{
     size_t total = 0;
     while (total < data.size()) {
         int sent = send(sock, data.data() + total,
@@ -73,7 +87,11 @@ static bool send_all(socket_t sock, const std::string& data) {
     return true;
 }
 
-static std::string recv_all(socket_t sock) {
+// ---------------------------------------------------------------------------
+// recv_all
+// ---------------------------------------------------------------------------
+static std::string recv_all(socket_t sock)
+{
     std::string result;
     std::array<char, 8192> buf{};
     for (;;) {
@@ -84,7 +102,11 @@ static std::string recv_all(socket_t sock) {
     return result;
 }
 
-static std::string base64_encode(const std::string& input) {
+// ---------------------------------------------------------------------------
+// base64_encode
+// ---------------------------------------------------------------------------
+static std::string base64_encode(const std::string& input)
+{
     static constexpr char t[] =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     std::string o;
@@ -106,10 +128,16 @@ struct RpcResponse {
     std::string body;
 };
 
+// ---------------------------------------------------------------------------
+// rpc_call
+// ---------------------------------------------------------------------------
+// Sends a JSON-RPC 1.0 request and returns the HTTP status + body.
+// ---------------------------------------------------------------------------
 static RpcResponse rpc_call(const std::string& host, uint16_t port,
                              const std::string& auth,
                              const std::string& method,
-                             const std::string& params_json = "[]") {
+                             const std::string& params_json = "[]")
+{
     RpcResponse resp;
     socket_t sock = connect_to_host(host, port);
     if (sock == INVALID_SOCK) {
@@ -154,7 +182,9 @@ static RpcResponse rpc_call(const std::string& host, uint16_t port,
     return resp;
 }
 
-// ─── Mining configuration ───────────────────────────────────────────
+// ===========================================================================
+//  Mining configuration
+// ===========================================================================
 
 struct MinerCliConfig {
     std::string host = "127.0.0.1";
@@ -176,7 +206,11 @@ static std::atomic<bool> g_running{true};
 static void sigint_handler(int) { g_running.store(false); }
 #endif
 
-static void print_usage() {
+// ---------------------------------------------------------------------------
+// print_usage
+// ---------------------------------------------------------------------------
+static void print_usage()
+{
     fprintf(stderr,
         "Usage: rnet-miner [options]\n"
         "\n"
@@ -196,7 +230,11 @@ static void print_usage() {
     );
 }
 
-static MinerCliConfig parse_args(int argc, char* argv[]) {
+// ---------------------------------------------------------------------------
+// parse_args
+// ---------------------------------------------------------------------------
+static MinerCliConfig parse_args(int argc, char* argv[])
+{
     MinerCliConfig cfg;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -216,9 +254,18 @@ static MinerCliConfig parse_args(int argc, char* argv[]) {
     return cfg;
 }
 
-// ─── Mining loop ────────────────────────────────────────────────────
+// ===========================================================================
+//  Mining loop
+// ===========================================================================
 
-static int run_mining_loop(const MinerCliConfig& cfg) {
+// ---------------------------------------------------------------------------
+// run_mining_loop
+// ---------------------------------------------------------------------------
+// Main mining loop: repeatedly fetches a block template from rnetd, runs
+// training steps (currently a placeholder), and submits the result.
+// ---------------------------------------------------------------------------
+static int run_mining_loop(const MinerCliConfig& cfg)
+{
     std::string auth;
     if (!cfg.rpcuser.empty()) {
         auth = base64_encode(cfg.rpcuser + ":" + cfg.rpcpassword);
@@ -241,7 +288,7 @@ static int run_mining_loop(const MinerCliConfig& cfg) {
     auto start_time = std::chrono::steady_clock::now();
 
     while (g_running.load()) {
-        // 1. Get block template from rnetd
+        // 1. Get block template from rnetd.
         auto tmpl_resp = rpc_call(cfg.host, cfg.port, auth,
                                    "getblocktemplate",
                                    "[{\"minerkey\":\"" + cfg.miner_pubkey + "\"}]");
@@ -258,7 +305,7 @@ static int run_mining_loop(const MinerCliConfig& cfg) {
             continue;
         }
 
-        // 2. Train the model (placeholder — actual training uses GPU backend)
+        // 2. Train the model (placeholder -- actual training uses GPU backend).
         //    In production, this would:
         //    a) Load the latest checkpoint
         //    b) Run forward+backward pass for steps_per_attempt steps
@@ -267,24 +314,22 @@ static int run_mining_loop(const MinerCliConfig& cfg) {
         printf("[%llu] Training %d steps...\n",
                static_cast<unsigned long long>(total_attempts), cfg.steps_per_attempt);
 
-        // Simulate training time (in production, this is real GPU work)
+        // Simulate training time (in production, this is real GPU work).
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         total_attempts++;
 
-        // 3. Submit block
-        //    In production, we'd serialize the completed block and submit via
-        //    the "submitblock" RPC method.
+        // 3. Submit block.
+        //    In production, we would serialize the completed block and submit
+        //    via the "submitblock" RPC method.
         auto submit_resp = rpc_call(cfg.host, cfg.port, auth,
                                      "submitblock", "[\"placeholder\"]");
 
         if (submit_resp.http_status == 200) {
-            // Check if block was accepted
-            // (The response would contain acceptance status)
             printf("[%llu] Block submitted.\n",
                    static_cast<unsigned long long>(total_attempts));
         }
 
-        // 4. Print stats periodically
+        // 4. Print stats periodically.
         if (total_attempts % 10 == 0) {
             auto now = std::chrono::steady_clock::now();
             double elapsed_sec = std::chrono::duration<double>(now - start_time).count();
@@ -307,13 +352,22 @@ static int run_mining_loop(const MinerCliConfig& cfg) {
     return 0;
 }
 
-// ─── Benchmark mode ─────────────────────────────────────────────────
+// ===========================================================================
+//  Benchmark mode
+// ===========================================================================
 
-static int run_benchmark(const MinerCliConfig& cfg) {
+// ---------------------------------------------------------------------------
+// run_benchmark
+// ---------------------------------------------------------------------------
+// Benchmarks Keccak-256 hashing, Ed25519 signing, and Ed25519 verification
+// as a proxy for PoT verification overhead.
+// ---------------------------------------------------------------------------
+static int run_benchmark(const MinerCliConfig& cfg)
+{
     printf("ResonanceNet Miner Benchmark\n");
     printf("Steps per attempt: %d\n\n", cfg.steps_per_attempt);
 
-    // Benchmark Keccak hashing speed (proxy for PoT verification overhead)
+    // 1. Keccak-256 throughput benchmark.
     printf("Keccak-256 throughput benchmark...\n");
     std::vector<uint8_t> data(64, 0xAB);
     auto start = std::chrono::high_resolution_clock::now();
@@ -328,7 +382,7 @@ static int run_benchmark(const MinerCliConfig& cfg) {
     printf("  %d hashes in %.2f ms = %.0f hashes/sec\n",
            ITERATIONS, ms, ITERATIONS / (ms / 1000.0));
 
-    // Ed25519 signing benchmark
+    // 2. Ed25519 signing benchmark.
     printf("\nEd25519 signing benchmark...\n");
     auto kp = rnet::crypto::ed25519_generate();
     if (kp.is_err()) {
@@ -347,7 +401,7 @@ static int run_benchmark(const MinerCliConfig& cfg) {
     printf("  %d signatures in %.2f ms = %.0f sigs/sec\n",
            SIG_ITERS, ms, SIG_ITERS / (ms / 1000.0));
 
-    // Ed25519 verification benchmark
+    // 3. Ed25519 verification benchmark.
     printf("\nEd25519 verification benchmark...\n");
     auto sig_result = rnet::crypto::ed25519_sign(kp.value().secret, msg);
     if (sig_result.is_err()) {
@@ -369,9 +423,18 @@ static int run_benchmark(const MinerCliConfig& cfg) {
     return 0;
 }
 
-// ─── Main ───────────────────────────────────────────────────────────
+// ===========================================================================
+//  Main
+// ===========================================================================
 
-int main(int argc, char* argv[]) {
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+// Entry point for rnet-miner.  Parses arguments, sets up signal handlers,
+// and dispatches to either benchmark mode or the mining loop.
+// ---------------------------------------------------------------------------
+int main(int argc, char* argv[])
+{
 #ifdef _WIN32
     WSADATA wsa_data;
     WSAStartup(MAKEWORD(2, 2), &wsa_data);

@@ -1,12 +1,25 @@
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
+// Own header.
 #include "training/model_config.h"
 
 namespace rnet::training {
 
-uint64_t ModelConfig::param_count() const {
-    // Embedding table
+// ---------------------------------------------------------------------------
+// ModelConfig::param_count
+// ---------------------------------------------------------------------------
+// Computes the total number of trainable parameters from the model
+// dimensions: embedding table + per-layer (rmsnorm, conv, minGRU, slots,
+// FFN) + output projection.
+// ---------------------------------------------------------------------------
+uint64_t ModelConfig::param_count() const
+{
+    // 1. Embedding table.
     uint64_t embedding = static_cast<uint64_t>(vocab_size) * d_model;
 
-    // Per-layer parameters
+    // 2. Per-layer parameters.
     uint64_t conv_weights = 0;
     for (int i = 0; i < n_conv_branches; ++i) {
         if (kernel_sizes[i] > 0) {
@@ -23,17 +36,29 @@ uint64_t ModelConfig::param_count() const {
         d_model +                                              // rmsnorm2 scale
         static_cast<uint64_t>(d_model) * d_ff * 3;            // ffn W_up, W_gate, W_down
 
-    // Output projection
+    // 3. Output projection.
     uint64_t output_proj = static_cast<uint64_t>(d_model) * vocab_size;
 
     return embedding + static_cast<uint64_t>(n_layers) * per_layer + output_proj;
 }
 
-uint64_t ModelConfig::checkpoint_bytes() const {
-    return 2 * param_count();  // BF16 = 2 bytes per parameter
+// ---------------------------------------------------------------------------
+// ModelConfig::checkpoint_bytes
+// ---------------------------------------------------------------------------
+// BF16 storage: 2 bytes per parameter.
+// ---------------------------------------------------------------------------
+uint64_t ModelConfig::checkpoint_bytes() const
+{
+    return 2 * param_count();
 }
 
-ModelConfig ModelConfig::from_block_header(const primitives::CBlockHeader& header) {
+// ---------------------------------------------------------------------------
+// ModelConfig::from_block_header
+// ---------------------------------------------------------------------------
+// Extracts a ModelConfig from the training-related fields in a block header.
+// ---------------------------------------------------------------------------
+ModelConfig ModelConfig::from_block_header(const primitives::CBlockHeader& header)
+{
     ModelConfig cfg;
     cfg.d_model = header.d_model;
     cfg.n_layers = header.n_layers;
@@ -46,8 +71,14 @@ ModelConfig ModelConfig::from_block_header(const primitives::CBlockHeader& heade
     return cfg;
 }
 
-ModelConfig ModelConfig::genesis() {
-    return ModelConfig{};  // defaults match genesis values
+// ---------------------------------------------------------------------------
+// ModelConfig::genesis
+// ---------------------------------------------------------------------------
+// Returns the genesis model configuration (defaults match genesis values).
+// ---------------------------------------------------------------------------
+ModelConfig ModelConfig::genesis()
+{
+    return ModelConfig{};
 }
 
-}  // namespace rnet::training
+} // namespace rnet::training

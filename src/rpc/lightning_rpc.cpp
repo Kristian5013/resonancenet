@@ -1,3 +1,7 @@
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #include "rpc/lightning_rpc.h"
 
 #include "chain/chainstate.h"
@@ -6,14 +10,23 @@
 
 namespace rnet::rpc {
 
-// ── Lightning manager access ────────────────────────────────────────
+// ===========================================================================
+//  Lightning RPC handlers
+// ===========================================================================
+//
 // In a full implementation, NodeContext would hold a LightningManager.
 // For now, these RPCs return placeholder data.
 
-// ── openchannel ─────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// rpc_openchannel
+//
+// Opens a new Lightning channel with a remote peer.  Accepts the peer's
+// public key, a capacity in RNT, and an optional push amount.
+// ---------------------------------------------------------------------------
 
 static JsonValue rpc_openchannel(const RPCRequest& req,
                                  node::NodeContext& ctx) {
+    // 1. Validate required parameters.
     const auto& node_id_param = get_param(req, 0);
     const auto& capacity_param = get_param(req, 1);
 
@@ -26,6 +39,7 @@ static JsonValue rpc_openchannel(const RPCRequest& req,
                               "capacity required (amount in RNT)");
     }
 
+    // 2. Convert capacity to satoshi-equivalent units.
     std::string node_id = node_id_param.as_string();
     int64_t capacity = 0;
     if (capacity_param.is_double()) {
@@ -34,6 +48,7 @@ static JsonValue rpc_openchannel(const RPCRequest& req,
         capacity = capacity_param.as_int();
     }
 
+    // 3. Handle optional push amount.
     int64_t push_amount = 0;
     const auto& push_param = get_param_optional(req, 2);
     if (push_param.is_number()) {
@@ -48,7 +63,7 @@ static JsonValue rpc_openchannel(const RPCRequest& req,
              node_id.c_str(), static_cast<long long>(capacity),
              static_cast<long long>(push_amount));
 
-    // Placeholder: would interact with LightningManager to open a channel
+    // 4. Build placeholder response (would interact with LightningManager).
     JsonValue result = JsonValue::object();
     result.set("channel_id", JsonValue(std::string(64, '0')));
     result.set("node_id", JsonValue(node_id));
@@ -60,16 +75,22 @@ static JsonValue rpc_openchannel(const RPCRequest& req,
     return result;
 }
 
-// ── closechannel ────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// rpc_closechannel
+//
+// Initiates cooperative or forced closure of an existing channel.
+// ---------------------------------------------------------------------------
 
 static JsonValue rpc_closechannel(const RPCRequest& req,
                                   node::NodeContext& ctx) {
+    // 1. Validate channel id.
     const auto& channel_id_param = get_param(req, 0);
     if (!channel_id_param.is_string()) {
         return make_rpc_error(RPC_INVALID_PARAMS,
                               "channel_id required (hex string)");
     }
 
+    // 2. Check optional force-close flag.
     bool force = false;
     const auto& force_param = get_param_optional(req, 1);
     if (force_param.is_bool()) force = force_param.as_bool();
@@ -79,6 +100,7 @@ static JsonValue rpc_closechannel(const RPCRequest& req,
     LogPrint(LIGHTNING, "closechannel: %s force=%d",
              channel_id.c_str(), force ? 1 : 0);
 
+    // 3. Build placeholder response.
     JsonValue result = JsonValue::object();
     result.set("channel_id", JsonValue(channel_id));
     result.set("status", JsonValue(std::string(force ? "force_closing" : "closing")));
@@ -87,10 +109,16 @@ static JsonValue rpc_closechannel(const RPCRequest& req,
     return result;
 }
 
-// ── pay ─────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// rpc_pay
+//
+// Pays a BOLT11 Lightning invoice.  An optional amount parameter overrides
+// the encoded value (for zero-amount invoices).
+// ---------------------------------------------------------------------------
 
 static JsonValue rpc_pay(const RPCRequest& req,
                          node::NodeContext& ctx) {
+    // 1. Validate invoice string.
     const auto& invoice_param = get_param(req, 0);
     if (!invoice_param.is_string()) {
         return make_rpc_error(RPC_INVALID_PARAMS,
@@ -99,7 +127,7 @@ static JsonValue rpc_pay(const RPCRequest& req,
 
     std::string invoice = invoice_param.as_string();
 
-    // Optional amount override (for zero-amount invoices)
+    // 2. Handle optional amount override (for zero-amount invoices).
     int64_t amount_override = 0;
     const auto& amount_param = get_param_optional(req, 1);
     if (amount_param.is_number()) {
@@ -113,7 +141,7 @@ static JsonValue rpc_pay(const RPCRequest& req,
     LogPrint(LIGHTNING, "pay: invoice=%s amount_override=%lld",
              invoice.c_str(), static_cast<long long>(amount_override));
 
-    // Placeholder response
+    // 3. Build placeholder response.
     JsonValue result = JsonValue::object();
     result.set("payment_hash", JsonValue(std::string(64, '0')));
     result.set("payment_preimage", JsonValue(std::string(64, '0')));
@@ -125,10 +153,16 @@ static JsonValue rpc_pay(const RPCRequest& req,
     return result;
 }
 
-// ── addinvoice ──────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// rpc_addinvoice
+//
+// Creates a new Lightning invoice with the given amount, optional
+// description, and expiry (default 3600 s).
+// ---------------------------------------------------------------------------
 
 static JsonValue rpc_addinvoice(const RPCRequest& req,
                                 node::NodeContext& ctx) {
+    // 1. Validate amount.
     const auto& amount_param = get_param(req, 0);
     if (!amount_param.is_number()) {
         return make_rpc_error(RPC_INVALID_PARAMS,
@@ -142,18 +176,20 @@ static JsonValue rpc_addinvoice(const RPCRequest& req,
         amount = amount_param.as_int();
     }
 
+    // 2. Read optional description.
     std::string description;
     const auto& desc_param = get_param_optional(req, 1);
     if (desc_param.is_string()) description = desc_param.as_string();
 
-    int64_t expiry = 3600;  // 1 hour default
+    // 3. Read optional expiry (default 1 hour).
+    int64_t expiry = 3600;
     const auto& expiry_param = get_param_optional(req, 2);
     if (expiry_param.is_int()) expiry = expiry_param.as_int();
 
     LogPrint(LIGHTNING, "addinvoice: amount=%lld desc=%s",
              static_cast<long long>(amount), description.c_str());
 
-    // Placeholder response
+    // 4. Build placeholder response.
     JsonValue result = JsonValue::object();
     result.set("payment_hash", JsonValue(std::string(64, '0')));
     result.set("payment_request",
@@ -166,23 +202,30 @@ static JsonValue rpc_addinvoice(const RPCRequest& req,
     return result;
 }
 
-// ── listchannels ────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// rpc_listchannels
+//
+// Returns all known channels.  Placeholder: returns empty array until
+// LightningManager is wired up.
+// ---------------------------------------------------------------------------
 
 static JsonValue rpc_listchannels(const RPCRequest& req,
                                   node::NodeContext& ctx) {
-    // Return all channels
+    // 1. Return all channels (empty until LightningManager exists).
     JsonValue channels = JsonValue::array();
-
-    // Placeholder: in full implementation, iterate LightningManager channels
-    // For now, return empty array
-
     return channels;
 }
 
-// ── getlightninginfo ────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// rpc_getlightninginfo
+//
+// Returns summary of the local Lightning node: identity, channel counts,
+// sync status, and listening port.
+// ---------------------------------------------------------------------------
 
 static JsonValue rpc_getlightninginfo(const RPCRequest& req,
                                       node::NodeContext& ctx) {
+    // 1. Build identity and channel summary.
     JsonValue result = JsonValue::object();
 
     result.set("version", JsonValue(std::string("0.1.0")));
@@ -198,14 +241,16 @@ static JsonValue rpc_getlightninginfo(const RPCRequest& req,
     result.set("synced_to_graph", JsonValue(false));
     result.set("best_header_timestamp", JsonValue(static_cast<int64_t>(0)));
 
-    // Network info
+    // 2. Network info.
     result.set("network", JsonValue(ctx.network));
     result.set("port", JsonValue(static_cast<int64_t>(9556)));
 
     return result;
 }
 
-// ── Registration ────────────────────────────────────────────────────
+// ===========================================================================
+//  Registration
+// ===========================================================================
 
 void register_lightning_rpcs(RPCTable& table) {
     table.register_command({
@@ -255,4 +300,4 @@ void register_lightning_rpcs(RPCTable& table) {
     });
 }
 
-}  // namespace rnet::rpc
+} // namespace rnet::rpc

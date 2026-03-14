@@ -1,3 +1,7 @@
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #include "rpc/control.h"
 
 #include "core/logging.h"
@@ -20,37 +24,53 @@
 
 namespace rnet::rpc {
 
-// ── Server startup time (set externally) ────────────────────────────
+// ===========================================================================
+//  Server startup time (set externally by rnetd)
+// ===========================================================================
 
 namespace {
 int64_t g_startup_time = 0;
-}
+}  // anonymous namespace
 
+// ---------------------------------------------------------------------------
+// set_rpc_startup_time -- called once during server boot to record t0.
+// ---------------------------------------------------------------------------
 void set_rpc_startup_time(int64_t t) {
     g_startup_time = t;
 }
 
-// ── stop ────────────────────────────────────────────────────────────
+// ===========================================================================
+//  stop
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// Requests a graceful shutdown of the ResonanceNet daemon via the node
+// context's shutdown flag.
+// ---------------------------------------------------------------------------
 static JsonValue rpc_stop(const RPCRequest& req,
                           node::NodeContext& ctx) {
+    // 1. Log and trigger shutdown.
     LogPrintf("Shutdown requested via RPC");
     ctx.request_shutdown();
     return JsonValue(std::string("ResonanceNet server stopping"));
 }
 
-// ── help ────────────────────────────────────────────────────────────
+// ===========================================================================
+//  help
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// Returns help text for a single command, or a summary of all commands.
+// The server layer typically overrides this with RPCTable::help().
+// ---------------------------------------------------------------------------
 static JsonValue rpc_help(const RPCRequest& req,
                           node::NodeContext& ctx) {
-    // The help text is generated from the RPCTable, which the server
-    // passes. Since we only have ctx here, we need a way to access
-    // the table. We'll use a global pointer set during init.
+    // 1. Check for an optional command-name argument.
     std::string command;
     const auto& cmd_param = get_param_optional(req, 0);
     if (cmd_param.is_string()) command = cmd_param.as_string();
 
-    // Return placeholder — the server overrides this with table.help()
+    // 2. Return general or command-specific placeholder.
     if (command.empty()) {
         return JsonValue(std::string(
             "Use \"help <command>\" for help on a specific command.\n"
@@ -60,23 +80,36 @@ static JsonValue rpc_help(const RPCRequest& req,
     return JsonValue(std::string("Help for \"" + command + "\" not available."));
 }
 
-// ── uptime ──────────────────────────────────────────────────────────
+// ===========================================================================
+//  uptime
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// Returns the total uptime of the server in seconds since g_startup_time.
+// ---------------------------------------------------------------------------
 static JsonValue rpc_uptime(const RPCRequest& req,
                             node::NodeContext& ctx) {
+    // 1. Compute elapsed seconds since startup.
     int64_t now = core::get_time();
     int64_t uptime = now - g_startup_time;
     if (uptime < 0) uptime = 0;
     return JsonValue(static_cast<int64_t>(uptime));
 }
 
-// ── getmemoryinfo ───────────────────────────────────────────────────
+// ===========================================================================
+//  getmemoryinfo
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// Returns process and system memory statistics.  Uses platform-specific
+// APIs: GetProcessMemoryInfo / GlobalMemoryStatusEx on Windows,
+// getrusage / sysconf on POSIX.
+// ---------------------------------------------------------------------------
 static JsonValue rpc_getmemoryinfo(const RPCRequest& req,
                                    node::NodeContext& ctx) {
     JsonValue result = JsonValue::object();
 
-    // Get process memory usage
+    // 1. Gather platform-specific memory counters.
     int64_t used_bytes = 0;
     int64_t free_bytes = 0;
     int64_t total_bytes = 0;
@@ -116,6 +149,7 @@ static JsonValue rpc_getmemoryinfo(const RPCRequest& req,
 #endif
 #endif
 
+    // 2. Build the "locked" sub-object (Bitcoin Core compatibility).
     JsonValue locked = JsonValue::object();
     locked.set("used", JsonValue(used_bytes));
     locked.set("free", JsonValue(free_bytes));
@@ -129,16 +163,24 @@ static JsonValue rpc_getmemoryinfo(const RPCRequest& req,
     return result;
 }
 
-// ── logging ─────────────────────────────────────────────────────────
+// ===========================================================================
+//  logging
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// Gets and sets the logging configuration.  Accepts optional arrays of
+// category names to include/exclude, then returns the current state of
+// every known log category.
+// ---------------------------------------------------------------------------
 static JsonValue rpc_logging(const RPCRequest& req,
                              node::NodeContext& ctx) {
+    // 1. Read optional include/exclude parameter arrays.
     const auto& include_param = get_param_optional(req, 0);
     const auto& exclude_param = get_param_optional(req, 1);
 
     auto& logger = core::Logger::instance();
 
-    // If parameters given, modify log categories
+    // 2. Enable requested categories.
     if (include_param.is_array()) {
         for (size_t i = 0; i < include_param.size(); ++i) {
             if (include_param[i].is_string()) {
@@ -149,6 +191,7 @@ static JsonValue rpc_logging(const RPCRequest& req,
         }
     }
 
+    // 3. Disable excluded categories.
     if (exclude_param.is_array()) {
         for (size_t i = 0; i < exclude_param.size(); ++i) {
             if (exclude_param[i].is_string()) {
@@ -159,7 +202,7 @@ static JsonValue rpc_logging(const RPCRequest& req,
         }
     }
 
-    // Return current logging state
+    // 4. Return current state of all categories.
     JsonValue result = JsonValue::object();
     for (const auto& entry : core::ALL_LOG_CATEGORIES) {
         result.set(entry.name,
@@ -169,8 +212,14 @@ static JsonValue rpc_logging(const RPCRequest& req,
     return result;
 }
 
-// ── Registration ────────────────────────────────────────────────────
+// ===========================================================================
+//  Registration
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// register_control_rpcs -- add all control/server-management RPCs to the
+// command table.
+// ---------------------------------------------------------------------------
 void register_control_rpcs(RPCTable& table) {
     table.register_command({
         "stop",
@@ -210,4 +259,4 @@ void register_control_rpcs(RPCTable& table) {
     });
 }
 
-}  // namespace rnet::rpc
+} // namespace rnet::rpc

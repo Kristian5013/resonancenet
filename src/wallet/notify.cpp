@@ -1,9 +1,26 @@
+// Copyright (c) 2025-2026 The ResonanceNet Core developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #include "wallet/notify.h"
 
 #include "core/logging.h"
 #include "primitives/amount.h"
 
 namespace rnet::wallet {
+
+// ===========================================================================
+//  WalletNotifier -- handle-based observer for wallet events
+// ===========================================================================
+//
+//  Consumers register callbacks and receive a numeric handle for later
+//  unregistration.  Events cover the full wallet lifecycle: incoming /
+//  outgoing txs, confirmations, block connections, balance changes, and
+//  heartbeat deadlines.
+
+// ---------------------------------------------------------------------------
+// register_callback / unregister_callback
+// ---------------------------------------------------------------------------
 
 size_t WalletNotifier::register_callback(WalletNotifyCallback cb) {
     LOCK(mutex_);
@@ -20,12 +37,20 @@ void WalletNotifier::unregister_callback(size_t handle) {
         callbacks_.end());
 }
 
+// ---------------------------------------------------------------------------
+// notify -- dispatch an event to all registered callbacks
+// ---------------------------------------------------------------------------
+
 void WalletNotifier::notify(const WalletNotifyEvent& event) const {
     LOCK(mutex_);
     for (const auto& [_, cb] : callbacks_) {
         cb(event);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Typed notification helpers
+// ---------------------------------------------------------------------------
 
 void WalletNotifier::notify_tx_received(const uint256& txid, int64_t amount,
                                         const std::string& address) {
@@ -81,9 +106,13 @@ void WalletNotifier::notify_heartbeat_due(uint64_t blocks_remaining) {
     notify(event);
 }
 
+// ---------------------------------------------------------------------------
+// clear -- remove all registered callbacks
+// ---------------------------------------------------------------------------
+
 void WalletNotifier::clear() {
     LOCK(mutex_);
     callbacks_.clear();
 }
 
-}  // namespace rnet::wallet
+} // namespace rnet::wallet

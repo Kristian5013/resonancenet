@@ -1,14 +1,37 @@
+// Copyright (c) 2025-2026 The ResonanceNet Core developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #include "wallet/recovery.h"
 
 #include "core/logging.h"
 
 namespace rnet::wallet {
 
+// ===========================================================================
+//  RecoveryManager -- heartbeat / social / emission recovery policies
+// ===========================================================================
+//
+//  Three recovery modes protect coins against lost keys:
+//
+//    HEARTBEAT  -- owner sends periodic version-3 self-spend txs.  If the
+//                  heartbeat lapses, a designated recovery pubkey can claim.
+//    SOCIAL     -- M-of-N guardian threshold (multisig-style).
+//    EMISSION   -- after prolonged inactivity, coins return to the mining
+//                  reward pool (UTXO expiry via val_loss ratio).
+//
+//  The manager stores exactly one policy at a time and exposes helpers
+//  for the wallet to decide when a heartbeat is due.
+
+// ---------------------------------------------------------------------------
+// set_policy -- validate and store a recovery policy
+// ---------------------------------------------------------------------------
+
 Result<void> RecoveryManager::set_policy(script::RecoveryType type,
                                          const script::RecoveryPolicy& policy) {
     LOCK(mutex_);
 
-    // Validate policy
+    // 1. Validate policy matches the declared type.
     if (type == script::RecoveryType::HEARTBEAT) {
         if (!std::holds_alternative<script::HeartbeatPolicy>(policy)) {
             return Result<void>::err("policy type mismatch: expected HeartbeatPolicy");
@@ -41,6 +64,7 @@ Result<void> RecoveryManager::set_policy(script::RecoveryType type,
         }
     }
 
+    // 2. Store the validated policy.
     type_ = type;
     policy_ = policy;
     has_policy_ = true;
@@ -49,6 +73,10 @@ Result<void> RecoveryManager::set_policy(script::RecoveryType type,
              static_cast<int>(type));
     return Result<void>::ok();
 }
+
+// ---------------------------------------------------------------------------
+// Accessors
+// ---------------------------------------------------------------------------
 
 bool RecoveryManager::has_policy() const {
     LOCK(mutex_);
@@ -65,6 +93,13 @@ const script::RecoveryPolicy& RecoveryManager::get_policy() const {
     return policy_;
 }
 
+// ---------------------------------------------------------------------------
+// Heartbeat timing helpers
+// ---------------------------------------------------------------------------
+//  The wallet triggers a heartbeat tx when 80% of the interval has elapsed
+//  (early-warning threshold), giving the user a comfortable window.
+// ---------------------------------------------------------------------------
+
 Result<uint64_t> RecoveryManager::get_heartbeat_interval() const {
     LOCK(mutex_);
     if (!has_policy_ || type_ != script::RecoveryType::HEARTBEAT) {
@@ -80,7 +115,7 @@ bool RecoveryManager::heartbeat_due(uint64_t blocks_since_last) const {
         return false;
     }
     const auto& hb = std::get<script::HeartbeatPolicy>(policy_);
-    // Due when 80% of interval has passed (early warning)
+    // 1. Due when 80% of interval has passed (early warning).
     return blocks_since_last >= (hb.interval * 80 / 100);
 }
 
@@ -97,6 +132,10 @@ uint64_t RecoveryManager::blocks_until_due(uint64_t blocks_since_last) const {
     return threshold - blocks_since_last;
 }
 
+// ---------------------------------------------------------------------------
+// build_script -- produce the on-chain recovery script for the owner
+// ---------------------------------------------------------------------------
+
 Result<script::CScript> RecoveryManager::build_script(
     const std::vector<uint8_t>& owner_pubkey_hash) const {
     LOCK(mutex_);
@@ -107,4 +146,4 @@ Result<script::CScript> RecoveryManager::build_script(
     return Result<script::CScript>::ok(std::move(script));
 }
 
-}  // namespace rnet::wallet
+} // namespace rnet::wallet

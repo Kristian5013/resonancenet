@@ -1,6 +1,18 @@
+// Copyright (c) 2024-2026 The ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #include "script/opcodes.h"
 
 namespace rnet::script {
+
+// ---------------------------------------------------------------------------
+// opcode_name
+//
+// Returns the human-readable name for every defined opcode.
+// Covers constants, flow control, stack manipulation, splice, bitwise,
+// arithmetic, crypto, locktime, and ResonanceNet extensions.
+// ---------------------------------------------------------------------------
 
 std::string_view opcode_name(Opcode op) {
     switch (op) {
@@ -142,6 +154,13 @@ std::string_view opcode_name(Opcode op) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// is_disabled_opcode
+//
+// Opcodes disabled by consensus (splice, bitwise, and some arithmetic).
+// Executing any of these in a script is an immediate failure.
+// ---------------------------------------------------------------------------
+
 bool is_disabled_opcode(Opcode op) {
     switch (op) {
         case Opcode::OP_CAT:
@@ -165,6 +184,15 @@ bool is_disabled_opcode(Opcode op) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// decode_op_n
+//
+// Extract the numeric value from an OP_N opcode:
+//   OP_0  (0x00)       --> 0
+//   OP_1..OP_16 (0x51..0x60) --> 1..16
+//   anything else       --> -1 (not a number opcode)
+// ---------------------------------------------------------------------------
+
 int decode_op_n(Opcode op) {
     auto val = static_cast<uint8_t>(op);
     if (val == 0x00) return 0;
@@ -174,6 +202,13 @@ int decode_op_n(Opcode op) {
     return -1;
 }
 
+// ---------------------------------------------------------------------------
+// encode_op_n
+//
+// Inverse of decode_op_n:  0 --> OP_0,  1..16 --> OP_1..OP_16.
+// Returns OP_INVALIDOPCODE for out-of-range values.
+// ---------------------------------------------------------------------------
+
 Opcode encode_op_n(int n) {
     if (n == 0) return Opcode::OP_0;
     if (n >= 1 && n <= 16) {
@@ -182,4 +217,4 @@ Opcode encode_op_n(int n) {
     return Opcode::OP_INVALIDOPCODE;
 }
 
-}  // namespace rnet::script
+} // namespace rnet::script

@@ -1,6 +1,8 @@
-// rnet-wallet-tool — Wallet management utility
-// Create, inspect, dump, and encrypt wallet files directly.
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
 
+// Project headers.
 #include "core/config.h"
 #include "core/error.h"
 #include "core/hex.h"
@@ -12,6 +14,7 @@
 #include "script/recovery_script.h"
 #include "wallet/wallet.h"
 
+// Standard library.
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -20,9 +23,15 @@
 
 using namespace rnet;
 
-// ─── Helpers ────────────────────────────────────────────────────────
+// ===========================================================================
+//  Helpers
+// ===========================================================================
 
-static void print_usage() {
+// ---------------------------------------------------------------------------
+// print_usage
+// ---------------------------------------------------------------------------
+static void print_usage()
+{
     fprintf(stderr,
         "Usage: rnet-wallet-tool [options] <command>\n"
         "\n"
@@ -51,7 +60,11 @@ struct WalletToolConfig {
     uint64_t heartbeat_interval = 100000;
 };
 
-static WalletToolConfig parse_args(int argc, char* argv[]) {
+// ---------------------------------------------------------------------------
+// parse_args
+// ---------------------------------------------------------------------------
+static WalletToolConfig parse_args(int argc, char* argv[])
+{
     WalletToolConfig cfg;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -77,15 +90,28 @@ static WalletToolConfig parse_args(int argc, char* argv[]) {
     return cfg;
 }
 
-static primitives::NetworkType parse_network(const std::string& net) {
+// ---------------------------------------------------------------------------
+// parse_network
+// ---------------------------------------------------------------------------
+static primitives::NetworkType parse_network(const std::string& net)
+{
     if (net == "testnet") return primitives::NetworkType::TESTNET;
     if (net == "regtest") return primitives::NetworkType::REGTEST;
     return primitives::NetworkType::MAINNET;
 }
 
-// ─── Commands ───────────────────────────────────────────────────────
+// ===========================================================================
+//  Commands
+// ===========================================================================
 
-static int cmd_create(const WalletToolConfig& cfg) {
+// ---------------------------------------------------------------------------
+// cmd_create
+// ---------------------------------------------------------------------------
+// Creates a new wallet file, optionally encrypts it, displays the BIP39
+// mnemonic for backup, and generates the first receive address.
+// ---------------------------------------------------------------------------
+static int cmd_create(const WalletToolConfig& cfg)
+{
     if (cfg.path.empty()) {
         fprintf(stderr, "Error: wallet path required\n");
         return 1;
@@ -98,7 +124,7 @@ static int cmd_create(const WalletToolConfig& cfg) {
 
     auto network = parse_network(cfg.network);
 
-    // Build recovery policy
+    // 1. Build recovery policy.
     script::RecoveryType recovery_type = script::RecoveryType::HEARTBEAT;
     script::RecoveryPolicy policy;
 
@@ -106,7 +132,6 @@ static int cmd_create(const WalletToolConfig& cfg) {
         recovery_type = script::RecoveryType::HEARTBEAT;
         script::HeartbeatPolicy hp;
         hp.interval = cfg.heartbeat_interval;
-        // Recovery pubkey hash will be set by the wallet from its own keys
         hp.recovery_pubkey_hash.resize(20, 0);
         policy = hp;
     } else if (cfg.recovery == "emission") {
@@ -119,6 +144,7 @@ static int cmd_create(const WalletToolConfig& cfg) {
         return 1;
     }
 
+    // 2. Create the wallet.
     auto result = wallet::CWallet::create(
         cfg.path, "default", network, recovery_type, policy);
 
@@ -129,7 +155,7 @@ static int cmd_create(const WalletToolConfig& cfg) {
 
     auto& w = result.value();
 
-    // Encrypt if passphrase given
+    // 3. Encrypt if passphrase given.
     if (!cfg.passphrase.empty()) {
         auto enc_result = w->encrypt_wallet(cfg.passphrase);
         if (enc_result.is_err()) {
@@ -139,7 +165,7 @@ static int cmd_create(const WalletToolConfig& cfg) {
         }
     }
 
-    // Display mnemonic for backup
+    // 4. Display mnemonic for backup.
     auto mnemonic_result = w->get_mnemonic();
     if (mnemonic_result.is_ok()) {
         printf("\nWallet created successfully at: %s\n", cfg.path.c_str());
@@ -152,7 +178,7 @@ static int cmd_create(const WalletToolConfig& cfg) {
         printf("Wallet created at: %s\n", cfg.path.c_str());
     }
 
-    // Generate first address
+    // 5. Generate first address.
     auto addr_result = w->get_new_address("default");
     if (addr_result.is_ok()) {
         printf("First receive address: %s\n", addr_result.value().c_str());
@@ -166,7 +192,14 @@ static int cmd_create(const WalletToolConfig& cfg) {
     return 0;
 }
 
-static int cmd_info(const WalletToolConfig& cfg) {
+// ---------------------------------------------------------------------------
+// cmd_info
+// ---------------------------------------------------------------------------
+// Loads and displays wallet metadata: name, encryption status, balance,
+// and UTXO count.
+// ---------------------------------------------------------------------------
+static int cmd_info(const WalletToolConfig& cfg)
+{
     if (cfg.path.empty()) {
         fprintf(stderr, "Error: wallet path required\n");
         return 1;
@@ -196,7 +229,14 @@ static int cmd_info(const WalletToolConfig& cfg) {
     return 0;
 }
 
-static int cmd_dump(const WalletToolConfig& cfg) {
+// ---------------------------------------------------------------------------
+// cmd_dump
+// ---------------------------------------------------------------------------
+// Dumps wallet private key material (mnemonic).  Requires unlock if the
+// wallet is encrypted.
+// ---------------------------------------------------------------------------
+static int cmd_dump(const WalletToolConfig& cfg)
+{
     if (cfg.path.empty()) {
         fprintf(stderr, "Error: wallet path required\n");
         return 1;
@@ -210,7 +250,7 @@ static int cmd_dump(const WalletToolConfig& cfg) {
 
     auto& w = result.value();
 
-    // Unlock if encrypted
+    // 1. Unlock if encrypted.
     if (w->is_encrypted() && w->is_locked()) {
         if (cfg.passphrase.empty()) {
             fprintf(stderr, "Error: wallet is encrypted, provide -passphrase=...\n");
@@ -223,6 +263,7 @@ static int cmd_dump(const WalletToolConfig& cfg) {
         }
     }
 
+    // 2. Dump mnemonic.
     auto mnemonic_result = w->get_mnemonic();
     if (mnemonic_result.is_ok()) {
         printf("# Wallet dump: %s\n", w->name().c_str());
@@ -236,7 +277,13 @@ static int cmd_dump(const WalletToolConfig& cfg) {
     return 0;
 }
 
-static int cmd_encrypt(const WalletToolConfig& cfg) {
+// ---------------------------------------------------------------------------
+// cmd_encrypt
+// ---------------------------------------------------------------------------
+// Encrypts an unencrypted wallet with the provided passphrase.
+// ---------------------------------------------------------------------------
+static int cmd_encrypt(const WalletToolConfig& cfg)
+{
     if (cfg.path.empty()) {
         fprintf(stderr, "Error: wallet path required\n");
         return 1;
@@ -273,7 +320,13 @@ static int cmd_encrypt(const WalletToolConfig& cfg) {
     return 0;
 }
 
-static int cmd_mnemonic() {
+// ---------------------------------------------------------------------------
+// cmd_mnemonic
+// ---------------------------------------------------------------------------
+// Generates and prints a 24-word BIP39 mnemonic (no wallet file created).
+// ---------------------------------------------------------------------------
+static int cmd_mnemonic()
+{
     auto result = crypto::generate_mnemonic(24);
     if (result.is_err()) {
         fprintf(stderr, "Error: failed to generate mnemonic: %s\n", result.error().c_str());
@@ -283,9 +336,18 @@ static int cmd_mnemonic() {
     return 0;
 }
 
-// ─── Main ───────────────────────────────────────────────────────────
+// ===========================================================================
+//  Main
+// ===========================================================================
 
-int main(int argc, char* argv[]) {
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+// Entry point for rnet-wallet-tool.  Parses arguments and dispatches to the
+// appropriate wallet subcommand.
+// ---------------------------------------------------------------------------
+int main(int argc, char* argv[])
+{
     if (argc < 2) {
         print_usage();
         return 1;

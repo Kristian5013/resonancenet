@@ -1,3 +1,7 @@
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #include "rpc/misc.h"
 
 #include "core/hex.h"
@@ -7,10 +11,17 @@
 
 namespace rnet::rpc {
 
-// ── validateaddress ─────────────────────────────────────────────────
+// ===========================================================================
+//  validateaddress
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// Validates a ResonanceNet address and returns metadata (type, witness flag).
+// Supports bech32 prefixes (rn1, trn1, rnrt1) and legacy base58.
+// ---------------------------------------------------------------------------
 static JsonValue rpc_validateaddress(const RPCRequest& req,
                                      node::NodeContext& ctx) {
+    // 1. Extract the address parameter.
     const auto& addr_param = get_param(req, 0);
     if (!addr_param.is_string()) {
         return make_rpc_error(RPC_INVALID_PARAMS,
@@ -22,29 +33,25 @@ static JsonValue rpc_validateaddress(const RPCRequest& req,
     JsonValue result = JsonValue::object();
     result.set("address", JsonValue(address));
 
-    // Basic validation: check bech32 prefix or base58
+    // 2. Determine address type by prefix.
     bool is_valid = false;
     std::string address_type = "unknown";
 
-    // Check bech32 addresses (rn1..., trn1..., rnrt1...)
+    // 3. Check bech32 addresses (rn1..., trn1..., rnrt1...).
     if (address.substr(0, 3) == "rn1" ||
         address.substr(0, 4) == "trn1" ||
         address.substr(0, 5) == "rnrt1") {
-        // Bech32 address — segwit
         is_valid = address.size() >= 14 && address.size() <= 90;
         if (is_valid) {
-            // Check for P2WPKH (20-byte witness program) vs P2WSH (32-byte)
-            // A full implementation would decode the bech32 to verify
             address_type = "witness_v0_keyhash";  // P2WPKH most common
         }
     } else if (address.size() >= 25 && address.size() <= 36) {
-        // Could be base58 (P2PKH or P2SH)
-        // Basic length check only — full implementation would
-        // verify base58check checksum
+        // 4. Could be base58 (P2PKH or P2SH) -- basic length check only.
         is_valid = true;
         address_type = "pubkeyhash";
     }
 
+    // 5. Populate the result fields.
     result.set("isvalid", JsonValue(is_valid));
     if (is_valid) {
         result.set("scriptPubKey", JsonValue(std::string("")));
@@ -57,10 +64,17 @@ static JsonValue rpc_validateaddress(const RPCRequest& req,
     return result;
 }
 
-// ── createmultisig ──────────────────────────────────────────────────
+// ===========================================================================
+//  createmultisig
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// Creates a multi-signature redeem script from N-of-M Ed25519 public keys.
+// Returns the redeem script hex and a placeholder address.
+// ---------------------------------------------------------------------------
 static JsonValue rpc_createmultisig(const RPCRequest& req,
                                     node::NodeContext& ctx) {
+    // 1. Validate required parameters.
     const auto& nrequired_param = get_param(req, 0);
     const auto& keys_param = get_param(req, 1);
 
@@ -73,6 +87,7 @@ static JsonValue rpc_createmultisig(const RPCRequest& req,
                               "keys (array of hex pubkeys) is required");
     }
 
+    // 2. Range-check nrequired vs number of keys.
     int nrequired = static_cast<int>(nrequired_param.as_int());
     int nkeys = static_cast<int>(keys_param.size());
 
@@ -85,7 +100,7 @@ static JsonValue rpc_createmultisig(const RPCRequest& req,
                               "too many keys (max 16)");
     }
 
-    // Collect public keys
+    // 3. Collect and validate each public key (32-byte Ed25519 = 64 hex).
     std::vector<std::string> pubkeys;
     for (size_t i = 0; i < keys_param.size(); ++i) {
         const auto& key = keys_param[i];
@@ -105,8 +120,7 @@ static JsonValue rpc_createmultisig(const RPCRequest& req,
         pubkeys.push_back(hex_key);
     }
 
-    // Build multisig script: OP_N <key1> <key2> ... <keyN> OP_M OP_CHECKMULTISIG
-    // In ResonanceNet, this uses Ed25519 keys
+    // 4. Build multisig script: OP_N <key1> ... <keyN> OP_M OP_CHECKMULTISIG.
     std::string redeem_script_hex;
     redeem_script_hex += bytes_to_hex(
         reinterpret_cast<const uint8_t*>(&nrequired), 1);
@@ -121,6 +135,7 @@ static JsonValue rpc_createmultisig(const RPCRequest& req,
     uint8_t op_cms = 0xAE;
     redeem_script_hex += bytes_to_hex(&op_cms, 1);
 
+    // 5. Return the result.
     JsonValue result = JsonValue::object();
     result.set("address", JsonValue(std::string("multisig_placeholder")));
     result.set("redeemScript", JsonValue(redeem_script_hex));
@@ -131,10 +146,17 @@ static JsonValue rpc_createmultisig(const RPCRequest& req,
     return result;
 }
 
-// ── signmessage ─────────────────────────────────────────────────────
+// ===========================================================================
+//  signmessage
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// Signs a message with the private key belonging to the given address.
+// Requires wallet access (placeholder implementation).
+// ---------------------------------------------------------------------------
 static JsonValue rpc_signmessage(const RPCRequest& req,
                                  node::NodeContext& ctx) {
+    // 1. Validate parameters.
     const auto& addr_param = get_param(req, 0);
     const auto& msg_param = get_param(req, 1);
 
@@ -150,26 +172,30 @@ static JsonValue rpc_signmessage(const RPCRequest& req,
     std::string address = addr_param.as_string();
     std::string message = msg_param.as_string();
 
-    // In a full implementation, we would:
-    // 1. Find the private key for this address in the wallet
-    // 2. Sign the message with Ed25519
-    // 3. Return the base64-encoded signature
-
-    // For now, check that the wallet has this address
-    // The actual signing would require wallet access
+    // 2. In a full implementation, we would:
+    //    a. Find the private key for this address in the wallet.
+    //    b. Sign the message with Ed25519.
+    //    c. Return the base64-encoded signature.
 
     LogPrint(RPC, "signmessage: addr=%s msg_len=%zu",
              address.c_str(), message.size());
 
-    // Placeholder signature
+    // 3. Placeholder signature.
     return JsonValue(std::string(
         "placeholder_signature_base64_would_go_here"));
 }
 
-// ── verifymessage ───────────────────────────────────────────────────
+// ===========================================================================
+//  verifymessage
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// Verifies an Ed25519 signature against an address and message.
+// Placeholder -- always returns false until crypto integration is complete.
+// ---------------------------------------------------------------------------
 static JsonValue rpc_verifymessage(const RPCRequest& req,
                                    node::NodeContext& ctx) {
+    // 1. Validate all three parameters.
     const auto& addr_param = get_param(req, 0);
     const auto& sig_param = get_param(req, 1);
     const auto& msg_param = get_param(req, 2);
@@ -191,21 +217,26 @@ static JsonValue rpc_verifymessage(const RPCRequest& req,
     std::string signature = sig_param.as_string();
     std::string message = msg_param.as_string();
 
-    // In a full implementation:
-    // 1. Decode the base64 signature
-    // 2. Recover/verify the Ed25519 public key from address
-    // 3. Verify the signature against the message
-    // 4. Check that the recovered pubkey matches the address
+    // 2. In a full implementation:
+    //    a. Decode the base64 signature.
+    //    b. Recover/verify the Ed25519 public key from address.
+    //    c. Verify the signature against the message.
+    //    d. Check that the recovered pubkey matches the address.
 
     LogPrint(RPC, "verifymessage: addr=%s sig_len=%zu msg_len=%zu",
              address.c_str(), signature.size(), message.size());
 
-    // Placeholder: return false (unverified)
+    // 3. Placeholder: return false (unverified).
     return JsonValue(false);
 }
 
-// ── Registration ────────────────────────────────────────────────────
+// ===========================================================================
+//  Registration
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// register_misc_rpcs -- add all misc/utility RPCs to the command table.
+// ---------------------------------------------------------------------------
 void register_misc_rpcs(RPCTable& table) {
     table.register_command({
         "validateaddress",
@@ -240,4 +271,4 @@ void register_misc_rpcs(RPCTable& table) {
     });
 }
 
-}  // namespace rnet::rpc
+} // namespace rnet::rpc

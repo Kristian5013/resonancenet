@@ -1,22 +1,24 @@
-// rnetd — ResonanceNet daemon entry point
-// Main process that runs the blockchain node.
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
 
+// Project headers.
+#include "chain/chainstate.h"
+#include "core/config.h"
+#include "core/logging.h"
+#include "mempool/pool.h"
+#include "net/addr_manager.h"
+#include "net/conn_manager.h"
+#include "net/sync.h"
 #include "node/context.h"
 #include "node/init.h"
 #include "node/shutdown.h"
-#include "core/logging.h"
 
-// Include full headers for unique_ptr types held by NodeContext:
-#include "chain/chainstate.h"
-#include "mempool/pool.h"
-#include "net/conn_manager.h"
-#include "net/sync.h"
-#include "net/addr_manager.h"
-#include "core/config.h"
-
-#include <cstdio>
+// Standard library.
 #include <csignal>
+#include <cstdio>
 
+// Platform-specific Winsock header.
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -26,13 +28,24 @@
 
 static rnet::node::NodeContext* g_ctx = nullptr;
 
-static void signal_handler(int sig) {
+// ---------------------------------------------------------------------------
+// signal_handler
+// ---------------------------------------------------------------------------
+static void signal_handler(int sig)
+{
     if (g_ctx) {
         g_ctx->request_shutdown();
     }
 }
 
-static void setup_signals() {
+// ---------------------------------------------------------------------------
+// setup_signals
+// ---------------------------------------------------------------------------
+// Installs signal handlers for graceful shutdown (SIGINT, SIGTERM) and
+// ignores SIGHUP/SIGPIPE on Unix.
+// ---------------------------------------------------------------------------
+static void setup_signals()
+{
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 #ifndef _WIN32
@@ -42,7 +55,11 @@ static void setup_signals() {
 }
 
 #ifdef _WIN32
-static bool init_winsock() {
+// ---------------------------------------------------------------------------
+// init_winsock / cleanup_winsock
+// ---------------------------------------------------------------------------
+static bool init_winsock()
+{
     WSADATA wsa_data;
     int result = WSAStartup(MAKEWORD(2, 2), &wsa_data);
     if (result != 0) {
@@ -51,12 +68,25 @@ static bool init_winsock() {
     }
     return true;
 }
-static void cleanup_winsock() {
+
+static void cleanup_winsock()
+{
     WSACleanup();
 }
 #endif
 
-int main(int argc, char* argv[]) {
+// ===========================================================================
+//  Main
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+// Entry point for rnetd.  Initialises platform resources, creates the node
+// context, runs app_init, waits for shutdown signal, then tears down.
+// ---------------------------------------------------------------------------
+int main(int argc, char* argv[])
+{
 #ifdef _WIN32
     if (!init_winsock()) {
         return 1;
@@ -68,6 +98,7 @@ int main(int argc, char* argv[]) {
 
     setup_signals();
 
+    // 1. Initialise the node.
     auto result = rnet::node::app_init(ctx, argc, const_cast<const char* const*>(argv));
     if (result.is_err()) {
         fprintf(stderr, "Error: %s\n", result.error().c_str());
@@ -82,10 +113,12 @@ int main(int argc, char* argv[]) {
     LogPrintf("ResonanceNet daemon started. Listening on port %u, RPC on port %u.",
               ctx.listen_port, ctx.rpc_port);
 
+    // 2. Block until shutdown is requested.
     rnet::node::wait_for_shutdown(ctx);
 
     LogPrintf("Shutdown initiated...");
 
+    // 3. Tear down.
     rnet::node::app_shutdown(ctx);
     g_ctx = nullptr;
 

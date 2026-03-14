@@ -1,20 +1,35 @@
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #ifdef RNET_HAS_METAL
 
-#import <Metal/Metal.h>
+// Platform headers (Objective-C imports must precede own header).
 #import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
 
+// Own header.
 #include "metal_context.h"
+
+// Project headers.
 #include "../../core/logging.h"
 
 namespace rnet::gpu {
 
-std::vector<GpuDeviceInfo> MetalContext::enumerate() {
+// ---------------------------------------------------------------------------
+// MetalContext::enumerate
+// ---------------------------------------------------------------------------
+// Discovers all Metal-capable GPUs on the system.  On macOS,
+// MTLCopyAllDevices() returns discrete + integrated GPUs.  On iOS, only the
+// system default device is available.  The Metal GPU family is mapped to a
+// (major, minor) capability pair as a rough analogue of CUDA compute
+// capability.
+// ---------------------------------------------------------------------------
+std::vector<GpuDeviceInfo> MetalContext::enumerate()
+{
     std::vector<GpuDeviceInfo> devices;
 
     @autoreleasepool {
-        // On macOS, MTLCopyAllDevices() returns all Metal devices (including
-        // discrete and integrated GPUs).  On iOS, only the system default
-        // device is available.
 #if TARGET_OS_OSX
         NSArray<id<MTLDevice>>* mtl_devices = MTLCopyAllDevices();
 #else
@@ -27,12 +42,10 @@ std::vector<GpuDeviceInfo> MetalContext::enumerate() {
             GpuDeviceInfo info;
             info.name = std::string([[dev name] UTF8String]);
             info.total_memory = [dev recommendedMaxWorkingSetSize];
-            info.free_memory = info.total_memory;  // No direct query available
+            info.free_memory = info.total_memory; // No direct query available
             info.backend_type = GpuBackendType::METAL;
 
-            // Metal "GPU family" mapped loosely to a capability pair.
-            // Apple GPUs do not have CUDA-style compute capability numbers;
-            // we report the Metal GPU family version as a rough equivalent.
+            // 1. Map Metal GPU family to capability pair.
             if ([dev supportsFamily:MTLGPUFamilyApple9]) {
                 info.compute_capability_major = 9;
                 info.compute_capability_minor = 0;
@@ -62,7 +75,7 @@ std::vector<GpuDeviceInfo> MetalContext::enumerate() {
         }
 
 #if TARGET_OS_OSX
-        // MTLCopyAllDevices returns a retained NSArray — release it.
+        // MTLCopyAllDevices returns a retained NSArray -- release it.
         [mtl_devices release];
 #endif
     }
@@ -74,6 +87,6 @@ std::vector<GpuDeviceInfo> MetalContext::enumerate() {
     return devices;
 }
 
-}  // namespace rnet::gpu
+} // namespace rnet::gpu
 
-#endif  // RNET_HAS_METAL
+#endif // RNET_HAS_METAL

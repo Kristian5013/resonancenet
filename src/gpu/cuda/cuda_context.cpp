@@ -1,15 +1,31 @@
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #ifdef RNET_HAS_CUDA
 
+// Own header.
 #include "cuda_context.h"
+
+// Project headers.
 #include "../../core/logging.h"
 
+// CUDA runtime.
 #include <cuda_runtime.h>
 
 namespace rnet::gpu {
 
-std::vector<GpuDeviceInfo> CudaContext::enumerate() {
+// ---------------------------------------------------------------------------
+// CudaContext::enumerate
+// ---------------------------------------------------------------------------
+// Queries CUDA for all available devices and returns their properties
+// (name, total VRAM, compute capability).
+// ---------------------------------------------------------------------------
+std::vector<GpuDeviceInfo> CudaContext::enumerate()
+{
     std::vector<GpuDeviceInfo> devices;
 
+    // 1. Query device count.
     int count = 0;
     cudaError_t err = cudaGetDeviceCount(&count);
     if (err != cudaSuccess || count == 0) {
@@ -18,6 +34,7 @@ std::vector<GpuDeviceInfo> CudaContext::enumerate() {
         return devices;
     }
 
+    // 2. Collect properties for each device.
     for (int i = 0; i < count; ++i) {
         cudaDeviceProp prop;
         if (cudaGetDeviceProperties(&prop, i) != cudaSuccess) continue;
@@ -25,7 +42,7 @@ std::vector<GpuDeviceInfo> CudaContext::enumerate() {
         GpuDeviceInfo info;
         info.name = prop.name;
         info.total_memory = prop.totalGlobalMem;
-        info.free_memory = 0;  // Would need cudaSetDevice + cudaMemGetInfo
+        info.free_memory = 0; // Would need cudaSetDevice + cudaMemGetInfo
         info.compute_capability_major = prop.major;
         info.compute_capability_minor = prop.minor;
         info.backend_type = GpuBackendType::CUDA;
@@ -36,6 +53,6 @@ std::vector<GpuDeviceInfo> CudaContext::enumerate() {
     return devices;
 }
 
-}  // namespace rnet::gpu
+} // namespace rnet::gpu
 
-#endif  // RNET_HAS_CUDA
+#endif // RNET_HAS_CUDA

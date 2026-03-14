@@ -1,3 +1,7 @@
+// Copyright (c) 2024-present ResonanceNet developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/licenses/MIT.
+
 #include "core/time.h"
 
 #include <ctime>
@@ -6,6 +10,15 @@
 
 namespace rnet::core {
 
+// ===========================================================================
+//  Free-function time accessors
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// get_time / get_time_millis / get_time_micros
+//
+// Wall-clock accessors that honour MockableClock for deterministic tests.
+// ---------------------------------------------------------------------------
 int64_t get_time() {
     return MockableClock::instance().now();
 }
@@ -18,6 +31,12 @@ int64_t get_time_micros() {
     return MockableClock::instance().now_micros();
 }
 
+// ---------------------------------------------------------------------------
+// get_steady_millis / get_steady_micros
+//
+// Monotonic clock — not affected by wall-clock adjustments or mocking.
+// Suitable for elapsed-time measurement and throttle logic.
+// ---------------------------------------------------------------------------
 int64_t get_steady_millis() {
     auto now = std::chrono::steady_clock::now();
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -32,6 +51,12 @@ int64_t get_steady_micros() {
         .count();
 }
 
+// ---------------------------------------------------------------------------
+// format_iso_time / format_time
+//
+// format_iso_time: UTC ISO-8601 (e.g. "2025-01-15T08:30:00Z").
+// format_time:     local-time display (e.g. "2025-01-15 09:30:00").
+// ---------------------------------------------------------------------------
 std::string format_iso_time(int64_t time_sec) {
     std::time_t t = static_cast<std::time_t>(time_sec);
     std::tm tm_buf{};
@@ -66,6 +91,11 @@ std::string format_time(int64_t time_sec) {
     return std::string(buf);
 }
 
+// ---------------------------------------------------------------------------
+// parse_iso_time
+//
+// Parses an ISO-8601 string into a Unix timestamp.  Returns -1 on failure.
+// ---------------------------------------------------------------------------
 int64_t parse_iso_time(const std::string& str) {
     std::tm tm_buf{};
     std::istringstream ss(str);
@@ -79,8 +109,17 @@ int64_t parse_iso_time(const std::string& str) {
 #endif
 }
 
-// ─── MockableClock ───────────────────────────────────────────────────
+// ===========================================================================
+//  MockableClock
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// MockableClock — singleton wall-clock with optional fixed-time override.
+//
+// When mock_time_ > 0 every call returns the frozen value (scaled to the
+// requested resolution).  This keeps integration tests deterministic
+// without touching the system clock.
+// ---------------------------------------------------------------------------
 MockableClock& MockableClock::instance() {
     static MockableClock clock;
     return clock;
@@ -118,8 +157,16 @@ bool MockableClock::is_mocked() const {
     return mock_time_.load(std::memory_order_relaxed) > 0;
 }
 
-// ─── Timer ───────────────────────────────────────────────────────────
+// ===========================================================================
+//  Timer
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// Timer — lightweight monotonic stopwatch.
+//
+// Constructed at "now"; call reset() to restart.  Provides elapsed time
+// in milliseconds, microseconds, seconds, or a human-friendly string.
+// ---------------------------------------------------------------------------
 Timer::Timer() : start_(std::chrono::steady_clock::now()) {}
 
 void Timer::reset() {
@@ -162,8 +209,16 @@ std::string Timer::elapsed_str() const {
     return std::to_string(mins) + "m" + std::to_string(secs) + "s";
 }
 
-// ─── Throttle ────────────────────────────────────────────────────────
+// ===========================================================================
+//  Throttle
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// Throttle — rate-gates a repeating action to at most once per interval.
+//
+// check() returns true at most once every interval_ms_ milliseconds.
+// Uses steady clock to avoid wall-clock drift.
+// ---------------------------------------------------------------------------
 Throttle::Throttle(int64_t interval_ms)
     : interval_ms_(interval_ms) {}
 
@@ -180,8 +235,18 @@ void Throttle::reset() {
     last_time_ = 0;
 }
 
-// ─── Deadline ────────────────────────────────────────────────────────
+// ===========================================================================
+//  Deadline
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// Deadline — absolute point in monotonic time for timeout checks.
+//
+// Three factory methods:
+//   from_now(ms) — expires after the given duration.
+//   expired()    — already expired at construction.
+//   never()      — never expires (infinite timeout).
+// ---------------------------------------------------------------------------
 Deadline Deadline::from_now(int64_t ms) {
     Deadline d;
     d.deadline_ms_ = get_steady_millis() + ms;
@@ -213,8 +278,16 @@ int64_t Deadline::remaining_ms() const {
     return diff > 0 ? diff : 0;
 }
 
-// ─── RateLimiter ─────────────────────────────────────────────────────
+// ===========================================================================
+//  RateLimiter
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// RateLimiter — sliding-window event counter.
+//
+// Allows up to max_events within any contiguous window_ms period.
+// Expired timestamps are pruned lazily on each allow() call.
+// ---------------------------------------------------------------------------
 RateLimiter::RateLimiter(int max_events, int64_t window_ms)
     : max_events_(max_events), window_ms_(window_ms) {
     timestamps_.reserve(static_cast<size_t>(max_events));
@@ -224,15 +297,17 @@ bool RateLimiter::allow() {
     auto now = get_steady_millis();
     auto cutoff = now - window_ms_;
 
-    // Remove expired timestamps
+    // 1. Remove expired timestamps.
     while (!timestamps_.empty() && timestamps_.front() < cutoff) {
         timestamps_.erase(timestamps_.begin());
     }
 
+    // 2. Check capacity.
     if (static_cast<int>(timestamps_.size()) >= max_events_) {
         return false;
     }
 
+    // 3. Record this event.
     timestamps_.push_back(now);
     return true;
 }
@@ -241,8 +316,16 @@ void RateLimiter::reset() {
     timestamps_.clear();
 }
 
-// ─── PeriodicTimer ──────────────────────────────────────────────────
+// ===========================================================================
+//  PeriodicTimer
+// ===========================================================================
 
+// ---------------------------------------------------------------------------
+// PeriodicTimer — fires a callback at most once per interval.
+//
+// Call check() from a polling loop; the callback executes inline when
+// the interval has elapsed since the last firing.
+// ---------------------------------------------------------------------------
 PeriodicTimer::PeriodicTimer(int64_t interval_ms,
                               std::function<void()> callback)
     : interval_ms_(interval_ms), callback_(std::move(callback)) {}
@@ -263,4 +346,4 @@ void PeriodicTimer::set_interval(int64_t ms) {
     interval_ms_ = ms;
 }
 
-}  // namespace rnet::core
+} // namespace rnet::core
