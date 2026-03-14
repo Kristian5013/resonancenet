@@ -157,11 +157,25 @@ bool verify_pot_training(const primitives::CBlockHeader& /*header*/,
 // ---------------------------------------------------------------------------
 // is_retarget_height
 // ---------------------------------------------------------------------------
-// Returns true if @p height falls on a difficulty adjustment boundary.
+// Returns true if @p height is a difficulty adjustment point.
+//
+// Two modes:
+//   Early phase (height <= difficulty_early_phase):
+//     Retarget EVERY block — fast calibration from the unknown genesis delta.
+//   Normal phase (height > difficulty_early_phase):
+//     Retarget at interval boundaries (height % interval == 0).
+//
 // Height 0 (genesis) is never a retarget.
 // ---------------------------------------------------------------------------
 bool is_retarget_height(uint64_t height, const ConsensusParams& params) {
     if (height == 0) return false;
+
+    // 1. Early phase: per-block retarget for rapid calibration.
+    if (height <= static_cast<uint64_t>(params.difficulty_early_phase)) {
+        return true;
+    }
+
+    // 2. Normal phase: retarget at interval boundaries.
     return (height % static_cast<uint64_t>(params.difficulty_adjustment_interval)) == 0;
 }
 
@@ -170,16 +184,30 @@ bool is_retarget_height(uint64_t height, const ConsensusParams& params) {
 // ---------------------------------------------------------------------------
 // Adaptive retarget algorithm (consensus-critical).
 //
-// At every retarget boundary (height % interval == 0):
+// Early phase (height <= difficulty_early_phase):
+//   Per-block retarget using the single parent block time:
 //
-//   expected = interval * target_block_time       (e.g. 20 * 600 = 12'000 s)
-//   actual   = parent_ts - period_start_ts
-//   ratio    = actual / expected
-//   ratio    = clamp(ratio, 1/max_adj, max_adj)   (1/4 .. 4)
-//   new_delta = prev_delta * ratio
-//   new_delta = clamp(new_delta, min_delta, max_delta)
+//     expected = target_block_time                   (600 s)
+//     actual   = parent_ts - grandparent_ts          (period_start_ts = grandparent)
+//     ratio    = actual / expected
+//     new_delta = prev_delta * ratio
 //
-// Between boundaries the delta carries forward unchanged.
+//   This ensures rapid convergence from an unknown genesis delta.
+//   The first block ever mined still requires min_block_interval (5 min),
+//   giving the algorithm a useful signal from block 2 onward.
+//
+// Normal phase (height > difficulty_early_phase):
+//   Standard retarget over the full interval:
+//
+//     expected = interval * target_block_time        (20 * 600 = 12'000 s)
+//     actual   = parent_ts - period_start_ts
+//     ratio    = actual / expected
+//     new_delta = prev_delta * ratio
+//
+// In both phases:
+//     ratio    = clamp(ratio, 1/max_adj, max_adj)    (1/4 .. 4)
+//     new_delta = clamp(new_delta, min_delta, max_delta)
+//
 // Genesis always returns genesis_difficulty_delta.
 // ---------------------------------------------------------------------------
 float compute_next_difficulty(uint64_t height,
@@ -197,27 +225,35 @@ float compute_next_difficulty(uint64_t height,
         return parent_delta;
     }
 
-    // 3. Retarget: compare actual elapsed time to expected.
-    const int64_t expected = static_cast<int64_t>(params.difficulty_adjustment_interval)
-                           * params.target_block_time;
+    // 3. Compute expected time for this retarget window.
+    int64_t expected;
+    if (height <= static_cast<uint64_t>(params.difficulty_early_phase)) {
+        // Early phase: compare single block time to target.
+        expected = params.target_block_time;
+    } else {
+        // Normal phase: compare full interval.
+        expected = static_cast<int64_t>(params.difficulty_adjustment_interval)
+                 * params.target_block_time;
+    }
 
+    // 4. Actual elapsed time in the retarget window.
     int64_t actual = static_cast<int64_t>(parent_ts)
                    - static_cast<int64_t>(period_start_ts);
 
-    // 4. Guard against zero/negative elapsed (clock issues).
+    // 5. Guard against zero/negative elapsed (clock issues).
     if (actual < 1) actual = 1;
 
-    // 5. Compute ratio and clamp to [1/max_adj, max_adj].
-    //    ratio > 1 means blocks too slow → decrease delta (easier)
-    //    ratio < 1 means blocks too fast → increase delta (harder)
+    // 6. Compute ratio and clamp to [1/max_adj, max_adj].
+    //    ratio > 1 → blocks too slow → decrease delta (easier)
+    //    ratio < 1 → blocks too fast → increase delta (harder)
     double ratio = static_cast<double>(actual) / static_cast<double>(expected);
     const double max_adj = static_cast<double>(params.difficulty_adjustment_max);
     ratio = std::clamp(ratio, 1.0 / max_adj, max_adj);
 
-    // 6. Apply ratio to previous delta.
+    // 7. Apply ratio to previous delta.
     float new_delta = static_cast<float>(static_cast<double>(parent_delta) * ratio);
 
-    // 7. Clamp to absolute bounds.
+    // 8. Clamp to absolute bounds.
     new_delta = std::clamp(new_delta, params.min_difficulty_delta,
                                       params.max_difficulty_delta);
 

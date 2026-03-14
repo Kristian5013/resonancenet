@@ -99,7 +99,9 @@ ConsensusParams ConsensusParams::regtest()
 
     // 6. Fast difficulty for testing
     p.target_block_time = 10;                   // seconds (10 s instead of 10 min)
+    p.min_block_interval = 1;                   // seconds (nearly instant for regtest)
     p.difficulty_adjustment_interval = 5;       // retarget every 5 blocks
+    p.difficulty_early_phase = 5;               // per-block retarget for first 5
     p.genesis_difficulty_delta = 0.0001f;       // very low initial threshold
     p.min_difficulty_delta = 1.0e-12f;
 

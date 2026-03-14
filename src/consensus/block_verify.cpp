@@ -220,6 +220,14 @@ bool check_block_header(const primitives::CBlockHeader& header,
         return false;
     }
 
+    // 3b. Minimum block interval — prevents blocks arriving too fast
+    //     even before the difficulty retarget can react.
+    //     Default: 300 seconds (5 minutes) on mainnet.
+    if (header.timestamp < parent.timestamp + static_cast<uint64_t>(params.min_block_interval)) {
+        state.invalid("bad-timestamp-too-soon");
+        return false;
+    }
+
     // 4. Timestamp must not be too far in the future.
     if (header.timestamp > core::get_time() + 7'200) { // seconds (2 hours)
         state.invalid("bad-timestamp-future");

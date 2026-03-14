@@ -38,7 +38,9 @@ struct ConsensusParams {
 
     // --- Difficulty / block timing ---
     int64_t target_block_time = 600;               // seconds (10 minutes)
+    int64_t min_block_interval = 300;              // seconds (5 minutes, hard floor)
     int difficulty_adjustment_interval = 20;        // blocks per retarget
+    int difficulty_early_phase = 20;               // per-block retarget for first N blocks
     float genesis_difficulty_delta = 0.001f;        // initial min loss improvement
     float min_difficulty_delta = 1.0e-8f;           // floor (prevents zero)
     float max_difficulty_delta = 10.0f;             // ceiling
