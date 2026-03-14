@@ -142,6 +142,9 @@ private:
 
     /// Run one optimizer step on all weights.
     void optimizer_step(float lr);
+
+    /// Clip gradients by global L2 norm.
+    void clip_gradients(float max_norm);
 };
 
 }  // namespace rnet::training

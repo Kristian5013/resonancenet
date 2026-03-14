@@ -1,5 +1,7 @@
 #include "training/evaluator.h"
 
+#include <cmath>
+
 #include "training/checkpoint_io.h"
 #include "training/model_config.h"
 #include "gpu/backend.h"
@@ -51,16 +53,16 @@ Result<float> Evaluator::evaluate(const std::filesystem::path& checkpoint,
     const int vocab = static_cast<int>(config.vocab_size);
     const int n_slots = static_cast<int>(config.n_slots);
 
-    // Allocate activation buffers
-    GpuTensor input_buf(backend_, {batch_size, seq_len, d}, DType::BF16);
-    GpuTensor residual_buf(backend_, {batch_size, seq_len, d}, DType::BF16);
-    GpuTensor norm_buf(backend_, {batch_size, seq_len, d}, DType::BF16);
-    GpuTensor conv_buf(backend_, {batch_size, seq_len, d}, DType::BF16);
-    GpuTensor gru_buf(backend_, {batch_size, seq_len, d}, DType::BF16);
-    GpuTensor gru_state(backend_, {batch_size, d}, DType::BF16);
-    GpuTensor slot_buf(backend_, {batch_size, seq_len, d}, DType::BF16);
-    GpuTensor ff_buf(backend_, {batch_size, seq_len, d}, DType::BF16);
-    GpuTensor logits_buf(backend_, {batch_size, seq_len, vocab}, DType::BF16);
+    // Allocate activation buffers (FP32 to match TrainingEngine precision)
+    GpuTensor input_buf(backend_, {batch_size, seq_len, d}, DType::FP32);
+    GpuTensor residual_buf(backend_, {batch_size, seq_len, d}, DType::FP32);
+    GpuTensor norm_buf(backend_, {batch_size, seq_len, d}, DType::FP32);
+    GpuTensor conv_buf(backend_, {batch_size, seq_len, d}, DType::FP32);
+    GpuTensor gru_buf(backend_, {batch_size, seq_len, d}, DType::FP32);
+    GpuTensor gru_state(backend_, {batch_size, d}, DType::FP32);
+    GpuTensor slot_buf(backend_, {batch_size, seq_len, d}, DType::FP32);
+    GpuTensor ff_buf(backend_, {batch_size, seq_len, d}, DType::FP32);
+    GpuTensor logits_buf(backend_, {batch_size, seq_len, vocab}, DType::FP32);
 
     // Token buffers on GPU
     std::vector<int> host_tokens(batch_size * seq_len);
@@ -68,10 +70,10 @@ Result<float> Evaluator::evaluate(const std::filesystem::path& checkpoint,
     void* gpu_tokens = backend_.alloc(batch_size * seq_len * sizeof(int));
     void* gpu_targets = backend_.alloc(batch_size * seq_len * sizeof(int));
 
-    // Upload all weight tensors to GPU
+    // Upload all weight tensors to GPU (FP32 to match TrainingEngine precision)
     std::unordered_map<std::string, std::unique_ptr<GpuTensor>> gpu_weights;
     for (const auto& t : tensors) {
-        auto tensor = std::make_unique<GpuTensor>(backend_, t.shape, DType::BF16);
+        auto tensor = std::make_unique<GpuTensor>(backend_, t.shape, DType::FP32);
         tensor->copy_from_host(t.data.data());
         gpu_weights[t.name] = std::move(tensor);
     }
@@ -86,6 +88,11 @@ Result<float> Evaluator::evaluate(const std::filesystem::path& checkpoint,
     for (int i = 0; i < 8; ++i) {
         kernel_sizes_host[i] = config.kernel_sizes[i];
     }
+
+    // Allocate ones buffer for residual addition via gemm trick
+    void* ones_buf = backend_.alloc(sizeof(float));
+    float one = 1.0f;
+    backend_.copy_to_device(ones_buf, &one, sizeof(float));
 
     float total_loss = 0.0f;
     int valid_batches = 0;
@@ -106,6 +113,7 @@ Result<float> Evaluator::evaluate(const std::filesystem::path& checkpoint,
         if (!emb_weight) {
             backend_.free(gpu_tokens);
             backend_.free(gpu_targets);
+            backend_.free(ones_buf);
             return Result<float>::err("Missing embedding.weight tensor");
         }
         backend_.embedding_forward(input_buf.data(), emb_weight,
@@ -159,15 +167,11 @@ Result<float> Evaluator::evaluate(const std::filesystem::path& checkpoint,
                                      w_up, w_gate, w_down,
                                      batch_size, seq_len, d, d_ff);
 
-            // Residual addition: residual += ff_buf
-            // Implemented as: copy ff_buf to a temp, then add.
-            // For now, we use gemm as an identity-add workaround,
-            // or we simply overwrite residual with the layer output.
-            // In practice, the backend would have an element-wise add kernel.
-            // We approximate by treating ff_buf as the new residual input
-            // for the next layer (the backend kernels handle residual internally).
-            backend_.copy_to_device(residual_buf.data(), ff_buf.data(),
-                                     ff_buf.size_bytes());
+            // Residual connection: residual += ff_out
+            // gemm trick: treat as vector add via matrix multiply with scalar 1.0
+            int total_elems = batch_size * seq_len * d;
+            backend_.gemm(residual_buf.data(), ff_buf.data(), ones_buf,
+                           total_elems, 1, 1, 1.0f, 1.0f);
         }
 
         // Output projection: logits = residual @ output_proj
@@ -175,6 +179,7 @@ Result<float> Evaluator::evaluate(const std::filesystem::path& checkpoint,
         if (!out_proj) {
             backend_.free(gpu_tokens);
             backend_.free(gpu_targets);
+            backend_.free(ones_buf);
             return Result<float>::err("Missing output.weight tensor");
         }
         backend_.gemm(logits_buf.data(), residual_buf.data(), out_proj,
@@ -187,12 +192,15 @@ Result<float> Evaluator::evaluate(const std::filesystem::path& checkpoint,
                                      batch_size, seq_len, vocab);
         backend_.synchronize();
 
+        if (!std::isfinite(batch_loss)) continue;
+
         total_loss += batch_loss;
         ++valid_batches;
     }
 
     backend_.free(gpu_tokens);
     backend_.free(gpu_targets);
+    backend_.free(ones_buf);
 
     if (valid_batches == 0) {
         return Result<float>::err("No valid batches evaluated");

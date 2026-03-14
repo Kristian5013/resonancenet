@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <random>
 
 namespace rnet::training {
@@ -68,7 +69,10 @@ void TrainingEngine::alloc_weight(const std::string& name, std::vector<int64_t> 
     // Initialize weights on CPU and upload
     int64_t numel = w->numel();
     std::vector<float> init_data(numel);
-    static std::mt19937 rng(42);
+
+    // Seed from tensor name hash for reproducibility without shared state
+    std::hash<std::string> hasher;
+    std::mt19937 rng(static_cast<uint32_t>(hasher(name)));
 
     bool is_scale = (name.find("rmsnorm") != std::string::npos && name.find("scale") != std::string::npos);
 
@@ -284,6 +288,10 @@ Result<void> TrainingEngine::save_checkpoint(const std::filesystem::path& path) 
     return write_checkpoint(path, hdr, tensors);
 }
 
+// ---------------------------------------------------------------------------
+// Forward pass
+// ---------------------------------------------------------------------------
+
 float TrainingEngine::forward_pass(int batch_size, int seq_len) {
     int d = static_cast<int>(config_.d_model);
     int d_ff = static_cast<int>(config_.d_ff);
@@ -373,6 +381,10 @@ float TrainingEngine::forward_pass(int batch_size, int seq_len) {
     backend_.synchronize();
     return loss;
 }
+
+// ---------------------------------------------------------------------------
+// Backward pass
+// ---------------------------------------------------------------------------
 
 void TrainingEngine::backward_pass(int batch_size, int seq_len) {
     int d = static_cast<int>(config_.d_model);
@@ -497,6 +509,10 @@ void TrainingEngine::backward_pass(int batch_size, int seq_len) {
         batch_size, seq_len, d, vocab);
 }
 
+// ---------------------------------------------------------------------------
+// Optimizer
+// ---------------------------------------------------------------------------
+
 void TrainingEngine::optimizer_step(float lr) {
     int current_step = static_cast<int>(step_) + 1;  // 1-indexed for bias correction
     constexpr float beta1 = 0.9f;
@@ -523,6 +539,39 @@ void TrainingEngine::optimizer_step(float lr) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Gradient clipping
+// ---------------------------------------------------------------------------
+
+void TrainingEngine::clip_gradients(float max_norm) {
+    // Compute global gradient L2 norm across all parameters
+    float total_sq = 0.0f;
+    for (const auto& [name, grad] : grads_) {
+        std::vector<float> host_grad(grad->numel());
+        grad->copy_to_host(host_grad.data());
+        for (float g : host_grad) {
+            total_sq += g * g;
+        }
+    }
+    float global_norm = std::sqrt(total_sq);
+
+    if (global_norm > max_norm) {
+        float scale = max_norm / global_norm;
+        for (auto& [name, grad] : grads_) {
+            std::vector<float> host_grad(grad->numel());
+            grad->copy_to_host(host_grad.data());
+            for (float& g : host_grad) {
+                g *= scale;
+            }
+            grad->copy_from_host(host_grad.data());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Training loop
+// ---------------------------------------------------------------------------
+
 Result<float> TrainingEngine::train_steps(int n_steps, DataLoader& data) {
     if (!initialized_) {
         return Result<float>::err("Training engine not initialized");
@@ -545,8 +594,16 @@ Result<float> TrainingEngine::train_steps(int n_steps, DataLoader& data) {
         // Forward pass (computes loss and saves activations)
         last_loss = forward_pass(BATCH_SIZE, seq_len);
 
+        // Reject NaN/Inf loss — indicates numerical divergence
+        if (!std::isfinite(last_loss)) {
+            return Result<float>::err("training diverged: loss is NaN or Inf");
+        }
+
         // Backward pass (computes gradients for all weights)
         backward_pass(BATCH_SIZE, seq_len);
+
+        // Gradient clipping: cap global gradient norm to 1.0
+        clip_gradients(1.0f);
 
         // Get learning rate for current step
         float lr = lr_schedule_->get_lr(static_cast<int>(step_));
@@ -559,6 +616,10 @@ Result<float> TrainingEngine::train_steps(int n_steps, DataLoader& data) {
 
     return Result<float>::ok(last_loss);
 }
+
+// ---------------------------------------------------------------------------
+// Evaluation
+// ---------------------------------------------------------------------------
 
 Result<float> TrainingEngine::evaluate(DataLoader& val_data, int n_batches) {
     if (!initialized_) {
@@ -582,6 +643,7 @@ Result<float> TrainingEngine::evaluate(DataLoader& val_data, int n_batches) {
                                  static_cast<size_t>(BATCH_SIZE) * seq_len * sizeof(int));
 
         float loss = forward_pass(BATCH_SIZE, seq_len);
+        if (!std::isfinite(loss)) continue;  // skip corrupted batches
         total_loss += loss;
         ++valid_batches;
     }
@@ -592,6 +654,10 @@ Result<float> TrainingEngine::evaluate(DataLoader& val_data, int n_batches) {
 
     return Result<float>::ok(total_loss / static_cast<float>(valid_batches));
 }
+
+// ---------------------------------------------------------------------------
+// Model expansion (grow-then-train)
+// ---------------------------------------------------------------------------
 
 Result<void> TrainingEngine::expand_model(const ModelConfig& new_config) {
     if (!initialized_) {
@@ -634,10 +700,35 @@ Result<void> TrainingEngine::expand_model(const ModelConfig& new_config) {
             // Same size — direct copy
             new_tensor->copy_from_host(old_data.data());
         } else if (new_tensor->size_bytes() > old_data.size()) {
-            // New tensor is larger — copy old data to beginning, rest stays zero
-            std::vector<uint8_t> padded(new_tensor->size_bytes(), 0);
-            std::memcpy(padded.data(), old_data.data(), old_data.size());
-            new_tensor->copy_from_host(padded.data());
+            auto old_shape_it = saved_shapes.find(name);
+            auto new_shape = new_tensor->shape();
+
+            // Check if this is a 2D+ tensor that changed column dimension
+            if (old_shape_it != saved_shapes.end() &&
+                old_shape_it->second.size() >= 2 && new_shape.size() >= 2 &&
+                old_shape_it->second[1] != new_shape[1]) {
+                // Row-by-row copy respecting stride change
+                // old layout: rows of old_cols floats
+                // new layout: rows of new_cols floats (zero-padded)
+                int64_t old_rows = old_shape_it->second[0];
+                int64_t old_cols = old_shape_it->second[1];
+                int64_t new_cols = new_shape[1];
+                size_t old_row_bytes = static_cast<size_t>(old_cols) * sizeof(float);
+                size_t new_row_bytes = static_cast<size_t>(new_cols) * sizeof(float);
+
+                std::vector<uint8_t> padded(new_tensor->size_bytes(), 0);
+                for (int64_t r = 0; r < old_rows; ++r) {
+                    std::memcpy(padded.data() + r * new_row_bytes,
+                               old_data.data() + r * old_row_bytes,
+                               old_row_bytes);
+                }
+                new_tensor->copy_from_host(padded.data());
+            } else {
+                // 1D tensor or same column count: flat copy is correct
+                std::vector<uint8_t> padded(new_tensor->size_bytes(), 0);
+                std::memcpy(padded.data(), old_data.data(), old_data.size());
+                new_tensor->copy_from_host(padded.data());
+            }
         }
         // If new tensor is smaller (shouldn't happen for growth), skip
     }

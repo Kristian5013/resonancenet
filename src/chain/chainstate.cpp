@@ -1,11 +1,22 @@
 #include "chain/chainstate.h"
 
+#include "consensus/block_reward.h"
 #include "consensus/block_verify.h"
 #include "consensus/genesis.h"
 #include "consensus/tx_verify.h"
 #include "core/logging.h"
 
+#include <unordered_map>
+#include <vector>
+
 namespace rnet::chain {
+
+// --- File-local undo storage: block hash -> vector of spent coins ---
+static std::unordered_map<rnet::uint256, std::vector<Coin>> block_undo_data_;
+
+// -------------------------------------------------------------------
+// Construction / destruction
+// -------------------------------------------------------------------
 
 CChainState::CChainState(const consensus::ConsensusParams& params,
                          std::unique_ptr<CCoinsView> coins_view,
@@ -18,17 +29,22 @@ CChainState::CChainState(const consensus::ConsensusParams& params,
 
 CChainState::~CChainState() = default;
 
+// -------------------------------------------------------------------
+// Genesis
+// -------------------------------------------------------------------
+
 Result<void> CChainState::load_genesis() {
     LOCK(cs_main_);
 
     auto genesis = consensus::create_genesis_block(params_);
     auto hash = genesis.hash();
 
-    // Check if genesis already loaded
+    // 1. Check if genesis already loaded
     if (block_index_.count(hash)) {
         return Result<void>::ok();
     }
 
+    // 2. Build block index entry
     auto idx = std::make_unique<CBlockIndex>(
         static_cast<const primitives::CBlockHeader&>(genesis));
 
@@ -38,7 +54,7 @@ Result<void> CChainState::load_genesis() {
     auto* raw = idx.get();
     block_index_[hash] = std::move(idx);
 
-    // Write genesis to disk
+    // 3. Write genesis to disk
     auto pos_result = storage_->write_block(genesis);
     if (!pos_result) {
         return Result<void>::err("Failed to write genesis: " + pos_result.error());
@@ -46,14 +62,14 @@ Result<void> CChainState::load_genesis() {
     raw->file_number = pos_result.value().file_number;
     raw->data_pos = pos_result.value().pos;
 
-    // Set as tip
+    // 4. Set as tip
     tip_ = raw;
     active_chain_.clear();
     active_chain_.push_back(raw);
 
     coins_cache_.set_best_block(hash);
 
-    // Add genesis coinbase outputs to UTXO set
+    // 5. Add genesis coinbase outputs to UTXO set
     if (!genesis.vtx.empty()) {
         const auto& coinbase = genesis.vtx[0];
         for (uint32_t i = 0; i < coinbase->vout().size(); ++i) {
@@ -68,6 +84,10 @@ Result<void> CChainState::load_genesis() {
     return Result<void>::ok();
 }
 
+// -------------------------------------------------------------------
+// Header acceptance
+// -------------------------------------------------------------------
+
 Result<CBlockIndex*> CChainState::accept_block_header(
     const primitives::CBlockHeader& header)
 {
@@ -75,13 +95,13 @@ Result<CBlockIndex*> CChainState::accept_block_header(
 
     auto hash = header.hash();
 
-    // Already known?
+    // 1. Already known?
     auto it = block_index_.find(hash);
     if (it != block_index_.end()) {
         return Result<CBlockIndex*>::ok(it->second.get());
     }
 
-    // Find parent
+    // 2. Find parent
     auto parent_it = block_index_.find(header.prev_hash);
     if (parent_it == block_index_.end()) {
         return Result<CBlockIndex*>::err(
@@ -89,14 +109,14 @@ Result<CBlockIndex*> CChainState::accept_block_header(
     }
     auto* parent = parent_it->second.get();
 
-    // Validate header against parent
+    // 3. Validate header against parent
     consensus::ValidationState state;
     if (!consensus::check_block_header(header, parent->header, state, params_)) {
         return Result<CBlockIndex*>::err(
             "Invalid block header: " + state.reject_reason);
     }
 
-    // Insert into block index
+    // 4. Insert into block index
     auto idx = std::make_unique<CBlockIndex>(header);
     idx->prev = parent;
     idx->status = CBlockIndex::HEADER_VALID;
@@ -107,10 +127,14 @@ Result<CBlockIndex*> CChainState::accept_block_header(
     return Result<CBlockIndex*>::ok(raw);
 }
 
+// -------------------------------------------------------------------
+// Block acceptance
+// -------------------------------------------------------------------
+
 Result<CBlockIndex*> CChainState::accept_block(
     const primitives::CBlock& block)
 {
-    // Accept header first
+    // 1. Accept header first
     auto header_result = accept_block_header(
         static_cast<const primitives::CBlockHeader&>(block));
     if (!header_result) {
@@ -121,19 +145,19 @@ Result<CBlockIndex*> CChainState::accept_block(
 
     LOCK(cs_main_);
 
-    // Already fully validated?
+    // 2. Already fully validated?
     if (pindex->status >= CBlockIndex::FULLY_VALIDATED) {
         return Result<CBlockIndex*>::ok(pindex);
     }
 
-    // Context-free block validation
+    // 3. Context-free block validation
     consensus::ValidationState state;
     if (!consensus::check_block(block, state, params_)) {
         return Result<CBlockIndex*>::err(
             "Invalid block: " + state.reject_reason);
     }
 
-    // Write to disk
+    // 4. Write to disk
     auto pos_result = storage_->write_block(block);
     if (!pos_result) {
         return Result<CBlockIndex*>::err(
@@ -145,7 +169,7 @@ Result<CBlockIndex*> CChainState::accept_block(
     pindex->chain_tx = (pindex->prev ? pindex->prev->chain_tx : 0)
                        + static_cast<int64_t>(block.vtx.size());
 
-    // Try to activate best chain (may connect this block or trigger reorg)
+    // 5. Try to activate best chain (may connect this block or trigger reorg)
     auto activate_result = activate_best_chain(&block);
     if (!activate_result) {
         return Result<CBlockIndex*>::err(activate_result.error());
@@ -153,6 +177,10 @@ Result<CBlockIndex*> CChainState::accept_block(
 
     return Result<CBlockIndex*>::ok(pindex);
 }
+
+// -------------------------------------------------------------------
+// Chain accessors
+// -------------------------------------------------------------------
 
 CBlockIndex* CChainState::tip() const {
     return tip_;
@@ -201,6 +229,10 @@ CBlockIndex* CChainState::insert_block_index(const rnet::uint256& hash) {
     return raw;
 }
 
+// -------------------------------------------------------------------
+// Chain activation / reorg
+// -------------------------------------------------------------------
+
 Result<void> CChainState::activate_best_chain(
     const primitives::CBlock* new_block)
 {
@@ -209,7 +241,7 @@ Result<void> CChainState::activate_best_chain(
         return Result<void>::ok();
     }
 
-    // Find the fork point
+    // 1. Find the fork point
     CBlockIndex* fork = tip_;
     CBlockIndex* walk = best;
 
@@ -218,7 +250,7 @@ Result<void> CChainState::activate_best_chain(
     while (fork && walk && fork != walk) { fork = fork->prev; walk = walk->prev; }
     CBlockIndex* fork_point = fork;
 
-    // Disconnect blocks from old tip to fork point
+    // 2. Disconnect blocks from old tip to fork point
     if (tip_ && fork_point) {
         CBlockIndex* disconnect = tip_;
         while (disconnect != fork_point) {
@@ -228,16 +260,15 @@ Result<void> CChainState::activate_best_chain(
         }
     }
 
-    // Build the list of blocks to connect
+    // 3. Build the list of blocks to connect
     std::vector<CBlockIndex*> to_connect;
     for (CBlockIndex* idx = best; idx != fork_point; idx = idx->prev) {
         to_connect.push_back(idx);
     }
     std::reverse(to_connect.begin(), to_connect.end());
 
-    // Connect blocks from fork point to new best tip
+    // 4. Connect blocks from fork point to new best tip
     for (auto* idx : to_connect) {
-        // Use the in-memory block if it matches, otherwise read from disk
         bool use_memory = (new_block && idx->block_hash == new_block->hash());
 
         if (use_memory) {
@@ -266,17 +297,60 @@ Result<void> CChainState::activate_best_chain(
     return Result<void>::ok();
 }
 
+// -------------------------------------------------------------------
+// Connect block — update UTXO set, verify coinbase, build undo data
+// -------------------------------------------------------------------
+
 Result<void> CChainState::connect_block(
     const primitives::CBlock& block, CBlockIndex* pindex)
 {
-    // Update UTXO set: spend inputs, add outputs
+    // --- Step 1: Sum fees from non-coinbase transactions ---
+    int64_t total_fees = 0;
+    for (size_t i = 1; i < block.vtx.size(); ++i) {
+        const auto& tx = block.vtx[i];
+        int64_t tx_in_value = 0;
+        for (const auto& txin : tx->vin()) {
+            Coin coin;
+            if (!coins_cache_.get_coin(txin.prevout, coin)) {
+                return Result<void>::err("bad-txns-inputs-missingorspent");
+            }
+            tx_in_value += coin.out.value;
+        }
+        int64_t tx_out_value = tx->get_value_out();
+        total_fees += tx_in_value - tx_out_value;
+    }
+
+    // --- Step 2: Compute allowed subsidy ---
+    float improvement = 0.0f;
+    if (pindex->header.prev_val_loss > 0.0f &&
+        pindex->header.val_loss < pindex->header.prev_val_loss) {
+        improvement = (pindex->header.prev_val_loss - pindex->header.val_loss)
+                    / pindex->header.prev_val_loss;
+    }
+    consensus::EmissionState emission{};  // TODO: track cumulative emission
+    auto allowed = consensus::compute_block_reward(
+        pindex->header.height, improvement, emission, params_);
+    int64_t max_coinbase = allowed.total() + total_fees;
+
+    // --- Step 3: Verify coinbase amount ---
+    if (!block.vtx.empty() && block.vtx[0]->is_coinbase()) {
+        if (block.vtx[0]->get_value_out() > max_coinbase) {
+            return Result<void>::err("bad-cb-amount");
+        }
+    }
+
+    // --- Step 4: Build undo data and update UTXO set ---
+    std::vector<Coin> undo_coins;
+
     for (size_t i = 0; i < block.vtx.size(); ++i) {
         const auto& tx = block.vtx[i];
 
-        // Spend inputs (skip coinbase)
+        // Spend inputs (skip coinbase), saving spent coins for undo
         if (!tx->is_coinbase()) {
             for (const auto& txin : tx->vin()) {
-                coins_cache_.spend_coin(txin.prevout);
+                Coin spent;
+                coins_cache_.spend_coin(txin.prevout, &spent);
+                undo_coins.push_back(std::move(spent));
             }
         }
 
@@ -290,11 +364,13 @@ Result<void> CChainState::connect_block(
         }
     }
 
-    // Update chain state
+    // --- Step 5: Store undo data keyed by block hash ---
+    block_undo_data_[pindex->block_hash] = std::move(undo_coins);
+
+    // --- Step 6: Update chain state ---
     pindex->status = CBlockIndex::FULLY_VALIDATED;
     tip_ = pindex;
 
-    // Update active_chain_ vector
     if (pindex->height >= static_cast<int>(active_chain_.size())) {
         active_chain_.resize(static_cast<size_t>(pindex->height) + 1);
     }
@@ -311,8 +387,12 @@ Result<void> CChainState::connect_block(
     return Result<void>::ok();
 }
 
+// -------------------------------------------------------------------
+// Disconnect block — reverse UTXO changes using undo data
+// -------------------------------------------------------------------
+
 Result<void> CChainState::disconnect_block(CBlockIndex* pindex) {
-    // Read block from disk to undo its effects
+    // 1. Read block from disk
     DiskBlockPos dpos;
     dpos.file_number = pindex->file_number;
     dpos.pos = pindex->data_pos;
@@ -324,18 +404,37 @@ Result<void> CChainState::disconnect_block(CBlockIndex* pindex) {
     }
     const auto& block = block_result.value();
 
-    // Reverse: remove outputs, then re-add spent inputs
-    // (simplified — a full implementation would use undo data)
+    // 2. Look up undo data for this block
+    auto undo_it = block_undo_data_.find(pindex->block_hash);
+    bool have_undo = (undo_it != block_undo_data_.end());
+
+    // 3. Remove outputs (reverse order)
     for (auto it = block.vtx.rbegin(); it != block.vtx.rend(); ++it) {
         const auto& tx = *it;
-        // Remove outputs
         for (uint32_t j = 0; j < tx->vout().size(); ++j) {
             primitives::COutPoint outpoint(tx->txid(), j);
             coins_cache_.spend_coin(outpoint);
         }
-        // Re-adding inputs would require undo data (not implemented in stub)
     }
 
+    // 4. Restore spent inputs from undo data
+    if (have_undo) {
+        size_t undo_idx = 0;
+        for (size_t i = 0; i < block.vtx.size(); ++i) {
+            const auto& tx = block.vtx[i];
+            if (tx->is_coinbase()) continue;
+            for (const auto& txin : tx->vin()) {
+                if (undo_idx < undo_it->second.size()) {
+                    coins_cache_.add_coin(txin.prevout,
+                                          undo_it->second[undo_idx], true);
+                    ++undo_idx;
+                }
+            }
+        }
+        block_undo_data_.erase(undo_it);
+    }
+
+    // 5. Update chain state
     tip_ = pindex->prev;
     if (tip_) {
         active_chain_.resize(static_cast<size_t>(tip_->height) + 1);
@@ -347,6 +446,10 @@ Result<void> CChainState::disconnect_block(CBlockIndex* pindex) {
 
     return Result<void>::ok();
 }
+
+// -------------------------------------------------------------------
+// Fork choice
+// -------------------------------------------------------------------
 
 CBlockIndex* CChainState::find_best_tip() const {
     CBlockIndex* best = tip_;
@@ -363,12 +466,13 @@ CBlockIndex* CChainState::find_best_tip() const {
 bool CChainState::is_better_tip(const CBlockIndex* candidate,
                                 const CBlockIndex* current) const {
     if (!current) return true;
-    // PoT fork choice: lower val_loss wins
-    if (candidate->val_loss < current->val_loss) return true;
-    // Tiebreak: higher height (more work done)
-    if (candidate->val_loss == current->val_loss &&
-        candidate->height > current->height) return true;
-    return false;
+
+    // Primary: longer chain wins (more cumulative training work)
+    if (candidate->height > current->height) return true;
+    if (candidate->height < current->height) return false;
+
+    // Tiebreak at same height: lower val_loss wins
+    return candidate->val_loss < current->val_loss;
 }
 
 }  // namespace rnet::chain

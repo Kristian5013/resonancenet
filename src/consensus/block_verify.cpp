@@ -2,15 +2,71 @@
 #include "consensus/merkle.h"
 #include "consensus/proof_of_training.h"
 #include "consensus/tx_verify.h"
+#include "core/time.h"
+#include "crypto/ed25519.h"
 
+#include <cstddef>
+#include <cstdint>
 #include <set>
+#include <span>
 
 namespace rnet::consensus {
+
+// ----------------------------------------------------------------------------
+// Script sigop counting — walks opcodes, skipping pushed data
+// ----------------------------------------------------------------------------
+
+static int count_script_sigops(const std::vector<uint8_t>& script) {
+    int sigops = 0;
+    size_t i = 0;
+    while (i < script.size()) {
+        uint8_t opcode = script[i];
+
+        // 1. Direct push (1-75 bytes): skip opcode + N data bytes
+        if (opcode >= 1 && opcode <= 75) {
+            i += 1 + opcode;
+            continue;
+        }
+
+        // 2. OP_PUSHDATA1 (0x4C): next byte is length
+        if (opcode == 0x4C) {
+            if (i + 1 >= script.size()) break;
+            uint8_t len = script[i + 1];
+            i += 2 + len;
+            continue;
+        }
+
+        // 3. OP_PUSHDATA2 (0x4D): next two bytes are length (little-endian)
+        if (opcode == 0x4D) {
+            if (i + 2 >= script.size()) break;
+            uint16_t len = static_cast<uint16_t>(script[i + 1])
+                         | (static_cast<uint16_t>(script[i + 2]) << 8);
+            i += 3 + len;
+            continue;
+        }
+
+        // 4. OP_CHECKSIG (0xAC) / OP_CHECKSIGVERIFY (0xAD)
+        if (opcode == 0xAC || opcode == 0xAD) {
+            sigops += 1;
+        }
+
+        // 5. OP_CHECKMULTISIG (0xAE) / OP_CHECKMULTISIGVERIFY (0xAF)
+        if (opcode == 0xAE || opcode == 0xAF) {
+            sigops += 20;
+        }
+
+        ++i;
+    }
+    return sigops;
+}
+
+// ----------------------------------------------------------------------------
+// Block validation
+// ----------------------------------------------------------------------------
 
 bool check_block(const primitives::CBlock& block,
                  ValidationState& state,
                  const ConsensusParams& params) {
-    // Must have at least one transaction
     if (block.vtx.empty()) {
         state.invalid("bad-blk-length");
         return false;
@@ -46,24 +102,18 @@ bool check_block(const primitives::CBlock& block,
         }
     }
 
-    // Block size limit
+    // --- Block size limit ------------------------------------------------
     size_t block_size = block.get_block_size();
     if (block_size > params.max_block_size) {
         state.invalid("bad-blk-size");
         return false;
     }
 
-    // Sigop count limit
+    // --- Sigop count limit -----------------------------------------------
     int total_sigops = 0;
     for (const auto& tx : block.vtx) {
-        // Count sigops from output scripts
         for (const auto& txout : tx->vout()) {
-            // Each OP_CHECKSIG / OP_CHECKSIGVERIFY counts as 1
-            // Each OP_CHECKMULTISIG / OP_CHECKMULTISIGVERIFY counts as 20
-            // Simple heuristic: count 0xAC (OP_CHECKSIG) occurrences
-            for (uint8_t byte : txout.script_pub_key) {
-                if (byte == 0xAC) total_sigops += 1;
-            }
+            total_sigops += count_script_sigops(txout.script_pub_key);
         }
     }
     if (total_sigops > params.max_block_sigops) {
@@ -71,7 +121,7 @@ bool check_block(const primitives::CBlock& block,
         return false;
     }
 
-    // Validate each transaction
+    // --- Validate each transaction ---------------------------------------
     for (const auto& tx : block.vtx) {
         if (!check_transaction(*tx, state)) {
             return false;
@@ -80,6 +130,10 @@ bool check_block(const primitives::CBlock& block,
 
     return true;
 }
+
+// ----------------------------------------------------------------------------
+// Block header validation
+// ----------------------------------------------------------------------------
 
 bool check_block_header(const primitives::CBlockHeader& header,
                         const primitives::CBlockHeader& parent,
@@ -94,27 +148,56 @@ bool check_block_header(const primitives::CBlockHeader& header,
         return true;
     }
 
-    // Height must be parent + 1
+    // --- Structural checks -----------------------------------------------
+
+    // 1. Height must be parent + 1
     if (header.height != parent.height + 1) {
         state.invalid("bad-height");
         return false;
     }
 
-    // prev_hash must match parent's hash
+    // 2. prev_hash must match parent's hash
     if (!(header.prev_hash == parent.hash())) {
         state.invalid("bad-prevblk");
         return false;
     }
 
-    // Timestamp must be strictly greater than parent
+    // 3. Timestamp must be strictly greater than parent
     if (header.timestamp <= parent.timestamp) {
         state.invalid("bad-timestamp");
         return false;
     }
 
-    // Verify Proof-of-Training header fields
+    // 4. Reject blocks more than 2 hours in the future
+    if (header.timestamp > core::get_time() + 7200) {
+        state.invalid("bad-timestamp-future");
+        return false;
+    }
+
+    // --- Proof-of-Training -----------------------------------------------
+
+    // 5. Verify PoT header fields
     if (!verify_pot_header(header, parent, params, state)) {
-        return false;  // state already set by verify_pot_header
+        return false;
+    }
+
+    // --- Block signature -------------------------------------------------
+
+    // 6. Verify Ed25519 signature over unsigned header data
+    crypto::Ed25519PublicKey pubkey{};
+    std::copy(header.miner_pubkey.begin(), header.miner_pubkey.end(),
+              pubkey.data.begin());
+
+    crypto::Ed25519Signature sig{};
+    std::copy(header.signature.begin(), header.signature.end(),
+              sig.data.begin());
+
+    std::vector<uint8_t> msg = header.serialize_unsigned();
+    if (!crypto::ed25519_verify(pubkey,
+                                std::span<const uint8_t>(msg.data(), msg.size()),
+                                sig)) {
+        state.invalid("bad-blk-signature");
+        return false;
     }
 
     return true;
