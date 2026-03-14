@@ -29,4 +29,34 @@ bool verify_pot_header(const primitives::CBlockHeader& header,
 bool verify_pot_training(const primitives::CBlockHeader& header,
                          const ConsensusParams& params);
 
+// ---------------------------------------------------------------------------
+// Adaptive difficulty retargeting (consensus-critical)
+// ---------------------------------------------------------------------------
+
+/// Check whether @p height is a difficulty retarget boundary.
+bool is_retarget_height(uint64_t height, const ConsensusParams& params);
+
+/// Compute the required difficulty_delta for the next block.
+///
+/// Every `difficulty_adjustment_interval` blocks, the minimum loss
+/// improvement is adjusted so that blocks arrive approximately every
+/// `target_block_time` seconds (default 600 s = 10 minutes):
+///
+///   ratio     = actual_elapsed / expected_elapsed
+///   new_delta = prev_delta * ratio
+///   clamped   to [prev_delta/4, prev_delta*4]  then [min, max]
+///
+/// Between retarget boundaries, delta carries forward unchanged.
+///
+/// @param height           Height of the block being computed.
+/// @param parent_delta     Parent block's difficulty_delta.
+/// @param period_start_ts  Timestamp at the start of the retarget period.
+/// @param parent_ts        Timestamp of the parent block.
+/// @param params           Consensus parameters.
+float compute_next_difficulty(uint64_t height,
+                              float parent_delta,
+                              uint64_t period_start_ts,
+                              uint64_t parent_ts,
+                              const ConsensusParams& params);
+
 }  // namespace rnet::consensus

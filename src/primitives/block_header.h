@@ -41,6 +41,9 @@ struct CBlockHeader {
     uint32_t stagnation_count = 0;         ///< Consecutive blocks without improvement
     uint32_t growth_delta = 0;             ///< Growth event delta (0 = no growth)
 
+    // --- Difficulty ---
+    float difficulty_delta = 0.001f;       ///< Required minimum loss improvement
+
     // --- Metadata ---
     uint64_t timestamp = 0;                ///< Block timestamp (seconds since epoch)
     std::array<uint8_t, 32> miner_pubkey{};  ///< Ed25519 public key of the miner
@@ -88,6 +91,7 @@ struct CBlockHeader {
         READWRITE(self.kernel_sizes);
         READWRITE(self.stagnation_count);
         READWRITE(self.growth_delta);
+        READWRITE(self.difficulty_delta);
         READWRITE(self.timestamp);
         READWRITE(self.miner_pubkey);
         READWRITE(self.signature);

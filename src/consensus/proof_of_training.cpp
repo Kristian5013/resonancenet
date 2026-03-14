@@ -79,9 +79,19 @@ bool verify_pot_header(const primitives::CBlockHeader& header,
         return false;
     }
 
-    // 5. Regression bound — a block may report higher loss than its parent
-    //    (stagnation), but more than 2x regression is implausible and could
-    //    manipulate stagnation counters or growth triggers.
+    // 5. Minimum improvement — the block must reduce loss by at least
+    //    the current difficulty_delta.  This is the core PoT difficulty
+    //    mechanism that targets 10-minute block intervals.
+    //
+    //    required: prev_val_loss - val_loss >= difficulty_delta
+    //
+    if (header.prev_val_loss - header.val_loss < header.difficulty_delta) {
+        state.invalid("pot-insufficient-improvement");
+        return false;
+    }
+
+    // 5b. Regression bound — more than 2x regression is implausible and
+    //     could manipulate stagnation counters or growth triggers.
     if (header.val_loss > 2.0f * header.prev_val_loss) {
         state.invalid("pot-loss-regression");
         return false;
@@ -142,6 +152,76 @@ bool verify_pot_training(const primitives::CBlockHeader& /*header*/,
                          const ConsensusParams& /*params*/) {
     // TODO(pot): Implement full GPU-based training replay verification.
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// is_retarget_height
+// ---------------------------------------------------------------------------
+// Returns true if @p height falls on a difficulty adjustment boundary.
+// Height 0 (genesis) is never a retarget.
+// ---------------------------------------------------------------------------
+bool is_retarget_height(uint64_t height, const ConsensusParams& params) {
+    if (height == 0) return false;
+    return (height % static_cast<uint64_t>(params.difficulty_adjustment_interval)) == 0;
+}
+
+// ---------------------------------------------------------------------------
+// compute_next_difficulty
+// ---------------------------------------------------------------------------
+// Adaptive retarget algorithm (consensus-critical).
+//
+// At every retarget boundary (height % interval == 0):
+//
+//   expected = interval * target_block_time       (e.g. 20 * 600 = 12'000 s)
+//   actual   = parent_ts - period_start_ts
+//   ratio    = actual / expected
+//   ratio    = clamp(ratio, 1/max_adj, max_adj)   (1/4 .. 4)
+//   new_delta = prev_delta * ratio
+//   new_delta = clamp(new_delta, min_delta, max_delta)
+//
+// Between boundaries the delta carries forward unchanged.
+// Genesis always returns genesis_difficulty_delta.
+// ---------------------------------------------------------------------------
+float compute_next_difficulty(uint64_t height,
+                              float parent_delta,
+                              uint64_t period_start_ts,
+                              uint64_t parent_ts,
+                              const ConsensusParams& params) {
+    // 1. Genesis block: use the genesis preset.
+    if (height == 0) {
+        return params.genesis_difficulty_delta;
+    }
+
+    // 2. Non-retarget block: carry forward parent's delta.
+    if (!is_retarget_height(height, params)) {
+        return parent_delta;
+    }
+
+    // 3. Retarget: compare actual elapsed time to expected.
+    const int64_t expected = static_cast<int64_t>(params.difficulty_adjustment_interval)
+                           * params.target_block_time;
+
+    int64_t actual = static_cast<int64_t>(parent_ts)
+                   - static_cast<int64_t>(period_start_ts);
+
+    // 4. Guard against zero/negative elapsed (clock issues).
+    if (actual < 1) actual = 1;
+
+    // 5. Compute ratio and clamp to [1/max_adj, max_adj].
+    //    ratio > 1 means blocks too slow → decrease delta (easier)
+    //    ratio < 1 means blocks too fast → increase delta (harder)
+    double ratio = static_cast<double>(actual) / static_cast<double>(expected);
+    const double max_adj = static_cast<double>(params.difficulty_adjustment_max);
+    ratio = std::clamp(ratio, 1.0 / max_adj, max_adj);
+
+    // 6. Apply ratio to previous delta.
+    float new_delta = static_cast<float>(static_cast<double>(parent_delta) * ratio);
+
+    // 7. Clamp to absolute bounds.
+    new_delta = std::clamp(new_delta, params.min_difficulty_delta,
+                                      params.max_difficulty_delta);
+
+    return new_delta;
 }
 
 } // namespace rnet::consensus

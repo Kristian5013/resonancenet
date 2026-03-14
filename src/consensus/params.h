@@ -33,8 +33,16 @@ struct ConsensusParams {
     // --- Proof-of-Training ---
     float loss_verify_tolerance = 0.02f;
     int min_steps_per_block = 100;
-    int max_steps_per_block = 50000;
+    int max_steps_per_block = 50'000;
     int eval_batches = 20;
+
+    // --- Difficulty / block timing ---
+    int64_t target_block_time = 600;               // seconds (10 minutes)
+    int difficulty_adjustment_interval = 20;        // blocks per retarget
+    float genesis_difficulty_delta = 0.001f;        // initial min loss improvement
+    float min_difficulty_delta = 1.0e-8f;           // floor (prevents zero)
+    float max_difficulty_delta = 10.0f;             // ceiling
+    float difficulty_adjustment_max = 4.0f;         // max retarget factor per period
 
     /// Consensus-pinned dataset hash. Blocks must train on a dataset matching
     /// this hash. Zero means "no dataset pinning" (used in regtest).

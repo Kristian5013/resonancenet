@@ -43,6 +43,7 @@ std::vector<uint8_t> CBlockHeader::serialize_unsigned() const
     core::Serialize(ss, kernel_sizes);
     core::Serialize(ss, stagnation_count);
     core::Serialize(ss, growth_delta);
+    core::Serialize(ss, difficulty_delta);
     core::Serialize(ss, timestamp);
     core::Serialize(ss, miner_pubkey);
 

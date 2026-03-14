@@ -188,14 +188,15 @@ Result<SolverResult> TrainingSolver::solve(
              (val_loss < parent_loss) ? "YES" : "NO",
              timer.elapsed_sec());
 
-    // 6. Accept if val_loss < parent_val_loss (block found).
+    // 6. Accept only if improvement meets difficulty threshold.
     //
-    //    val_loss_new < val_loss_parent  =>  improvement > 0
+    //    required: parent_loss - val_loss >= difficulty_delta
     //
-    if (val_loss >= parent_loss) {
-        return Result<SolverResult>::err("no improvement: val_loss=" +
-            std::to_string(val_loss) + " >= parent_loss=" +
-            std::to_string(parent_loss));
+    const float delta = parent_loss - val_loss;
+    if (delta < parent_header.difficulty_delta) {
+        return Result<SolverResult>::err("insufficient improvement: delta=" +
+            std::to_string(delta) + " < required=" +
+            std::to_string(parent_header.difficulty_delta));
     }
 
     // 7. Save checkpoint and compute Keccak-256d hash.

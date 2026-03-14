@@ -52,6 +52,9 @@ primitives::CBlock create_genesis_block(const ConsensusParams& params)
     block.stagnation_count = 0;
     block.growth_delta = 0;
 
+    // 4b. Initial difficulty delta
+    block.difficulty_delta = params.genesis_difficulty_delta;
+
     // 5. Miner pubkey and signature are zero (genesis is unsigned)
     block.miner_pubkey = {};
     block.signature = {};
