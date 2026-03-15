@@ -476,13 +476,31 @@ int main(int argc, char* argv[])
     }
 
     // 1. Build auth header.
+    //    Priority: explicit user/pass > explicit cookie file > default cookie path.
     std::string auth;
     if (!cfg.rpcuser.empty()) {
         auth = base64_encode(cfg.rpcuser + ":" + cfg.rpcpassword);
-    } else if (!cfg.cookie_file.empty()) {
-        std::string cookie = read_cookie_file(cfg.cookie_file);
-        if (!cookie.empty()) {
-            auth = base64_encode(cookie);
+    } else {
+        // Auto-detect cookie file if not specified.
+        std::string cookie_path = cfg.cookie_file;
+        if (cookie_path.empty()) {
+#ifdef _WIN32
+            const char* appdata = std::getenv("APPDATA");
+            if (appdata) {
+                cookie_path = std::string(appdata) + "\\ResonanceNet\\.cookie";
+            }
+#else
+            const char* home = std::getenv("HOME");
+            if (home) {
+                cookie_path = std::string(home) + "/.resonancenet/.cookie";
+            }
+#endif
+        }
+        if (!cookie_path.empty()) {
+            std::string cookie = read_cookie_file(cookie_path);
+            if (!cookie.empty()) {
+                auth = base64_encode(cookie);
+            }
         }
     }
 
