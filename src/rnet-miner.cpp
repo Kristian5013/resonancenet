@@ -519,7 +519,7 @@ static int run_mining_loop(const MinerCliConfig& cfg)
         }
 
         std::string height_str    = extract_json_field(result_json, "height");
-        std::string val_loss_str  = extract_json_field(result_json, "val_loss");
+        std::string val_loss_str  = extract_json_field(result_json, "current_val_loss");
         std::string diff_str      = extract_json_field(result_json, "difficulty_delta");
         std::string ckpt_hash_str = extract_json_field(result_json, "checkpoint_hash");
         std::string d_model_str   = extract_json_field(result_json, "d_model");
