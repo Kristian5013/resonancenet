@@ -824,6 +824,28 @@ Result<void> init_rpc(NodeContext& ctx)
             s_auto_wallet = std::move(load_result.value());
             rpc::set_rpc_wallet(s_auto_wallet.get());
             LogPrintf("Wallet loaded: %s", wallet_path.string().c_str());
+
+            // Rescan existing blocks for wallet-relevant outputs.
+            if (ctx.chainstate) {
+                int tip_height = ctx.chainstate->height();
+                if (tip_height > 0) {
+                    int found = 0;
+                    for (int h = 1; h <= tip_height; ++h) {
+                        auto* idx = ctx.chainstate->get_block_by_height(h);
+                        if (!idx || idx->file_number < 0) continue;
+                        chain::DiskBlockPos dpos;
+                        dpos.file_number = idx->file_number;
+                        dpos.pos = idx->data_pos;
+                        auto br = ctx.chainstate->storage().read_block(dpos);
+                        if (br.is_ok()) {
+                            s_auto_wallet->scan_block(br.value());
+                            ++found;
+                        }
+                    }
+                    LogPrintf("Wallet rescan: scanned %d blocks up to height %d",
+                              found, tip_height);
+                }
+            }
         } else {
             LogPrintf("Warning: could not load wallet: %s", load_result.error().c_str());
         }
