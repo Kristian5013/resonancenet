@@ -57,14 +57,14 @@ static std::string read_text_file(const char* path)
 // ---------------------------------------------------------------------------
 // write_tokens
 // ---------------------------------------------------------------------------
-static bool write_tokens(const char* path, const uint16_t* data, size_t count)
+static bool write_tokens(const char* path, const int32_t* data, size_t count)
 {
     FILE* f = fopen(path, "wb");
     if (!f) {
         fprintf(stderr, "Error: cannot open output file: %s\n", path);
         return false;
     }
-    fwrite(data, sizeof(uint16_t), count, f);
+    fwrite(data, sizeof(int32_t), count, f);
     fclose(f);
     return true;
 }
@@ -108,9 +108,9 @@ int main(int argc, char* argv[])
     //    Vocab size = 256, fits in uint16.  This is simple but effective
     //    for initial training.  GPT-2 BPE tokenizer can be added later.
     printf("Tokenizing (byte-level, vocab=256)...\n");
-    std::vector<uint16_t> tokens(text.size());
+    std::vector<int32_t> tokens(text.size());
     for (size_t i = 0; i < text.size(); ++i) {
-        tokens[i] = static_cast<uint16_t>(static_cast<uint8_t>(text[i]));
+        tokens[i] = static_cast<int32_t>(static_cast<uint8_t>(text[i]));
     }
     printf("Total tokens: %zu\n", tokens.size());
 
@@ -137,15 +137,15 @@ int main(int argc, char* argv[])
 
         if (!write_tokens(train_path, tokens.data(), train_count)) return 1;
         printf("Train: %s (%zu tokens, %.1f MB)\n", train_path, train_count,
-               static_cast<double>(train_count * 2) / (1024.0 * 1024.0));
+               static_cast<double>(train_count * 4) / (1024.0 * 1024.0));
 
         if (!write_tokens(val_path, tokens.data() + train_count, val_count)) return 1;
         printf("Val:   %s (%zu tokens, %.1f MB)\n", val_path, val_count,
-               static_cast<double>(val_count * 2) / (1024.0 * 1024.0));
+               static_cast<double>(val_count * 4) / (1024.0 * 1024.0));
     } else {
         if (!write_tokens(train_path, tokens.data(), tokens.size())) return 1;
         printf("Output: %s (%zu tokens, %.1f MB)\n", train_path, tokens.size(),
-               static_cast<double>(tokens.size() * 2) / (1024.0 * 1024.0));
+               static_cast<double>(tokens.size() * 4) / (1024.0 * 1024.0));
     }
 
     printf("Done.\n");
