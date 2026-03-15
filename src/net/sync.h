@@ -105,6 +105,10 @@ private:
     /// Request blocks from peers
     void request_blocks();
 
+    /// Send a "getblocks" message to request missing blocks from a peer.
+    /// The peer will respond with sequential "block" messages directly.
+    void request_getblocks(uint64_t peer_id);
+
     /// Select the best peer for header sync
     uint64_t select_header_sync_peer();
 

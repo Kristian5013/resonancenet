@@ -34,8 +34,11 @@ BlockSync::~BlockSync() {
 // ---------------------------------------------------------------------------
 
 void BlockSync::start() {
-    stage_.store(SyncStage::DOWNLOADING_HEADERS);
-    LogPrintf("Block sync started");
+    auto expected = SyncStage::NOT_STARTED;
+    if (!stage_.compare_exchange_strong(expected, SyncStage::DOWNLOADING_BLOCKS)) {
+        return;  // already running
+    }
+    LogPrintf("Block sync started (direct block download)");
 }
 
 void BlockSync::stop() {
@@ -92,11 +95,17 @@ void BlockSync::on_headers(CPeer& peer,
 
 // ---------------------------------------------------------------------------
 // on_block
-//
-// Design: removes the block from in-flight tracking, accepts it into
-// the chain state, and either completes IBD or requests more blocks.
 // ---------------------------------------------------------------------------
-
+// Called after a block has been accepted into the chain by the
+// on_new_block_ callback (init.cpp step 11).  The block is already
+// validated and stored -- this method only tracks IBD progress and
+// requests the next batch of blocks when the current one is exhausted.
+//
+// Steps:
+//   1. Remove the block from in-flight tracking
+//   2. Check if IBD is complete (our height >= peer's announced height)
+//   3. If not complete, send another getblocks to continue downloading
+// ---------------------------------------------------------------------------
 void BlockSync::on_block(CPeer& peer, const primitives::CBlock& block) {
     LOCK(cs_sync_);
 
@@ -109,29 +118,25 @@ void BlockSync::on_block(CPeer& peer, const primitives::CBlock& block) {
         pit->second.erase(hash);
     }
 
-    // 2. Accept the block
-    auto result = chainstate_.accept_block(block);
-    if (result.is_err()) {
-        LogPrint(NET,"Peer %llu sent invalid block: %s",
-                 static_cast<unsigned long long>(peer.id),
-                 result.error().c_str());
-        peer.misbehaving(100, "invalid block");
+    int current_height = chainstate_.height();
+
+    LogDebug(NET, "IBD on_block: height=%d best_header=%d peer=%llu",
+             current_height, best_header_height_,
+             static_cast<unsigned long long>(peer.id));
+
+    // 2. Check if IBD is complete
+    if (current_height >= best_header_height_) {
+        stage_.store(SyncStage::SYNCED);
+        LogPrintf("Initial block download complete at height %d",
+                  current_height);
         return;
     }
 
-    LogPrintf("Accepted block height=%d from peer %llu",
-             result.value()->height,
-             static_cast<unsigned long long>(peer.id));
-
-    // 3. Request more blocks if needed
+    // 3. Request next batch of blocks from the sync peer
     if (blocks_in_flight_.empty()) {
-        if (chainstate_.height() >= best_header_height_) {
-            stage_.store(SyncStage::SYNCED);
-            LogPrintf("Initial block download complete at height %d",
-                      chainstate_.height());
-        } else {
-            request_blocks();
-        }
+        uint64_t sync_peer = (header_sync_peer_ != 0)
+                                 ? header_sync_peer_ : peer.id;
+        request_getblocks(sync_peer);
     }
 }
 
@@ -141,11 +146,19 @@ void BlockSync::on_block(CPeer& peer, const primitives::CBlock& block) {
 
 // ---------------------------------------------------------------------------
 // on_new_peer
-//
-// Design: updates the best known header height and, if we still need
-// headers and have no sync peer, assigns this peer for header sync.
 // ---------------------------------------------------------------------------
-
+// Handles a new peer connection during IBD.
+//
+// If the peer has a higher chain than ours, sends a "getblocks" message
+// to request the missing blocks directly.  The peer will respond with
+// sequential "block" messages that are accepted via the normal
+// process_block -> on_new_block_ -> accept_block() path.
+//
+// Steps:
+//   1. Update the best known peer height
+//   2. If we are downloading blocks and have no sync peer, assign this one
+//   3. Send a getblocks request to start fetching missing blocks
+// ---------------------------------------------------------------------------
 void BlockSync::on_new_peer(CPeer& peer) {
     LOCK(cs_sync_);
 
@@ -154,11 +167,13 @@ void BlockSync::on_new_peer(CPeer& peer) {
         best_header_height_ = peer.start_height;
     }
 
-    // 2. If we need headers and don't have a sync peer, use this one
-    if (stage_.load() == SyncStage::DOWNLOADING_HEADERS &&
+    // 2. If downloading and no sync peer yet, assign this one
+    if (stage_.load() == SyncStage::DOWNLOADING_BLOCKS &&
         header_sync_peer_ == 0) {
         header_sync_peer_ = peer.id;
-        request_headers(peer);
+
+        // 3. Send getblocks to start fetching missing blocks
+        request_getblocks(peer.id);
     }
 }
 
@@ -329,6 +344,43 @@ uint64_t BlockSync::select_header_sync_peer() {
 
 bool BlockSync::needs_more_headers() const {
     return chainstate_.height() < best_header_height_;
+}
+
+// ---------------------------------------------------------------------------
+// request_getblocks
+// ---------------------------------------------------------------------------
+// Sends a "getblocks" message to a specific peer to request missing blocks.
+//
+// Builds a locator with our current chain tip hash and an empty stop hash.
+// The peer's process_getblocks handler will respond by sending sequential
+// "block" messages for each block after our tip, up to 500 at a time.
+//
+// Steps:
+//   1. Get our current tip hash for the locator
+//   2. Serialize the getblocks payload (version + locator + stop_hash)
+//   3. Send to the designated sync peer
+// ---------------------------------------------------------------------------
+void BlockSync::request_getblocks(uint64_t peer_id) {
+    // 1. Get our current tip hash for the locator
+    auto* tip = chainstate_.tip();
+    if (!tip) return;
+    rnet::uint256 locator_hash = tip->block_hash;
+
+    // 2. Serialize the getblocks payload
+    core::DataStream ss;
+    core::ser_write_i32(ss, static_cast<int32_t>(PROTOCOL_VERSION));
+    core::serialize_compact_size(ss, 1);  // locator count = 1
+    locator_hash.serialize(ss);
+    rnet::uint256 stop_hash;             // zero = no stop, get everything
+    stop_hash.serialize(ss);
+
+    // 3. Send to the designated sync peer
+    connman_.send_to(peer_id, msg::GETBLOCKS, ss.span());
+
+    LogPrintf("Sent getblocks to peer %llu (our tip height=%d hash=%s)",
+             static_cast<unsigned long long>(peer_id),
+             tip->height,
+             locator_hash.to_hex().substr(0, 16).c_str());
 }
 
 } // namespace rnet::net

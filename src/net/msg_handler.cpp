@@ -414,8 +414,17 @@ void MsgHandler::process_notfound(CConnection& conn,
 // Handles an incoming "getblocks" request.
 //
 // Reads a block locator (up to 101 hashes) and a stop-hash, resolves
-// them via get_block_hashes_(), and replies with an "inv" message
-// containing up to 500 block hashes.
+// them via get_block_hashes_(), and sends the actual block data directly
+// as sequential "block" messages.  This enables simplified Initial Block
+// Download (IBD) without requiring the inv -> getdata round-trip.
+//
+// Steps:
+//   1. Read and discard the protocol version field
+//   2. Read and validate the locator hash count
+//   3. Deserialize the locator hashes
+//   4. Read the stop hash
+//   5. Resolve the locator to a list of block hashes (up to 500)
+//   6. For each hash, look up the serialized block data and send it
 // ---------------------------------------------------------------------------
 void MsgHandler::process_getblocks(CConnection& conn,
                                    const std::string& /*cmd*/,
@@ -454,17 +463,20 @@ void MsgHandler::process_getblocks(CConnection& conn,
     auto hashes = get_block_hashes_(locator, stop_hash, 500);
     if (hashes.empty()) return;
 
-    // 6. Send an inv message with the resulting block hashes.
-    core::DataStream inv_payload;
-    core::serialize_compact_size(inv_payload, hashes.size());
+    // 6. Send each block directly as a "block" message for IBD.
+    size_t blocks_sent = 0;
     for (const auto& h : hashes) {
-        CInv inv(InvType::INV_BLOCK, h);
-        inv.serialize(inv_payload);
+        if (!get_block_data_) break;
+        auto data = get_block_data_(h);
+        if (!data.empty()) {
+            conn.send_message(msg::BLOCK,
+                std::span<const uint8_t>(data.data(), data.size()));
+            ++blocks_sent;
+        }
     }
-    conn.send_message(msg::INV, inv_payload.span());
 
-    LogDebug(NET, "Sent %zu block inv to peer %llu",
-             hashes.size(),
+    LogPrint(NET, "Sent %zu blocks (of %zu requested) to peer %llu",
+             blocks_sent, hashes.size(),
              static_cast<unsigned long long>(conn.id()));
 }
 
