@@ -404,13 +404,15 @@ static JsonValue rpc_submittrainingblock(const RPCRequest& req,
         block.timestamp = tip->timestamp + 1;
     }
 
-    // 6. Enforce minimum block interval.
-    uint64_t earliest = tip->timestamp
-                      + static_cast<uint64_t>(params.min_block_interval);
-    if (block.timestamp < earliest) {
-        return make_rpc_error(RPC_VERIFY_ERROR,
-            "block too soon: must wait until timestamp >= " +
-            std::to_string(earliest));
+    // 6. Enforce minimum block interval (skip for first block after genesis).
+    if (block.height > 1) {
+        uint64_t earliest = tip->timestamp
+                          + static_cast<uint64_t>(params.min_block_interval);
+        if (block.timestamp < earliest) {
+            return make_rpc_error(RPC_VERIFY_ERROR,
+                "block too soon: must wait until timestamp >= " +
+                std::to_string(earliest));
+        }
     }
 
     // 7. PoT fields from the submitted training proof.

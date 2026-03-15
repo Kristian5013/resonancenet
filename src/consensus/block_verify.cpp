@@ -221,9 +221,10 @@ bool check_block_header(const primitives::CBlockHeader& header,
     }
 
     // 3b. Minimum block interval — no block can arrive faster than
-    //     target_block_time.  Guarantees the first block takes ~10 min.
-    //     Default: 600 seconds (10 minutes) on mainnet.
-    if (header.timestamp < parent.timestamp + static_cast<uint64_t>(params.min_block_interval)) {
+    //     target_block_time.  Skip for the first block after genesis
+    //     (height == 1) — like Bitcoin, no interval enforced on block 1.
+    if (header.height > 1 &&
+        header.timestamp < parent.timestamp + static_cast<uint64_t>(params.min_block_interval)) {
         state.invalid("bad-timestamp-too-soon");
         return false;
     }
