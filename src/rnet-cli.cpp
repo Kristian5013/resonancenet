@@ -442,13 +442,14 @@ static CliConfig parse_cli_args(int argc, char* argv[])
 // ---------------------------------------------------------------------------
 static std::string read_cookie_file(const std::string& path)
 {
-    FILE* f = fopen(path.c_str(), "r");
+    FILE* f = fopen(path.c_str(), "rb");
     if (!f) return "";
     std::array<char, 512> buf{};
     size_t n = fread(buf.data(), 1, buf.size() - 1, f);
     fclose(f);
-    buf[n] = '\0';
-    return std::string(buf.data());
+    // Strip trailing \r\n or \n.
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) --n;
+    return std::string(buf.data(), n);
 }
 
 // ===========================================================================
