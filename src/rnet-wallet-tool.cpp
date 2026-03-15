@@ -36,7 +36,7 @@ static void print_usage()
         "Usage: rnet-wallet-tool [options] <command>\n"
         "\n"
         "Commands:\n"
-        "  create <path>              Create a new wallet at the given path\n"
+        "  create [path]              Create a new wallet (default: data dir)\n"
         "  info <path>                Display wallet information\n"
         "  dump <path>                Dump wallet keys (requires unlock)\n"
         "  encrypt <path>             Encrypt an unencrypted wallet\n"
@@ -110,16 +110,47 @@ static primitives::NetworkType parse_network(const std::string& net)
 // Creates a new wallet file, optionally encrypts it, displays the BIP39
 // mnemonic for backup, and generates the first receive address.
 // ---------------------------------------------------------------------------
-static int cmd_create(const WalletToolConfig& cfg)
+static int cmd_create(WalletToolConfig cfg)
 {
+    // 1. Default wallet path if none given.
     if (cfg.path.empty()) {
-        fprintf(stderr, "Error: wallet path required\n");
+#ifdef _WIN32
+        const char* appdata = std::getenv("APPDATA");
+        if (appdata) {
+            cfg.path = std::string(appdata) + "\\ResonanceNet\\wallet.dat";
+        } else {
+            cfg.path = "wallet.dat";
+        }
+#else
+        const char* home = std::getenv("HOME");
+        if (home) {
+            cfg.path = std::string(home) + "/.resonancenet/wallet.dat";
+        } else {
+            cfg.path = "wallet.dat";
+        }
+#endif
+        printf("Using default wallet path: %s\n", cfg.path.c_str());
+    }
+
+    // 2. Create parent directory if it does not exist.
+    auto parent = std::filesystem::path(cfg.path).parent_path();
+    if (!parent.empty() && !std::filesystem::exists(parent)) {
+        std::filesystem::create_directories(parent);
+    }
+
+    // 3. Reject if a file (not directory) already exists at this path.
+    if (std::filesystem::exists(cfg.path) && !std::filesystem::is_directory(cfg.path)) {
+        fprintf(stderr, "Error: wallet already exists at '%s'\n", cfg.path.c_str());
         return 1;
     }
 
-    if (std::filesystem::exists(cfg.path)) {
-        fprintf(stderr, "Error: wallet already exists at '%s'\n", cfg.path.c_str());
-        return 1;
+    // 4. If user gave a directory, append wallet.dat.
+    if (std::filesystem::exists(cfg.path) && std::filesystem::is_directory(cfg.path)) {
+        cfg.path = (std::filesystem::path(cfg.path) / "wallet.dat").string();
+        if (std::filesystem::exists(cfg.path)) {
+            fprintf(stderr, "Error: wallet already exists at '%s'\n", cfg.path.c_str());
+            return 1;
+        }
     }
 
     auto network = parse_network(cfg.network);
