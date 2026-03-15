@@ -4,6 +4,8 @@
 
 #include "rpc/mining.h"
 
+#include "rpc/wallet_rpc.h"
+#include "wallet/wallet.h"
 #include "chain/chainstate.h"
 #include "consensus/block_reward.h"
 #include "consensus/growth_policy.h"
@@ -197,7 +199,13 @@ static JsonValue rpc_submitblock(const RPCRequest& req,
     LogPrint(RPC, "Block submitted via RPC: height=%d",
              result.value()->height);
 
-    // 6. Success returns null (Bitcoin convention).
+    // 6. Scan the block for wallet-relevant outputs.
+    auto* wallet = get_rpc_wallet();
+    if (wallet) {
+        wallet->scan_block(block);
+    }
+
+    // 7. Success returns null (Bitcoin convention).
     return JsonValue();
 }
 
@@ -320,6 +328,12 @@ static JsonValue rpc_generate(const RPCRequest& req,
         if (result.is_err()) {
             return make_rpc_error(RPC_VERIFY_ERROR,
                 "generate block " + std::to_string(i) + " failed: " + result.error());
+        }
+
+        // 11. Scan the block for wallet-relevant outputs.
+        auto* gen_wallet = get_rpc_wallet();
+        if (gen_wallet) {
+            gen_wallet->scan_block(block);
         }
 
         auto bhash = block.hash();
@@ -524,17 +538,23 @@ static JsonValue rpc_submittrainingblock(const RPCRequest& req,
         return resp;
     }
 
-    // 14. Log the accepted block.
+    // 14. Scan the block for wallet-relevant outputs.
+    auto* stb_wallet = get_rpc_wallet();
+    if (stb_wallet) {
+        stb_wallet->scan_block(block);
+    }
+
+    // 15. Log the accepted block.
     auto bhash = block.hash();
     LogPrintf("SubmitTrainingBlock ACCEPTED: height=%d hash=%s "
               "val_loss=%.6f d_model=%u",
               block.height, bhash.to_hex().c_str(),
               static_cast<double>(block.val_loss), block.d_model);
 
-    // 15. Broadcast to peers via the new-tip signal.
+    // 16. Broadcast to peers via the new-tip signal.
     //     The on_new_tip signal is fired by accept_block internally.
 
-    // 16. Return result.
+    // 17. Return result.
     JsonValue resp = JsonValue::object();
     resp.set("accepted", JsonValue(true));
     resp.set("hash", JsonValue(bhash.to_hex()));

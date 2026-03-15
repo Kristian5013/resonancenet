@@ -9,6 +9,7 @@
 #include "wallet/spend.h"
 
 #include <chrono>
+#include <cstring>
 
 namespace rnet::wallet {
 
@@ -248,6 +249,67 @@ bool CWallet::is_mine(const std::string& address) const {
 // ---------------------------------------------------------------------------
 bool CWallet::is_mine_hash(const uint160& pubkey_hash) const {
     return addresses_.is_mine_hash(pubkey_hash);
+}
+
+// -- Block scanning ---------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// scan_block
+// ---------------------------------------------------------------------------
+// Checks every transaction output in the block for scriptPubKeys that
+// match this wallet's addresses.  Matching outputs are added to the
+// coin tracker as new UTXOs.
+//
+// Supports P2WPKH outputs (format: [0x00][0x14][20-byte pubkey_hash]).
+// Coinbase outputs are tracked with their block height so the balance
+// calculator can enforce maturity rules.
+// ---------------------------------------------------------------------------
+void CWallet::scan_block(const primitives::CBlock& block) {
+    LOCK(mutex_);
+
+    // 1. Iterate over every transaction in the block.
+    for (const auto& tx : block.vtx) {
+        if (!tx) continue;
+
+        // 2. Iterate over every output in the transaction.
+        for (uint32_t vout_idx = 0; vout_idx < tx->vout().size(); ++vout_idx) {
+            const auto& txout = tx->vout()[vout_idx];
+
+            // 3. Extract pubkey hash from P2WPKH scripts: [0x00][0x14][20 bytes].
+            if (!txout.is_p2wpkh()) continue;
+
+            uint160 pubkey_hash;
+            std::memcpy(pubkey_hash.data(),
+                        txout.script_pub_key.data() + 2, 20);
+
+            // 4. Check if this pubkey hash belongs to our wallet.
+            if (!keys_.have_key(pubkey_hash)) continue;
+
+            // 5. Build the WalletCoin and add it.
+            WalletCoin coin;
+            coin.outpoint = primitives::COutPoint(tx->txid(), vout_idx);
+            coin.txout = txout;
+            coin.height = block.height;
+            coin.pubkey_hash = pubkey_hash;
+            coin.is_spent = false;
+            coin.is_change = false;
+            coin.creation_time = static_cast<int64_t>(block.timestamp);
+
+            // 6. Skip if we already have this coin (idempotent).
+            if (coins_.have_coin(coin.outpoint)) continue;
+
+            // 7. Add the coin and notify listeners.
+            auto result = coins_.add_coin(coin);
+            if (result) {
+                notifier_.notify_tx_received(
+                    coin.outpoint.hash, coin.txout.value, "");
+                LogPrint(WALLET,
+                    "scan_block: found UTXO %s:%u amount=%lld height=%d",
+                    tx->txid().to_hex().c_str(), vout_idx,
+                    static_cast<long long>(txout.value), block.height);
+            }
+        }
+    }
 }
 
 // -- Balance and coin management --------------------------------------------

@@ -8,6 +8,7 @@
 #include "core/sync.h"
 #include "core/types.h"
 #include "primitives/address.h"
+#include "primitives/block.h"
 #include "primitives/transaction.h"
 #include "wallet/addresses.h"
 #include "wallet/balance.h"
@@ -74,6 +75,11 @@ public:
 
     /// Get wallet balance.
     WalletBalance get_balance(int32_t current_height) const;
+
+    // ─── Block scanning ─────────────────────────────────────────────
+
+    /// Scan a block for outputs matching wallet addresses and add as UTXOs.
+    void scan_block(const primitives::CBlock& block);
 
     // ─── UTXO management ────────────────────────────────────────────
 

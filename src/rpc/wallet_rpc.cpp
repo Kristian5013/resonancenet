@@ -39,6 +39,11 @@ void set_rpc_wallet(wallet::CWallet* w) {
     g_wallet = w;
 }
 
+wallet::CWallet* get_rpc_wallet() {
+    // 1. Return the globally registered wallet pointer
+    return g_wallet;
+}
+
 static wallet::CWallet* get_wallet(node::NodeContext& /*ctx*/) {
     // 1. Return the globally registered wallet pointer
     return g_wallet;
