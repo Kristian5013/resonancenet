@@ -16,6 +16,8 @@
 #include "core/stream.h"
 #include "core/time.h"
 #include "mempool/pool.h"
+#include "net/conn_manager.h"
+#include "net/protocol.h"
 #include "node/context.h"
 #include "primitives/address.h"
 #include "primitives/block.h"
@@ -205,7 +207,16 @@ static JsonValue rpc_submitblock(const RPCRequest& req,
         wallet->scan_block(block);
     }
 
-    // 7. Success returns null (Bitcoin convention).
+    // 7. Broadcast the accepted block to all connected peers.
+    if (ctx.connman) {
+        core::DataStream blk_ss;
+        block.serialize(blk_ss);
+        ctx.connman->broadcast(net::msg::BLOCK, blk_ss.span());
+        LogPrintf("Broadcast submitblock height=%d (%zu bytes) to peers",
+                 result.value()->height, blk_ss.size());
+    }
+
+    // 8. Success returns null (Bitcoin convention).
     return JsonValue();
 }
 
@@ -334,6 +345,13 @@ static JsonValue rpc_generate(const RPCRequest& req,
         auto* gen_wallet = get_rpc_wallet();
         if (gen_wallet) {
             gen_wallet->scan_block(block);
+        }
+
+        // 12. Broadcast the generated block to all connected peers.
+        if (ctx.connman) {
+            core::DataStream blk_ss;
+            block.serialize(blk_ss);
+            ctx.connman->broadcast(net::msg::BLOCK, blk_ss.span());
         }
 
         auto bhash = block.hash();
@@ -551,8 +569,14 @@ static JsonValue rpc_submittrainingblock(const RPCRequest& req,
               block.height, bhash.to_hex().c_str(),
               static_cast<double>(block.val_loss), block.d_model);
 
-    // 16. Broadcast to peers via the new-tip signal.
-    //     The on_new_tip signal is fired by accept_block internally.
+    // 16. Broadcast the full block to all connected peers.
+    if (ctx.connman) {
+        core::DataStream blk_ss;
+        block.serialize(blk_ss);
+        ctx.connman->broadcast(net::msg::BLOCK, blk_ss.span());
+        LogPrintf("Broadcast training block height=%d (%zu bytes) to peers",
+                 block.height, blk_ss.size());
+    }
 
     // 17. Return result.
     JsonValue resp = JsonValue::object();

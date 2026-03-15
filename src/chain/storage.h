@@ -55,6 +55,10 @@ public:
     /// Prune old block files up to the given target size (bytes)
     Result<void> prune_to_size(uint64_t target_bytes);
 
+    /// Scan all block files and return every stored block in order.
+    /// Used at startup to rebuild the in-memory block index.
+    Result<std::vector<primitives::CBlock>> scan_block_files() const;
+
     /// Get the blocks directory path
     const core::fs::path& blocks_dir() const { return blocks_dir_; }
 

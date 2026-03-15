@@ -349,6 +349,13 @@ Result<void> init_chain(NodeContext& ctx)
         return Result<void>::err("Failed to load genesis: " + genesis_res.error());
     }
 
+    // 7. Reload block index from disk (restores chain state across restarts)
+    auto load_res = ctx.chainstate->load_block_index();
+    if (load_res.is_err()) {
+        return Result<void>::err(
+            "Failed to load block index: " + load_res.error());
+    }
+
     LogPrintf("Chain initialised: height=%d", ctx.chainstate->height());
 
     return Result<void>::ok();
@@ -562,7 +569,16 @@ Result<void> init_network(NodeContext& ctx)
                      res.value()->height,
                      static_cast<unsigned long long>(peer_id));
 
-            // 11a. Feed into BlockSync so it can track progress & request more
+            // 11a. Relay the accepted block to all other connected peers.
+            //       Forward the raw serialised bytes we already have,
+            //       skipping the peer that sent us this block.
+            ctx.connman->broadcast_except(peer_id, net::msg::BLOCK,
+                std::span<const uint8_t>(block_data.data(), block_data.size()));
+            LogPrintf("Relayed block height=%d to peers (from peer %llu)",
+                     res.value()->height,
+                     static_cast<unsigned long long>(peer_id));
+
+            // 11b. Feed into BlockSync so it can track progress & request more
             if (ctx.block_sync) {
                 net::CPeer peer;
                 peer.id = peer_id;
@@ -646,23 +662,18 @@ Result<void> init_network(NodeContext& ctx)
     // 15. Register all P2P message handlers
     ctx.msg_handler->register_handlers();
 
-    // 16. Block broadcast: when chainstate connects a new block, announce to peers
+    // 16. Best-height update: when chainstate connects a new block, keep
+    //     ConnManager's advertised height current for VERSION messages.
+    //     Block relay is handled separately:
+    //       - Peer-received blocks: relayed in step 11a via broadcast_except
+    //       - RPC-submitted blocks: broadcast in submitblock / submittrainingblock
     if (ctx.chainstate) {
         ctx.chainstate->on_block_connected.connect(
             [&ctx](const chain::CBlockIndex* pindex) {
                 if (!ctx.connman || !pindex) return;
 
-                // 16a. Update ConnManager best height for version messages
+                // 16a. Update ConnManager best height for version messages.
                 ctx.connman->set_best_height(pindex->height);
-
-                // 16b. Send inv for the new block to all peers
-                net::CInv inv(net::InvType::INV_BLOCK, pindex->block_hash);
-                core::DataStream ss;
-                core::serialize_compact_size(ss, 1);
-                inv.serialize(ss);
-                ctx.connman->broadcast(net::msg::INV, ss.span());
-                LogPrintf("Broadcast block inv height=%d to peers",
-                         pindex->height);
             });
     }
 

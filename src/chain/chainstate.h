@@ -33,6 +33,11 @@ public:
     /// Initialize with genesis block
     Result<void> load_genesis();
 
+    /// Reload block index from disk.
+    /// Reads every stored block, rebuilds block_index_, and sets the tip
+    /// to the highest fully-validated block on the best chain.
+    Result<void> load_block_index();
+
     /// Accept a new block header into the block index.
     /// Validates header against parent. Does not validate transactions.
     Result<CBlockIndex*> accept_block_header(

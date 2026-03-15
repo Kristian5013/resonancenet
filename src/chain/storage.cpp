@@ -187,6 +187,72 @@ Result<primitives::CBlockHeader> BlockStorage::read_block_header(
 }
 
 // ---------------------------------------------------------------------------
+// scan_block_files
+//   Iterates all blk files starting from blk00000.dat, reads every block
+//   sequentially, and returns them in disk order.  Used at startup to
+//   rebuild the in-memory block index from persisted data.
+//
+// Steps:
+//   1. Iterate blk files starting at file 0
+//   2. Open each file and read blocks until EOF
+//   3. Collect all successfully deserialised blocks
+//   4. Return the collected blocks
+// ---------------------------------------------------------------------------
+Result<std::vector<primitives::CBlock>> BlockStorage::scan_block_files() const
+{
+    std::vector<primitives::CBlock> blocks;
+
+    // 1. Iterate blk files starting at file 0
+    for (int file_num = 0; ; ++file_num) {
+        auto path = block_file_path(file_num);
+        std::error_code ec;
+        if (!core::fs::exists(path, ec)) {
+            break;  // no more block files
+        }
+
+        // 2. Open the file
+        FILE* f = nullptr;
+#ifdef _WIN32
+        fopen_s(&f, path.string().c_str(), "rb");
+#else
+        f = std::fopen(path.string().c_str(), "rb");
+#endif
+        if (!f) break;
+
+        // 3. Read blocks sequentially until EOF
+        while (true) {
+            uint32_t size = 0;
+            if (std::fread(&size, 4, 1, f) != 1) {
+                break;  // EOF or read error
+            }
+
+            if (size == 0 || size > 512 * 1024 * 1024) {
+                break;  // invalid size sentinel
+            }
+
+            std::vector<uint8_t> data(size);
+            if (std::fread(data.data(), 1, size, f) != size) {
+                break;  // truncated block
+            }
+
+            // 4. Deserialise the block
+            try {
+                core::DataStream ss(std::move(data));
+                primitives::CBlock block;
+                block.unserialize(ss);
+                blocks.push_back(std::move(block));
+            } catch (...) {
+                break;  // corrupt data, stop scanning this file
+            }
+        }
+
+        std::fclose(f);
+    }
+
+    return Result<std::vector<primitives::CBlock>>::ok(std::move(blocks));
+}
+
+// ---------------------------------------------------------------------------
 // calculate_disk_usage
 //   Sums file sizes across all blk files [0..current_file_].
 // ---------------------------------------------------------------------------

@@ -117,6 +117,10 @@ tar -xf resonancenet-0.1.0-win64.zip
 cd resonancenet-0.1.0-win64
 ```
 
+> **Note:** Windows SmartScreen may show "Unknown publisher" warning on first launch.
+> Click **"More info"** → **"Run anyway"**. This is normal for open-source software
+> without a code signing certificate. You can verify the binaries by building from source.
+
 **Linux / macOS:**
 ```bash
 tar xzf resonancenet-0.1.0-x86_64-linux.tar.gz

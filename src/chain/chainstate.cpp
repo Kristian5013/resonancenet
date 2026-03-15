@@ -104,6 +104,104 @@ Result<void> CChainState::load_genesis() {
     return Result<void>::ok();
 }
 
+// -- Block index loading ----------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// load_block_index
+// ---------------------------------------------------------------------------
+// Scans all block files on disk and rebuilds the in-memory block index so
+// that the chain state survives across rnetd restarts.  Must be called
+// after load_genesis() so the genesis block is already in the index.
+//
+// Steps:
+//   1. Scan all stored blocks from disk
+//   2. Insert each block into the block index with parent linkage
+//   3. Find the best tip using the PoT fork-choice rule
+//   4. Rebuild the active chain from genesis to best tip
+//   5. Log the loaded chain height
+// ---------------------------------------------------------------------------
+Result<void> CChainState::load_block_index() {
+    LOCK(cs_main_);
+
+    // 1. Scan all stored blocks from disk
+    auto scan_result = storage_->scan_block_files();
+    if (!scan_result) {
+        return Result<void>::err(
+            "Failed to scan block files: " + scan_result.error());
+    }
+
+    const auto& blocks = scan_result.value();
+    if (blocks.empty()) {
+        LogPrintf("No blocks found on disk; starting from genesis");
+        return Result<void>::ok();
+    }
+
+    // 2. Insert each block into the block index with parent linkage
+    int loaded = 0;
+    for (const auto& block : blocks) {
+        const auto hash = block.hash();
+
+        // Skip if already in the index (e.g. genesis)
+        if (block_index_.count(hash)) {
+            continue;
+        }
+
+        // Find parent in the index
+        auto parent_it = block_index_.find(block.prev_hash);
+        if (parent_it == block_index_.end()) {
+            LogPrintf("load_block_index: skipping orphan block %s (no parent)",
+                     hash.to_hex().c_str());
+            continue;
+        }
+        auto* parent = parent_it->second.get();
+
+        // Build block index entry
+        auto idx = std::make_unique<CBlockIndex>(
+            static_cast<const primitives::CBlockHeader&>(block));
+        idx->prev = parent;
+        idx->status = CBlockIndex::FULLY_VALIDATED;
+        idx->chain_tx = parent->chain_tx
+                        + static_cast<int64_t>(block.vtx.size());
+
+        auto* raw = idx.get();
+        block_index_[hash] = std::move(idx);
+        ++loaded;
+    }
+
+    // 3. Find the best tip using the PoT fork-choice rule
+    CBlockIndex* best = nullptr;
+    for (const auto& [hash, idx] : block_index_) {
+        if (idx->status >= CBlockIndex::FULLY_VALIDATED) {
+            if (!best || is_better_tip(idx.get(), best)) {
+                best = idx.get();
+            }
+        }
+    }
+
+    if (!best) {
+        return Result<void>::ok();
+    }
+
+    // 4. Rebuild the active chain from genesis to best tip
+    tip_ = best;
+    active_chain_.clear();
+    active_chain_.resize(static_cast<size_t>(best->height) + 1, nullptr);
+
+    CBlockIndex* walk = best;
+    while (walk) {
+        active_chain_[static_cast<size_t>(walk->height)] = walk;
+        walk = walk->prev;
+    }
+
+    coins_cache_.set_best_block(best->block_hash);
+
+    // 5. Log the loaded chain height
+    LogPrintf("Loaded block index: %d blocks, tip height=%d hash=%s",
+             loaded, best->height, best->block_hash.to_hex().c_str());
+
+    return Result<void>::ok();
+}
+
 // -- Header acceptance ------------------------------------------------------
 
 // ---------------------------------------------------------------------------
