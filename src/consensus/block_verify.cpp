@@ -220,14 +220,11 @@ bool check_block_header(const primitives::CBlockHeader& header,
         return false;
     }
 
-    // 3b. Minimum block interval — no block can arrive faster than
-    //     target_block_time.  Skip for the first block after genesis
-    //     (height == 1) — like Bitcoin, no interval enforced on block 1.
-    if (header.height > 1 &&
-        header.timestamp < parent.timestamp + static_cast<uint64_t>(params.min_block_interval)) {
-        state.invalid("bad-timestamp-too-soon");
-        return false;
-    }
+    // 3b. Block timing is regulated purely by difficulty_delta adjustment,
+    //     not by a minimum interval.  Like Bitcoin, any timestamp that
+    //     advances beyond the parent is valid.  The retarget algorithm
+    //     raises difficulty_delta when blocks arrive too fast, naturally
+    //     pushing block times toward the 10-minute target.
 
     // 4. Timestamp must not be too far in the future.
     if (header.timestamp > core::get_time() + 7'200) { // seconds (2 hours)
