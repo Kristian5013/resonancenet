@@ -15,6 +15,7 @@ namespace rnet::net {
     class BlockSync;
     class AddrManager;
     class MsgHandler;
+    class CheckpointStore;
 }
 namespace rnet::consensus { struct ConsensusParams; }
 namespace rnet::core { class ArgsManager; }
@@ -44,6 +45,7 @@ struct NodeContext {
     std::unique_ptr<net::MsgHandler>          msg_handler;
     std::unique_ptr<net::AddrManager>         addrman;
     std::unique_ptr<rpc::RPCServer>           rpc_server;
+    std::unique_ptr<net::CheckpointStore>    checkpoint_store;
 
     // ── Args manager ────────────────────────────────────────────────
 

@@ -9,6 +9,7 @@
 #include "core/serialize.h"
 #include "core/time.h"
 #include "net/addr_man.h"
+#include "net/checkpoint_store.h"
 #include "net/conn_manager.h"
 
 #include <algorithm>
@@ -719,19 +720,64 @@ void MsgHandler::process_reject(CConnection& conn,
 // ---------------------------------------------------------------------------
 // Handles an incoming "checkpoint" message (PoT-specific).
 //
-// Receives a model checkpoint blob from a peer.  The checkpoint hash
-// must be verified and the data stored to disk before the local
-// training state is updated.
+// Receives a model checkpoint blob from a peer.  The payload format is:
+//   [32 bytes]  checkpoint hash
+//   [remaining] raw checkpoint data (.rnet file contents)
+//
+// Steps:
+//   1. Read the 32-byte checkpoint hash from the payload
+//   2. Read the remaining bytes as checkpoint data
+//   3. Verify the data size is plausible (> 0)
+//   4. Save to disk via CheckpointStore
 // ---------------------------------------------------------------------------
 void MsgHandler::process_checkpoint(CConnection& conn,
                                     const std::string& /*cmd*/,
                                     core::DataStream& payload) {
-    LogPrint(NET, "Received checkpoint (%zu bytes) from peer %llu",
-             payload.remaining(),
+    // 1. Validate minimum payload: 32-byte hash + at least 1 byte of data.
+    if (payload.remaining() <= 32) {
+        conn.misbehaving(10, "Undersized checkpoint message");
+        return;
+    }
+
+    // 2. Read the checkpoint hash.
+    rnet::uint256 ckpt_hash;
+    ckpt_hash.unserialize(payload);
+
+    // 3. Read the checkpoint data.
+    size_t data_len = payload.remaining();
+    std::vector<uint8_t> ckpt_data(data_len);
+    payload.read(reinterpret_cast<char*>(ckpt_data.data()), data_len);
+
+    LogPrint(NET, "Received checkpoint %s (%zu bytes) from peer %llu",
+             ckpt_hash.to_hex().substr(0, 16).c_str(),
+             data_len,
              static_cast<unsigned long long>(conn.id()));
 
-    // TODO: Process model checkpoint data
-    // Verify checkpoint hash, store to disk, update training state
+    // 4. Save to disk via the checkpoint store.
+    if (!checkpoint_store_) {
+        LogPrint(NET, "No checkpoint store configured, discarding checkpoint");
+        return;
+    }
+
+    // 5. Skip if we already have this checkpoint.
+    if (checkpoint_store_->has(ckpt_hash)) {
+        LogDebug(NET, "Already have checkpoint %s, ignoring",
+                 ckpt_hash.to_hex().substr(0, 16).c_str());
+        return;
+    }
+
+    // 6. Store the checkpoint data to disk.
+    auto save_rc = checkpoint_store_->save(ckpt_hash, ckpt_data);
+    if (save_rc.is_err()) {
+        LogPrint(NET, "Failed to save checkpoint %s: %s",
+                 ckpt_hash.to_hex().substr(0, 16).c_str(),
+                 save_rc.error().c_str());
+    } else {
+        LogPrintf("Saved checkpoint %s from peer %llu (%zu bytes)",
+                  ckpt_hash.to_hex().substr(0, 16).c_str(),
+                  static_cast<unsigned long long>(conn.id()),
+                  data_len);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -739,31 +785,70 @@ void MsgHandler::process_checkpoint(CConnection& conn,
 // ---------------------------------------------------------------------------
 // Handles an incoming "getcheckpoint" request (PoT-specific).
 //
-// If this node advertises NODE_CHECKPOINT services, reads the requested
-// checkpoint hash and (once implemented) replies with the checkpoint data.
+// Reads the requested checkpoint hash, looks up the file in the local
+// CheckpointStore, and sends the data back as a "checkpoint" message.
+// If the checkpoint is not found locally, sends a "notfound" response
+// with INV_CHECKPOINT type.
+//
+// Steps:
+//   1. Check if this node serves checkpoints (NODE_CHECKPOINT flag)
+//   2. Read the 32-byte checkpoint hash from the payload
+//   3. Look up the checkpoint data on disk
+//   4. Send as a "checkpoint" message (hash + raw data)
+//   5. If not found, send "notfound"
 // ---------------------------------------------------------------------------
 void MsgHandler::process_getchkpt(CConnection& conn,
                                   const std::string& /*cmd*/,
                                   core::DataStream& payload) {
-    LogDebug(NET, "Received getchkpt from peer %llu",
-             static_cast<unsigned long long>(conn.id()));
-
     // 1. Check if we serve checkpoints.
     if (!(connman_.local_services() & NODE_CHECKPOINT)) {
         return;
     }
 
-    // 2. Read the requested checkpoint hash.
-    if (payload.remaining() >= 32) {
-        rnet::uint256 checkpoint_hash;
-        checkpoint_hash.unserialize(payload);
-
-        LogDebug(NET, "Peer %llu requesting checkpoint %s",
-                 static_cast<unsigned long long>(conn.id()),
-                 checkpoint_hash.to_hex().substr(0, 16).c_str());
-
-        // TODO: Look up checkpoint data and send it
+    // 2. Validate payload size.
+    if (payload.remaining() < 32) {
+        conn.misbehaving(1, "Short getchkpt payload");
+        return;
     }
+
+    // 3. Read the requested checkpoint hash.
+    rnet::uint256 checkpoint_hash;
+    checkpoint_hash.unserialize(payload);
+
+    LogPrint(NET, "Peer %llu requesting checkpoint %s",
+             static_cast<unsigned long long>(conn.id()),
+             checkpoint_hash.to_hex().substr(0, 16).c_str());
+
+    // 4. Look up in the checkpoint store.
+    if (!checkpoint_store_) {
+        LogDebug(NET, "No checkpoint store configured");
+        return;
+    }
+
+    auto load_rc = checkpoint_store_->load(checkpoint_hash);
+    if (load_rc.is_err()) {
+        // 5. Checkpoint not found -- send notfound with INV_CHECKPOINT.
+        LogDebug(NET, "Checkpoint %s not found locally",
+                 checkpoint_hash.to_hex().substr(0, 16).c_str());
+        std::vector<CInv> missing;
+        missing.emplace_back(InvType::INV_CHECKPOINT, checkpoint_hash);
+        send_notfound(conn, missing);
+        return;
+    }
+
+    // 6. Build the checkpoint response: [32B hash] [raw data].
+    const auto& ckpt_data = load_rc.value();
+    core::DataStream response;
+    checkpoint_hash.serialize(response);
+    response.write(reinterpret_cast<const char*>(ckpt_data.data()),
+                   ckpt_data.size());
+
+    conn.send_message(msg::CHECKPOINT, response.span());
+
+    LogPrintf("Sent checkpoint %s (%zu bytes) to peer %llu",
+              checkpoint_hash.to_hex().substr(0, 16).c_str(),
+              ckpt_data.size(),
+              static_cast<unsigned long long>(conn.id()));
 }
 
 // ---------------------------------------------------------------------------

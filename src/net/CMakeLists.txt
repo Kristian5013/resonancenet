@@ -3,6 +3,7 @@ add_library(rnet_net STATIC
     transport.cpp
     connection.cpp
     conn_manager.cpp
+    checkpoint_store.cpp
     msg_handler.cpp
     sync_manager.cpp
     peer.cpp

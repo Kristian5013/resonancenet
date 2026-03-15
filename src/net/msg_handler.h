@@ -16,6 +16,7 @@
 namespace rnet::net {
 
 class AddrManager;
+class CheckpointStore;
 class ConnManager;
 
 /// Callback types for chain/mempool integration
@@ -115,9 +116,15 @@ public:
         get_mempool_txids_ = std::move(fn);
     }
 
+    /// Set the checkpoint store for serving/receiving checkpoint files
+    void set_checkpoint_store(CheckpointStore* store) {
+        checkpoint_store_ = store;
+    }
+
 private:
     ConnManager& connman_;
     AddrManager* addrman_ = nullptr;
+    CheckpointStore* checkpoint_store_ = nullptr;
 
     // Callbacks
     BlockCallback on_new_block_;

@@ -22,6 +22,7 @@
 #include "training/training_engine.h"
 
 // Standard library.
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -579,13 +580,78 @@ static int run_mining_loop(const MinerCliConfig& cfg)
         } else {
             std::filesystem::path ckpt_path =
                 std::filesystem::path(cfg.checkpoint_dir) / (ckpt_hash_str + ".rnet");
+
+            // 5a. If checkpoint is missing, request it from the node via
+            //     RPC which broadcasts a getchkpt to P2P peers.  Poll
+            //     up to 60 seconds for the file to arrive.
             if (!std::filesystem::exists(ckpt_path)) {
-                fprintf(stderr, "Warning: parent checkpoint not found: %s\n",
-                        ckpt_path.string().c_str());
-                fprintf(stderr, "Waiting for checkpoint sync (5 seconds)...\n");
-                std::this_thread::sleep_for(std::chrono::seconds(5));
-                continue;
+                printf("[attempt %llu] Checkpoint %s not found locally, "
+                       "requesting from peers...\n",
+                       static_cast<unsigned long long>(total_attempts + 1),
+                       ckpt_hash_str.substr(0, 16).c_str());
+
+                auto req_resp = rpc_call(cfg.host, cfg.port, auth,
+                    "requestcheckpoint",
+                    "[\"" + ckpt_hash_str + "\"]");
+
+                if (req_resp.http_status == 200) {
+                    std::string found_str =
+                        extract_json_field(req_resp.body, "found");
+                    if (found_str == "true") {
+                        // Node already had it — check the path it returned.
+                        std::string node_path =
+                            extract_json_field(req_resp.body, "path");
+                        if (!node_path.empty() &&
+                            std::filesystem::exists(node_path)) {
+                            // Copy from the node's checkpoint dir to ours
+                            // if they differ.
+                            if (node_path != ckpt_path.string()) {
+                                std::error_code ec;
+                                std::filesystem::copy_file(
+                                    node_path, ckpt_path,
+                                    std::filesystem::copy_options::skip_existing,
+                                    ec);
+                            }
+                        }
+                    }
+                }
+
+                // 5b. Poll for the checkpoint file to appear (peer transfer).
+                int wait_rounds = 0;
+                constexpr int max_wait_rounds = 12;  // 12 * 5s = 60s
+                while (!std::filesystem::exists(ckpt_path) &&
+                       wait_rounds < max_wait_rounds && g_running.load()) {
+                    if (wait_rounds == 0) {
+                        printf("[attempt %llu] Waiting for checkpoint from "
+                               "peers (up to 60s)...\n",
+                               static_cast<unsigned long long>(
+                                   total_attempts + 1));
+                    }
+                    std::this_thread::sleep_for(std::chrono::seconds(5));
+                    wait_rounds++;
+
+                    // 5c. Re-request periodically in case first request
+                    //     was missed.
+                    if (wait_rounds % 3 == 0) {
+                        rpc_call(cfg.host, cfg.port, auth,
+                                 "requestcheckpoint",
+                                 "[\"" + ckpt_hash_str + "\"]");
+                    }
+                }
+
+                if (!std::filesystem::exists(ckpt_path)) {
+                    fprintf(stderr, "Warning: checkpoint %s not received "
+                            "after %d seconds, retrying...\n",
+                            ckpt_hash_str.substr(0, 16).c_str(),
+                            wait_rounds * 5);
+                    continue;
+                }
+
+                printf("[attempt %llu] Checkpoint %s received!\n",
+                       static_cast<unsigned long long>(total_attempts + 1),
+                       ckpt_hash_str.substr(0, 16).c_str());
             }
+
             auto load_rc = engine.load_checkpoint(ckpt_path);
             if (load_rc.is_err()) {
                 fprintf(stderr, "Error loading checkpoint: %s\n",
@@ -711,7 +777,44 @@ static int run_mining_loop(const MinerCliConfig& cfg)
             }
         }
 
-        // 10. Print periodic stats.
+        // 10. Auto-cleanup: keep only the last 2 checkpoints (current
+        //     tip and its parent).  Delete all older .rnet files from
+        //     the checkpoint directory to reclaim disk space.
+        {
+            std::vector<std::filesystem::path> ckpt_files;
+            std::error_code ec;
+            for (const auto& entry :
+                 std::filesystem::directory_iterator(cfg.checkpoint_dir, ec)) {
+                if (entry.is_regular_file() &&
+                    entry.path().extension() == ".rnet" &&
+                    entry.path().filename() != "pending.rnet") {
+                    ckpt_files.push_back(entry.path());
+                }
+            }
+
+            // Sort by modification time (newest first).
+            std::sort(ckpt_files.begin(), ckpt_files.end(),
+                [](const std::filesystem::path& a,
+                   const std::filesystem::path& b) {
+                    std::error_code ec2;
+                    return std::filesystem::last_write_time(a, ec2) >
+                           std::filesystem::last_write_time(b, ec2);
+                });
+
+            // Delete all but the newest 2.
+            if (ckpt_files.size() > 2) {
+                for (size_t i = 2; i < ckpt_files.size(); ++i) {
+                    std::error_code rm_ec;
+                    std::filesystem::remove(ckpt_files[i], rm_ec);
+                    if (!rm_ec) {
+                        printf("Cleaned up old checkpoint: %s\n",
+                               ckpt_files[i].filename().string().c_str());
+                    }
+                }
+            }
+        }
+
+        // 11. Print periodic stats.
         if (total_attempts % 5 == 0) {
             auto now = std::chrono::steady_clock::now();
             double elapsed_sec =

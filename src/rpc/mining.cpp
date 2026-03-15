@@ -16,6 +16,7 @@
 #include "core/stream.h"
 #include "core/time.h"
 #include "mempool/pool.h"
+#include "net/checkpoint_store.h"
 #include "net/conn_manager.h"
 #include "net/protocol.h"
 #include "node/context.h"
@@ -591,6 +592,65 @@ static JsonValue rpc_submittrainingblock(const RPCRequest& req,
     return resp;
 }
 
+// ===========================================================================
+//  requestcheckpoint
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Requests a model checkpoint from P2P peers.  If the checkpoint already
+// exists locally, returns immediately with found=true.  Otherwise broadcasts
+// a "getchkpt" request to all connected peers and returns found=false so the
+// caller can poll until the file appears.
+//
+// Arguments:
+//   hash (string) - hex-encoded checkpoint hash (64 chars)
+//
+// Returns: { found: bool, path: string }
+// ---------------------------------------------------------------------------
+static JsonValue rpc_requestcheckpoint(const RPCRequest& req,
+                                        node::NodeContext& ctx) {
+    // 1. Validate the hash parameter.
+    const auto& hash_param = get_param(req, 0);
+    if (!hash_param.is_string()) {
+        return make_rpc_error(RPC_INVALID_PARAMS,
+                              "checkpoint hash (string) required");
+    }
+
+    const std::string& hash_hex = hash_param.as_string();
+    if (hash_hex.size() != 64) {
+        return make_rpc_error(RPC_INVALID_PARAMS,
+                              "checkpoint hash must be 64 hex characters");
+    }
+
+    rnet::uint256 ckpt_hash = rnet::uint256::from_hex(hash_hex);
+
+    // 2. Check if we already have it locally.
+    if (ctx.checkpoint_store && ctx.checkpoint_store->has(ckpt_hash)) {
+        JsonValue result = JsonValue::object();
+        result.set("found", JsonValue(true));
+        result.set("path", JsonValue(
+            ctx.checkpoint_store->path_for(ckpt_hash).string()));
+        return result;
+    }
+
+    // 3. Broadcast getchkpt to all connected peers.
+    if (ctx.connman) {
+        core::DataStream getchkpt_payload;
+        ckpt_hash.serialize(getchkpt_payload);
+        ctx.connman->broadcast(net::msg::GETCHECKPOINT,
+                               getchkpt_payload.span());
+
+        LogPrintf("Broadcast getchkpt for %s to peers",
+                  hash_hex.substr(0, 16).c_str());
+    }
+
+    // 4. Return found=false so the miner knows to poll.
+    JsonValue result = JsonValue::object();
+    result.set("found", JsonValue(false));
+    result.set("hash", JsonValue(hash_hex));
+    return result;
+}
+
 void register_mining_rpcs(RPCTable& table) {
     table.register_command({
         "getmininginfo",
@@ -630,6 +690,15 @@ void register_mining_rpcs(RPCTable& table) {
         "Generate nblocks blocks immediately (regtest only).\n"
         "Arguments: nblocks (int, default 1)\n"
         "Returns: array of block hashes",
+        "Mining"
+    });
+
+    table.register_command({
+        "requestcheckpoint",
+        rpc_requestcheckpoint,
+        "Request a model checkpoint from P2P peers.\n"
+        "Arguments: hash (string) - 64-char hex checkpoint hash\n"
+        "Returns: { found: bool, path: string }",
         "Mining"
     });
 }

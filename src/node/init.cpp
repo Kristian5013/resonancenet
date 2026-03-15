@@ -15,6 +15,7 @@
 #include "core/logging.h"
 #include "mempool/pool.h"
 #include "net/addr_man.h"
+#include "net/checkpoint_store.h"
 #include "net/conn_manager.h"
 #include "net/msg_handler.h"
 #include "net/protocol.h"
@@ -430,10 +431,14 @@ Result<void> init_network(NodeContext& ctx)
         }
     }
 
-    // 3. Connection manager — user-agent, services, best height
+    // 3. Checkpoint store — file-based storage for model checkpoints
+    ctx.checkpoint_store = std::make_unique<net::CheckpointStore>(ctx.data_dir);
+    LogPrintf("Checkpoint store: %s", ctx.checkpoint_store->root().string().c_str());
+
+    // 4. Connection manager — user-agent, services, best height
     ctx.connman = std::make_unique<net::ConnManager>();
     ctx.connman->set_user_agent("/ResonanceNet:2.0.0/");
-    ctx.connman->set_local_services(net::NODE_NETWORK);
+    ctx.connman->set_local_services(net::NODE_NETWORK | net::NODE_CHECKPOINT);
     ctx.connman->set_addrman(ctx.addrman.get());
     if (ctx.chainstate) {
         ctx.connman->set_best_height(ctx.chainstate->height());
@@ -448,6 +453,9 @@ Result<void> init_network(NodeContext& ctx)
     // 5. Message handler — dispatches P2P messages to chain/mempool
     ctx.msg_handler = std::make_unique<net::MsgHandler>(
         *ctx.connman, ctx.addrman.get());
+
+    // 5a. Wire up checkpoint store for P2P checkpoint transfer
+    ctx.msg_handler->set_checkpoint_store(ctx.checkpoint_store.get());
 
     // 6. Wire up: do we have this inv item?
     ctx.msg_handler->set_have_item(
@@ -962,6 +970,7 @@ void app_shutdown(NodeContext& ctx)
     ctx.msg_handler.reset();
     ctx.addrman.reset();
     ctx.connman.reset();
+    ctx.checkpoint_store.reset();
     ctx.mempool.reset();
     ctx.chainstate.reset();
 

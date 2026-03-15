@@ -18,3 +18,11 @@ build_rnetd.bat
 build_tools.bat
 build_wallet.bat
 .vscode/
+corpus.txt
+_ftc_ref/
+release-linux/
+build_local.bat
+dump_env.bat
+AGENT-SYSTEM-PROMPT.md
+ARCHITECTURE-V4.md
+data/
