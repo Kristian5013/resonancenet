@@ -130,6 +130,11 @@ jobs:
           for bin in rnetd rnet-cli rnet-tx rnet-wallet-tool rnet-util rnet-miner rnet-prepare-dataset rnet-train-test; do
             cp "build/${bin}.exe" "${PKG_NAME}/" 2>/dev/null || true
           done
+          # Include OpenSSL DLLs so users don't get missing DLL errors.
+          cp build/*.dll "${PKG_NAME}/" 2>/dev/null || true
+          cp "$VCPKG_INSTALLED_DIR/x64-windows-static/bin/"*.dll "${PKG_NAME}/" 2>/dev/null || true
+          find "${{ github.workspace }}/vcpkg/installed" -name "libcrypto*.dll" -exec cp {} "${PKG_NAME}/" \; 2>/dev/null || true
+          find "${{ github.workspace }}/vcpkg/installed" -name "libssl*.dll" -exec cp {} "${PKG_NAME}/" \; 2>/dev/null || true
           cp COPYING README.md "${PKG_NAME}/"
           7z a "${PKG_NAME}.zip" "${PKG_NAME}"
           echo "ARCHIVE=${PKG_NAME}.zip" >> "$GITHUB_ENV"
