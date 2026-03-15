@@ -351,7 +351,6 @@ static void print_usage()
         "  getbestblockhash      Get hash of best block\n"
         "  getpeerinfo           Get connected peer info\n"
         "  getmininginfo         Get mining state\n"
-        "  getnewaddress         Generate a new address\n"
         "  getbalance             Get wallet balance\n"
         "  sendtoaddress <addr> <amount>  Send coins\n"
         "  stop                  Shut down rnetd\n"
