@@ -512,6 +512,12 @@ static int run_mining_loop(const MinerCliConfig& cfg)
         float    difficulty_delta = static_cast<float>(std::atof(diff_str.c_str()));
         uint32_t d_model        = static_cast<uint32_t>(std::atoi(d_model_str.c_str()));
         uint32_t n_layers       = static_cast<uint32_t>(std::atoi(n_layers_str.c_str()));
+
+        // Use genesis defaults if template returns zeros.
+        if (parent_val_loss <= 0.0f) parent_val_loss = 10.0f;
+        if (difficulty_delta <= 0.0f) difficulty_delta = consensus.genesis_difficulty_delta;
+        if (d_model == 0) d_model = consensus.genesis_d_model;
+        if (n_layers == 0) n_layers = consensus.genesis_n_layers;
         uint32_t n_slots        = n_slots_str.empty() ? 64u : static_cast<uint32_t>(std::atoi(n_slots_str.c_str()));
         uint32_t d_ff           = d_ff_str.empty() ? d_model * 2 : static_cast<uint32_t>(std::atoi(d_ff_str.c_str()));
         uint32_t vocab_size     = vocab_str.empty() ? 50257u : static_cast<uint32_t>(std::atoi(vocab_str.c_str()));
@@ -523,19 +529,7 @@ static int run_mining_loop(const MinerCliConfig& cfg)
                static_cast<double>(parent_val_loss), static_cast<double>(difficulty_delta),
                d_model, n_layers);
 
-        // 3. Load the parent checkpoint from checkpoint_dir / {hash}.rnet.
-        std::filesystem::path ckpt_path =
-            std::filesystem::path(cfg.checkpoint_dir) / (ckpt_hash_str + ".rnet");
-
-        if (!std::filesystem::exists(ckpt_path)) {
-            fprintf(stderr, "Warning: parent checkpoint not found: %s\n",
-                    ckpt_path.string().c_str());
-            fprintf(stderr, "Waiting for checkpoint sync (5 seconds)...\n");
-            std::this_thread::sleep_for(std::chrono::seconds(5));
-            continue;
-        }
-
-        // 4. Build the model configuration from the template.
+        // 3. Build the model configuration from the template.
         rnet::training::ModelConfig model_cfg;
         model_cfg.d_model   = d_model;
         model_cfg.n_layers  = n_layers;
@@ -543,7 +537,7 @@ static int run_mining_loop(const MinerCliConfig& cfg)
         model_cfg.d_ff      = d_ff;
         model_cfg.vocab_size = vocab_size;
 
-        // 5. Create TrainingEngine and load parent weights.
+        // 4. Create TrainingEngine.
         rnet::training::TrainingEngine engine(*backend);
         auto init_rc = engine.init(model_cfg);
         if (init_rc.is_err()) {
@@ -552,12 +546,33 @@ static int run_mining_loop(const MinerCliConfig& cfg)
             std::this_thread::sleep_for(std::chrono::seconds(5));
             continue;
         }
-        auto load_rc = engine.load_checkpoint(ckpt_path);
-        if (load_rc.is_err()) {
-            fprintf(stderr, "Error loading checkpoint: %s\n",
-                    load_rc.error().c_str());
-            std::this_thread::sleep_for(std::chrono::seconds(5));
-            continue;
+
+        // 5. Load parent checkpoint, or init random weights for genesis.
+        bool is_genesis_mining = (ckpt_hash_str.empty() ||
+            ckpt_hash_str == std::string(64, '0'));
+
+        if (is_genesis_mining) {
+            // Genesis: no parent checkpoint — engine.init() already
+            // initialized weights with Xavier random. Ready to train.
+            printf("[attempt %llu] Genesis mining: training from random init\n",
+                   static_cast<unsigned long long>(total_attempts + 1));
+        } else {
+            std::filesystem::path ckpt_path =
+                std::filesystem::path(cfg.checkpoint_dir) / (ckpt_hash_str + ".rnet");
+            if (!std::filesystem::exists(ckpt_path)) {
+                fprintf(stderr, "Warning: parent checkpoint not found: %s\n",
+                        ckpt_path.string().c_str());
+                fprintf(stderr, "Waiting for checkpoint sync (5 seconds)...\n");
+                std::this_thread::sleep_for(std::chrono::seconds(5));
+                continue;
+            }
+            auto load_rc = engine.load_checkpoint(ckpt_path);
+            if (load_rc.is_err()) {
+                fprintf(stderr, "Error loading checkpoint: %s\n",
+                        load_rc.error().c_str());
+                std::this_thread::sleep_for(std::chrono::seconds(5));
+                continue;
+            }
         }
 
         // 6. Determine the number of training steps.
