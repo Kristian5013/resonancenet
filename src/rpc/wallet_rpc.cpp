@@ -409,6 +409,49 @@ static JsonValue rpc_importwallet(const RPCRequest& req,
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
+// rpc_loadwallet
+//
+// Design: Loads a wallet from a file path. If no path given, loads from
+//         the default data directory.
+// ---------------------------------------------------------------------------
+static JsonValue rpc_loadwallet(const RPCRequest& req,
+                                 node::NodeContext& ctx) {
+    // 1. Determine wallet path.
+    std::string wallet_path;
+    const auto& path_param = get_param_optional(req, 0);
+    if (path_param.is_string()) {
+        wallet_path = path_param.as_string();
+    } else {
+        // Default: data_dir / wallet.dat
+        wallet_path = (ctx.data_dir / "wallet.dat").string();
+    }
+
+    // 2. Check if wallet already loaded.
+    if (g_wallet) {
+        JsonValue result = JsonValue::object();
+        result.set("warning", JsonValue("Wallet already loaded"));
+        result.set("name", JsonValue(g_wallet->name()));
+        return result;
+    }
+
+    // 3. Load the wallet.
+    auto load_result = wallet::CWallet::load(wallet_path);
+    if (load_result.is_err()) {
+        throw std::runtime_error("Failed to load wallet: " + load_result.error());
+    }
+
+    // 4. Store as global wallet.
+    static std::unique_ptr<wallet::CWallet> s_loaded_wallet;
+    s_loaded_wallet = std::move(load_result.value());
+    g_wallet = s_loaded_wallet.get();
+
+    JsonValue result = JsonValue::object();
+    result.set("name", JsonValue(g_wallet->name()));
+    result.set("warning", JsonValue(""));
+    return result;
+}
+
+// ---------------------------------------------------------------------------
 // register_wallet_rpcs
 //
 // Design: Binds all wallet RPC handlers to the command table. Each entry
@@ -416,6 +459,14 @@ static JsonValue rpc_importwallet(const RPCRequest& req,
 // ---------------------------------------------------------------------------
 
 void register_wallet_rpcs(RPCTable& table) {
+    // 0. Load/unload commands
+    table.register_command({
+        "loadwallet",
+        rpc_loadwallet,
+        "Loads a wallet from the specified path.\n"
+        "Arguments: filename (string, optional, default: wallet.dat)",
+        "Wallet"
+    });
     // 1. Wallet Info commands
     table.register_command({
         "getbalance",

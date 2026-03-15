@@ -31,6 +31,7 @@
 #include "rpc/server.h"
 #include "rpc/training_rpc.h"
 #include "rpc/wallet_rpc.h"
+#include "wallet/wallet.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -795,6 +796,21 @@ Result<void> init_rpc(NodeContext& ctx)
     }
 
     LogPrintf("JSON-RPC server started on port %u", ctx.rpc_port);
+
+    // 5. Auto-load wallet if wallet.dat exists in data directory.
+    auto wallet_path = ctx.data_dir / "wallet.dat";
+    if (std::filesystem::exists(wallet_path)) {
+        auto load_result = wallet::CWallet::load(wallet_path.string());
+        if (load_result.is_ok()) {
+            static std::unique_ptr<wallet::CWallet> s_auto_wallet;
+            s_auto_wallet = std::move(load_result.value());
+            rpc::set_rpc_wallet(s_auto_wallet.get());
+            LogPrintf("Wallet loaded: %s", wallet_path.string().c_str());
+        } else {
+            LogPrintf("Warning: could not load wallet: %s", load_result.error().c_str());
+        }
+    }
+
     return Result<void>::ok();
 }
 
