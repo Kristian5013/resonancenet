@@ -1,93 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
   <defs>
-    <radialGradient id="coinGrad" cx="45%" cy="40%" r="55%">
+    <radialGradient id="g" cx="45%" cy="40%" r="55%">
       <stop offset="0%" stop-color="#FFE066"/>
       <stop offset="40%" stop-color="#FFD700"/>
-      <stop offset="75%" stop-color="#DAA520"/>
-      <stop offset="100%" stop-color="#B8860B"/>
+      <stop offset="100%" stop-color="#DAA520"/>
     </radialGradient>
-
-    <radialGradient id="rimGrad" cx="45%" cy="40%" r="55%">
-      <stop offset="0%" stop-color="#DAA520"/>
-      <stop offset="100%" stop-color="#8B6914"/>
+    <radialGradient id="s" cx="35%" cy="30%" r="30%">
+      <stop offset="0%" stop-color="#FFF" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#FFF" stop-opacity="0"/>
     </radialGradient>
-
-    <radialGradient id="shine" cx="35%" cy="30%" r="30%">
-      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.4"/>
-      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
-    </radialGradient>
-
-    <filter id="shadow">
-      <feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#000" flood-opacity="0.25"/>
-    </filter>
   </defs>
-
-  <!-- Outer rim -->
-  <circle cx="256" cy="256" r="252" fill="url(#rimGrad)" filter="url(#shadow)"/>
-
-  <!-- Inner coin face -->
-  <circle cx="256" cy="256" r="234" fill="url(#coinGrad)"/>
-
-  <!-- Decorative ring border -->
-  <circle cx="256" cy="256" r="242" fill="none" stroke="#B8860B" stroke-width="2.5"/>
-  <circle cx="256" cy="256" r="234" fill="none" stroke="#B8860B" stroke-width="1.2" stroke-dasharray="8 4"/>
-
-  <!-- Resonance waves (3 concentric arcs) -->
-  <g fill="none" stroke="#8B6914" stroke-width="3.5" stroke-linecap="round" opacity="0.55">
-    <!-- Left waves -->
-    <path d="M 120 190 Q 96 256 120 322"/>
-    <path d="M 96 165 Q 62 256 96 347"/>
-    <path d="M 72 140 Q 28 256 72 372"/>
-    <!-- Right waves -->
-    <path d="M 392 190 Q 416 256 392 322"/>
-    <path d="M 416 165 Q 450 256 416 347"/>
-    <path d="M 440 140 Q 484 256 440 372"/>
-  </g>
-
-  <!-- Central neural network node graph -->
-  <g fill="#8B6914" stroke="#8B6914" stroke-width="2.5">
-    <!-- Center node (large) -->
-    <circle cx="256" cy="256" r="22" fill="#B8860B" stroke="#8B6914" stroke-width="3"/>
-
-    <!-- Layer 1 nodes (diagonal) -->
-    <circle cx="190" cy="190" r="12"/>
-    <circle cx="322" cy="190" r="12"/>
-    <circle cx="190" cy="322" r="12"/>
-    <circle cx="322" cy="322" r="12"/>
-
-    <!-- Layer 2 nodes (cardinal) -->
-    <circle cx="164" cy="256" r="9"/>
-    <circle cx="348" cy="256" r="9"/>
-    <circle cx="256" cy="164" r="9"/>
-    <circle cx="256" cy="348" r="9"/>
-
-    <!-- Connections from center to layer 1 -->
-    <line x1="256" y1="256" x2="190" y2="190" stroke-width="2.5" opacity="0.7"/>
-    <line x1="256" y1="256" x2="322" y2="190" stroke-width="2.5" opacity="0.7"/>
-    <line x1="256" y1="256" x2="190" y2="322" stroke-width="2.5" opacity="0.7"/>
-    <line x1="256" y1="256" x2="322" y2="322" stroke-width="2.5" opacity="0.7"/>
-
-    <!-- Connections from center to layer 2 -->
-    <line x1="256" y1="256" x2="164" y2="256" stroke-width="2" opacity="0.5"/>
-    <line x1="256" y1="256" x2="348" y2="256" stroke-width="2" opacity="0.5"/>
-    <line x1="256" y1="256" x2="256" y2="164" stroke-width="2" opacity="0.5"/>
-    <line x1="256" y1="256" x2="256" y2="348" stroke-width="2" opacity="0.5"/>
-
-    <!-- Cross connections layer1-layer2 -->
-    <line x1="190" y1="190" x2="164" y2="256" stroke-width="1.5" opacity="0.35"/>
-    <line x1="190" y1="190" x2="256" y2="164" stroke-width="1.5" opacity="0.35"/>
-    <line x1="322" y1="190" x2="348" y2="256" stroke-width="1.5" opacity="0.35"/>
-    <line x1="322" y1="190" x2="256" y2="164" stroke-width="1.5" opacity="0.35"/>
-    <line x1="190" y1="322" x2="164" y2="256" stroke-width="1.5" opacity="0.35"/>
-    <line x1="190" y1="322" x2="256" y2="348" stroke-width="1.5" opacity="0.35"/>
-    <line x1="322" y1="322" x2="348" y2="256" stroke-width="1.5" opacity="0.35"/>
-    <line x1="322" y1="322" x2="256" y2="348" stroke-width="1.5" opacity="0.35"/>
-  </g>
-
-  <!-- "R" letter in center node -->
-  <text x="256" y="266" text-anchor="middle" font-family="Georgia, serif"
-        font-size="28" font-weight="bold" fill="#FFE066">R</text>
-
-  <!-- Shine overlay -->
-  <circle cx="256" cy="256" r="234" fill="url(#shine)"/>
+  <circle cx="256" cy="256" r="250" fill="url(#g)"/>
+  <circle cx="256" cy="256" r="250" fill="url(#s)"/>
+  <text x="256" y="290" text-anchor="middle" font-family="Georgia, serif" font-size="180" font-weight="bold" fill="#8B6914">R</text>
 </svg>
