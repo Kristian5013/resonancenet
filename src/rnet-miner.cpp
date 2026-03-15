@@ -348,6 +348,32 @@ static int run_mining_loop(const MinerCliConfig& cfg)
     std::string auth;
     if (!cfg.rpcuser.empty()) {
         auth = base64_encode(cfg.rpcuser + ":" + cfg.rpcpassword);
+    } else {
+        // Auto-detect cookie file from default data directory.
+        std::string cookie_path;
+#ifdef _WIN32
+        const char* appdata = std::getenv("APPDATA");
+        if (appdata) {
+            cookie_path = std::string(appdata) + "\\ResonanceNet\\.cookie";
+        }
+#else
+        const char* home = std::getenv("HOME");
+        if (home) {
+            cookie_path = std::string(home) + "/.resonancenet/.cookie";
+        }
+#endif
+        if (!cookie_path.empty()) {
+            FILE* f = fopen(cookie_path.c_str(), "rb");
+            if (f) {
+                std::array<char, 512> buf{};
+                size_t n = fread(buf.data(), 1, buf.size() - 1, f);
+                fclose(f);
+                while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r')) --n;
+                if (n > 0) {
+                    auth = base64_encode(std::string(buf.data(), n));
+                }
+            }
+        }
     }
 
     // -- Pre-flight checks --------------------------------------------------
