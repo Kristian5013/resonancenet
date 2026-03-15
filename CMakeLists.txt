@@ -89,11 +89,12 @@ target_link_libraries(rnet-util-bin PRIVATE
     rnet_crypto rnet_common rnet_util
 )
 
-# rnet-miner — standalone miner
+# rnet-miner — standalone Proof-of-Training miner
 add_executable(rnet-miner src/rnet-miner.cpp)
 target_include_directories(rnet-miner PRIVATE src)
 target_link_libraries(rnet-miner PRIVATE
-    rnet_miner rnet_crypto rnet_common rnet_util
+    rnet_miner rnet_training rnet_gpu rnet_consensus
+    rnet_primitives rnet_script rnet_crypto rnet_common rnet_util
 )
 if(WIN32)
     target_link_libraries(rnet-miner PRIVATE ws2_32)

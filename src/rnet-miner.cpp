@@ -3,13 +3,22 @@
 // file COPYING or https://opensource.org/licenses/MIT.
 
 // Project headers.
+#include "consensus/params.h"
 #include "core/config.h"
 #include "core/error.h"
 #include "core/hex.h"
 #include "core/logging.h"
 #include "crypto/ed25519.h"
 #include "crypto/keccak.h"
+#include "gpu/backend.h"
+#include "gpu/context.h"
+#include "miner/difficulty.h"
 #include "primitives/address.h"
+#include "training/checkpoint_io.h"
+#include "training/data_loader.h"
+#include "training/evaluator.h"
+#include "training/model_config.h"
+#include "training/training_engine.h"
 
 // Standard library.
 #include <array>
@@ -184,6 +193,68 @@ static RpcResponse rpc_call(const std::string& host, uint16_t port,
     return resp;
 }
 
+// ---------------------------------------------------------------------------
+// extract_json_field
+// ---------------------------------------------------------------------------
+// Minimal JSON field extractor -- handles strings, objects, arrays, null,
+// numbers, and booleans.  Borrowed from rnet-cli; avoids a JSON library dep.
+// ---------------------------------------------------------------------------
+static std::string extract_json_field(const std::string& json,
+                                       const std::string& field)
+{
+    std::string key = "\"" + field + "\"";
+    auto pos = json.find(key);
+    if (pos == std::string::npos) return "";
+    pos = json.find(':', pos + key.size());
+    if (pos == std::string::npos) return "";
+    pos++;
+    while (pos < json.size() && json[pos] == ' ') pos++;
+    if (pos >= json.size()) return "";
+
+    if (json[pos] == '"') {
+        // 1. String value.
+        pos++;
+        std::string result;
+        while (pos < json.size() && json[pos] != '"') {
+            if (json[pos] == '\\' && pos + 1 < json.size()) {
+                pos++;
+                if (json[pos] == 'n') result += '\n';
+                else if (json[pos] == 't') result += '\t';
+                else result += json[pos];
+            } else {
+                result += json[pos];
+            }
+            pos++;
+        }
+        return result;
+    } else if (json[pos] == '{' || json[pos] == '[') {
+        // 2. Object or array -- find matching brace.
+        int depth = 1;
+        char open = json[pos], close_c = (open == '{') ? '}' : ']';
+        size_t start = pos;
+        pos++;
+        while (pos < json.size() && depth > 0) {
+            if (json[pos] == open) depth++;
+            else if (json[pos] == close_c) depth--;
+            pos++;
+        }
+        return json.substr(start, pos - start);
+    } else if (json.substr(pos, 4) == "null") {
+        // 3. Null literal.
+        return "null";
+    } else {
+        // 4. Number or boolean.
+        size_t start = pos;
+        while (pos < json.size() && json[pos] != ',' && json[pos] != '}')
+            pos++;
+        std::string val = json.substr(start, pos - start);
+        while (!val.empty() &&
+               (val.back() == ' ' || val.back() == '\r' || val.back() == '\n'))
+            val.pop_back();
+        return val;
+    }
+}
+
 // ===========================================================================
 //  Mining configuration
 // ===========================================================================
@@ -197,7 +268,7 @@ struct MinerCliConfig {
     std::string train_data = "data/train.bin";
     std::string val_data = "data/val.bin";
     std::string checkpoint_dir = "checkpoints";
-    int steps_per_attempt = 1000;
+    int steps_per_attempt = 0;  // 0 = auto (use suggest_step_count)
     int num_workers = 1;
     bool benchmark = false;
 };
@@ -225,7 +296,7 @@ static void print_usage()
         "  -traindata=<path>          Path to training dataset\n"
         "  -valdata=<path>            Path to validation dataset\n"
         "  -checkpointdir=<path>      Directory for checkpoints (default: ./checkpoints)\n"
-        "  -steps=<n>                 Training steps per mining attempt (default: 1000)\n"
+        "  -steps=<n>                 Training steps per attempt (0 = auto, default: auto)\n"
         "  -workers=<n>               Number of parallel workers (default: 1)\n"
         "  -benchmark                 Run benchmark mode (no RPC, just measure speed)\n"
         "  -help                      Show this help\n"
@@ -240,6 +311,10 @@ static MinerCliConfig parse_args(int argc, char* argv[])
     MinerCliConfig cfg;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
+        // Strip leading double-dash to single-dash (accept both --flag and -flag).
+        if (arg.size() > 2 && arg[0] == '-' && arg[1] == '-') {
+            arg = arg.substr(1);
+        }
         if (arg.find("-rpcconnect=") == 0) cfg.host = arg.substr(12);
         else if (arg.find("-rpcport=") == 0) cfg.port = static_cast<uint16_t>(std::atoi(arg.c_str() + 9));
         else if (arg.find("-rpcuser=") == 0) cfg.rpcuser = arg.substr(9);
@@ -251,7 +326,7 @@ static MinerCliConfig parse_args(int argc, char* argv[])
         else if (arg.find("-steps=") == 0) cfg.steps_per_attempt = std::atoi(arg.c_str() + 7);
         else if (arg.find("-workers=") == 0) cfg.num_workers = std::atoi(arg.c_str() + 9);
         else if (arg == "-benchmark") cfg.benchmark = true;
-        else if (arg == "-help" || arg == "--help") { print_usage(); std::exit(0); }
+        else if (arg == "-help") { print_usage(); std::exit(0); }
     }
     return cfg;
 }
@@ -263,8 +338,10 @@ static MinerCliConfig parse_args(int argc, char* argv[])
 // ---------------------------------------------------------------------------
 // run_mining_loop
 // ---------------------------------------------------------------------------
-// Main mining loop: repeatedly fetches a block template from rnetd, runs
-// training steps (currently a placeholder), and submits the result.
+// Proof-of-Training mining loop.  Repeatedly fetches a block template from
+// rnetd, loads the parent checkpoint, trains the MinGRU model on the GPU,
+// evaluates validation loss, and submits a new block when the loss improves
+// by at least the difficulty_delta threshold.
 // ---------------------------------------------------------------------------
 static int run_mining_loop(const MinerCliConfig& cfg)
 {
@@ -273,6 +350,8 @@ static int run_mining_loop(const MinerCliConfig& cfg)
         auth = base64_encode(cfg.rpcuser + ":" + cfg.rpcpassword);
     }
 
+    // -- Pre-flight checks --------------------------------------------------
+
     if (cfg.miner_address.empty()) {
         fprintf(stderr, "Error: -address=<rn1...> is required\n");
         fprintf(stderr, "Use your wallet address to receive mining rewards.\n");
@@ -280,14 +359,14 @@ static int run_mining_loop(const MinerCliConfig& cfg)
         return 1;
     }
 
-    // Validate the miner address.
+    // 1. Validate the miner address.
     if (!rnet::primitives::is_valid_address(cfg.miner_address)) {
         fprintf(stderr, "Error: invalid address '%s'\n", cfg.miner_address.c_str());
         fprintf(stderr, "Expected bech32 address starting with 'rn1'\n");
         return 1;
     }
 
-    // Verify dataset files exist.
+    // 2. Verify dataset files exist.
     if (!std::filesystem::exists(cfg.train_data)) {
         fprintf(stderr, "Error: training dataset not found: %s\n", cfg.train_data.c_str());
         fprintf(stderr, "Use -traindata=<path> to specify the training data file.\n");
@@ -303,18 +382,57 @@ static int run_mining_loop(const MinerCliConfig& cfg)
         return 1;
     }
 
-    // Create checkpoint directory if needed.
+    // 3. Create checkpoint directory if needed.
     if (!std::filesystem::exists(cfg.checkpoint_dir)) {
         std::filesystem::create_directories(cfg.checkpoint_dir);
     }
 
-    printf("ResonanceNet Miner v0.1\n");
+    // 4. Detect and create GPU backend.
+    auto devices = rnet::gpu::GpuContext::enumerate_devices();
+    if (devices.empty()) {
+        fprintf(stderr, "Error: no GPU device found (need CUDA, Vulkan, or Metal)\n");
+        fprintf(stderr, "Falling back to CPU backend (very slow).\n");
+    }
+    auto backend = rnet::gpu::GpuBackend::create_best();
+    if (!backend) {
+        fprintf(stderr, "Error: failed to create GPU backend\n");
+        return 1;
+    }
+    printf("GPU: %s (%.0f MB free / %.0f MB total)\n",
+           backend->device_name().c_str(),
+           static_cast<double>(backend->free_memory()) / (1024.0 * 1024.0),
+           static_cast<double>(backend->total_memory()) / (1024.0 * 1024.0));
+
+    // 5. Load training and validation datasets.
+    rnet::training::DataLoader train_loader;
+    auto train_rc = train_loader.load_dataset(cfg.train_data);
+    if (train_rc.is_err()) {
+        fprintf(stderr, "Error loading training data: %s\n",
+                train_rc.error().c_str());
+        return 1;
+    }
+    printf("Training data: %zu tokens\n", train_loader.total_tokens());
+
+    rnet::training::DataLoader val_loader;
+    auto val_rc = val_loader.load_dataset(cfg.val_data);
+    if (val_rc.is_err()) {
+        fprintf(stderr, "Error loading validation data: %s\n",
+                val_rc.error().c_str());
+        return 1;
+    }
+    printf("Validation data: %zu tokens\n", val_loader.total_tokens());
+
+    // 6. Load consensus parameters (mainnet defaults).
+    auto consensus = rnet::consensus::ConsensusParams::mainnet();
+
+    // -- Banner -------------------------------------------------------------
+
+    printf("\nResonanceNet Miner v0.1\n");
     printf("Connecting to %s:%u\n", cfg.host.c_str(), cfg.port);
     printf("Reward address: %s\n", cfg.miner_address.c_str());
     printf("Train data: %s\n", cfg.train_data.c_str());
     printf("Val data: %s\n", cfg.val_data.c_str());
     printf("Checkpoint dir: %s\n", cfg.checkpoint_dir.c_str());
-    printf("Training steps per attempt: %d\n", cfg.steps_per_attempt);
     printf("Workers: %d\n", cfg.num_workers);
     printf("\n");
 
@@ -322,13 +440,17 @@ static int run_mining_loop(const MinerCliConfig& cfg)
     uint64_t blocks_found = 0;
     auto start_time = std::chrono::steady_clock::now();
 
+    // -- Main mining loop ---------------------------------------------------
+
     while (g_running.load()) {
-        // 1. Get block template from rnetd.
+
+        // 1. RPC: getblocktemplate -- obtain parent block info.
         auto tmpl_resp = rpc_call(cfg.host, cfg.port, auth,
                                    "getblocktemplate",
                                    "[{\"address\":\"" + cfg.miner_address + "\"}]");
         if (tmpl_resp.http_status < 0) {
-            fprintf(stderr, "Error: cannot connect to rnetd: %s\n", tmpl_resp.body.c_str());
+            fprintf(stderr, "Error: cannot connect to rnetd: %s\n",
+                    tmpl_resp.body.c_str());
             fprintf(stderr, "Retrying in 5 seconds...\n");
             std::this_thread::sleep_for(std::chrono::seconds(5));
             continue;
@@ -340,48 +462,211 @@ static int run_mining_loop(const MinerCliConfig& cfg)
             continue;
         }
 
-        // 2. Train the model (placeholder -- actual training uses GPU backend).
-        //    In production, this would:
-        //    a) Load the latest checkpoint
-        //    b) Run forward+backward pass for steps_per_attempt steps
-        //    c) Evaluate on validation set
-        //    d) Save new checkpoint
-        printf("[%llu] Training %d steps...\n",
-               static_cast<unsigned long long>(total_attempts), cfg.steps_per_attempt);
+        // 2. Parse the block template fields from the RPC result.
+        std::string result_json = extract_json_field(tmpl_resp.body, "result");
+        if (result_json.empty() || result_json == "null") {
+            std::string err_obj = extract_json_field(tmpl_resp.body, "error");
+            fprintf(stderr, "RPC getblocktemplate failed: %s\n", err_obj.c_str());
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            continue;
+        }
 
-        // Simulate training time (in production, this is real GPU work).
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::string height_str    = extract_json_field(result_json, "height");
+        std::string val_loss_str  = extract_json_field(result_json, "val_loss");
+        std::string diff_str      = extract_json_field(result_json, "difficulty_delta");
+        std::string ckpt_hash_str = extract_json_field(result_json, "checkpoint_hash");
+        std::string d_model_str   = extract_json_field(result_json, "d_model");
+        std::string n_layers_str  = extract_json_field(result_json, "n_layers");
+        std::string n_slots_str   = extract_json_field(result_json, "n_slots");
+        std::string d_ff_str      = extract_json_field(result_json, "d_ff");
+        std::string vocab_str     = extract_json_field(result_json, "vocab_size");
+
+        uint64_t height         = std::strtoull(height_str.c_str(), nullptr, 10);
+        float    parent_val_loss = static_cast<float>(std::atof(val_loss_str.c_str()));
+        float    difficulty_delta = static_cast<float>(std::atof(diff_str.c_str()));
+        uint32_t d_model        = static_cast<uint32_t>(std::atoi(d_model_str.c_str()));
+        uint32_t n_layers       = static_cast<uint32_t>(std::atoi(n_layers_str.c_str()));
+        uint32_t n_slots        = n_slots_str.empty() ? 64u : static_cast<uint32_t>(std::atoi(n_slots_str.c_str()));
+        uint32_t d_ff           = d_ff_str.empty() ? d_model * 2 : static_cast<uint32_t>(std::atoi(d_ff_str.c_str()));
+        uint32_t vocab_size     = vocab_str.empty() ? 50257u : static_cast<uint32_t>(std::atoi(vocab_str.c_str()));
+
+        printf("[attempt %llu] height=%llu  val_loss=%.6f  diff_delta=%.8f  "
+               "d_model=%u  n_layers=%u\n",
+               static_cast<unsigned long long>(total_attempts + 1),
+               static_cast<unsigned long long>(height),
+               static_cast<double>(parent_val_loss), static_cast<double>(difficulty_delta),
+               d_model, n_layers);
+
+        // 3. Load the parent checkpoint from checkpoint_dir / {hash}.rnet.
+        std::filesystem::path ckpt_path =
+            std::filesystem::path(cfg.checkpoint_dir) / (ckpt_hash_str + ".rnet");
+
+        if (!std::filesystem::exists(ckpt_path)) {
+            fprintf(stderr, "Warning: parent checkpoint not found: %s\n",
+                    ckpt_path.string().c_str());
+            fprintf(stderr, "Waiting for checkpoint sync (5 seconds)...\n");
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            continue;
+        }
+
+        // 4. Build the model configuration from the template.
+        rnet::training::ModelConfig model_cfg;
+        model_cfg.d_model   = d_model;
+        model_cfg.n_layers  = n_layers;
+        model_cfg.n_slots   = n_slots;
+        model_cfg.d_ff      = d_ff;
+        model_cfg.vocab_size = vocab_size;
+
+        // 5. Create TrainingEngine and load parent weights.
+        rnet::training::TrainingEngine engine(*backend);
+        auto init_rc = engine.init(model_cfg);
+        if (init_rc.is_err()) {
+            fprintf(stderr, "Error initializing model: %s\n",
+                    init_rc.error().c_str());
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            continue;
+        }
+        auto load_rc = engine.load_checkpoint(ckpt_path);
+        if (load_rc.is_err()) {
+            fprintf(stderr, "Error loading checkpoint: %s\n",
+                    load_rc.error().c_str());
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            continue;
+        }
+
+        // 6. Determine the number of training steps.
+        int n_steps = rnet::miner::suggest_step_count(
+            parent_val_loss, d_model, consensus);
+        if (cfg.steps_per_attempt > 0) {
+            n_steps = cfg.steps_per_attempt;
+        }
+
+        printf("[attempt %llu] Training %d steps (params: %llu)...\n",
+               static_cast<unsigned long long>(total_attempts + 1), n_steps,
+               static_cast<unsigned long long>(model_cfg.param_count()));
+
+        auto attempt_start = std::chrono::steady_clock::now();
+
+        // 7. Train: run forward+backward for n_steps.
+        train_loader.reset();
+        auto train_result = engine.train_steps(n_steps, train_loader);
+        if (train_result.is_err()) {
+            fprintf(stderr, "Training error: %s\n",
+                    train_result.error().c_str());
+            total_attempts++;
+            continue;
+        }
+        float train_loss = train_result.value();
+
+        // 8. Evaluate on the validation set.
+        val_loader.reset();
+        auto val_result = engine.evaluate(val_loader, consensus.eval_batches);
+        if (val_result.is_err()) {
+            fprintf(stderr, "Evaluation error: %s\n",
+                    val_result.error().c_str());
+            total_attempts++;
+            continue;
+        }
+        float new_val_loss = val_result.value();
+
+        auto attempt_end = std::chrono::steady_clock::now();
+        double attempt_sec =
+            std::chrono::duration<double>(attempt_end - attempt_start).count();
+
+        float improvement = parent_val_loss - new_val_loss;
         total_attempts++;
 
-        // 3. Submit block.
-        //    In production, we would serialize the completed block and submit
-        //    via the "submitblock" RPC method.
-        auto submit_resp = rpc_call(cfg.host, cfg.port, auth,
-                                     "submitblock", "[\"placeholder\"]");
+        printf("[attempt %llu] train_loss=%.6f  val_loss=%.6f  "
+               "improvement=%.8f  required=%.8f  (%.1fs)\n",
+               static_cast<unsigned long long>(total_attempts),
+               static_cast<double>(train_loss), static_cast<double>(new_val_loss),
+               static_cast<double>(improvement), static_cast<double>(difficulty_delta),
+               attempt_sec);
 
-        if (submit_resp.http_status == 200) {
-            printf("[%llu] Block submitted.\n",
-                   static_cast<unsigned long long>(total_attempts));
+        // 9. Check whether the improvement meets the difficulty threshold.
+        if (improvement >= difficulty_delta) {
+            // 9a. Save the new checkpoint.
+            std::filesystem::path tmp_ckpt =
+                std::filesystem::path(cfg.checkpoint_dir) / "pending.rnet";
+            auto save_rc = engine.save_checkpoint(tmp_ckpt);
+            if (save_rc.is_err()) {
+                fprintf(stderr, "Error saving checkpoint: %s\n",
+                        save_rc.error().c_str());
+                continue;
+            }
+
+            // 9b. Hash the checkpoint file with keccak256.
+            auto hash_result = rnet::crypto::keccak256_file(tmp_ckpt);
+            if (hash_result.is_err()) {
+                fprintf(stderr, "Error hashing checkpoint: %s\n",
+                        hash_result.error().c_str());
+                continue;
+            }
+            std::string new_hash = hash_result.value().to_hex();
+
+            // 9c. Rename to final path: {new_hash}.rnet.
+            std::filesystem::path final_ckpt =
+                std::filesystem::path(cfg.checkpoint_dir) /
+                (new_hash + ".rnet");
+            std::filesystem::rename(tmp_ckpt, final_ckpt);
+
+            // 9d. RPC: submitblock with training proof.
+            std::ostringstream submit_params;
+            submit_params << "[{"
+                          << "\"checkpoint_hash\":\"" << new_hash << "\","
+                          << "\"val_loss\":" << new_val_loss << ","
+                          << "\"train_steps\":" << n_steps << ","
+                          << "\"address\":\"" << cfg.miner_address << "\""
+                          << "}]";
+
+            auto submit_resp = rpc_call(cfg.host, cfg.port, auth,
+                                         "submitblock", submit_params.str());
+
+            if (submit_resp.http_status == 200) {
+                std::string sub_err =
+                    extract_json_field(submit_resp.body, "error");
+                if (sub_err.empty() || sub_err == "null") {
+                    blocks_found++;
+                    printf("\n*** BLOCK FOUND! ***\n");
+                    printf("  Height:          %llu\n",
+                           static_cast<unsigned long long>(height));
+                    printf("  Val loss:        %.6f -> %.6f (delta %.8f)\n",
+                           static_cast<double>(parent_val_loss),
+                           static_cast<double>(new_val_loss),
+                           static_cast<double>(improvement));
+                    printf("  Checkpoint:      %s\n", new_hash.c_str());
+                    printf("  Training steps:  %d\n", n_steps);
+                    printf("  Blocks found:    %llu\n\n",
+                           static_cast<unsigned long long>(blocks_found));
+                } else {
+                    fprintf(stderr, "Submit rejected: %s\n", sub_err.c_str());
+                }
+            } else {
+                fprintf(stderr, "Submit RPC error (HTTP %d): %s\n",
+                        submit_resp.http_status, submit_resp.body.c_str());
+            }
         }
 
-        // 4. Print stats periodically.
-        if (total_attempts % 10 == 0) {
+        // 10. Print periodic stats.
+        if (total_attempts % 5 == 0) {
             auto now = std::chrono::steady_clock::now();
-            double elapsed_sec = std::chrono::duration<double>(now - start_time).count();
+            double elapsed_sec =
+                std::chrono::duration<double>(now - start_time).count();
             double rate = static_cast<double>(total_attempts) / elapsed_sec;
-            printf("Stats: %llu attempts, %llu blocks found, %.2f attempts/sec\n",
+            printf("Stats: %llu attempts, %llu blocks found, %.2f attempts/hr\n",
                    static_cast<unsigned long long>(total_attempts),
                    static_cast<unsigned long long>(blocks_found),
-                   rate);
+                   rate * 3600.0);
         }
     }
+
+    // -- Shutdown summary ---------------------------------------------------
 
     printf("\nMiner stopped.\n");
     auto end_time = std::chrono::steady_clock::now();
     double total_sec = std::chrono::duration<double>(end_time - start_time).count();
-    printf("Total: %llu attempts in %.1f seconds (%.2f attempts/sec)\n",
-           static_cast<unsigned long long>(total_attempts), total_sec,
-           static_cast<double>(total_attempts) / total_sec);
+    printf("Total: %llu attempts in %.1f seconds\n",
+           static_cast<unsigned long long>(total_attempts), total_sec);
     printf("Blocks found: %llu\n", static_cast<unsigned long long>(blocks_found));
 
     return 0;
