@@ -210,10 +210,10 @@ static int cmd_create(WalletToolConfig cfg)
         printf("Wallet created at: %s\n", cfg.path.c_str());
     }
 
-    // 5. Generate first address.
-    auto addr_result = w->get_new_address("default");
-    if (addr_result.is_ok()) {
-        printf("First receive address: %s\n", addr_result.value().c_str());
+    // 5. Display the first receive address (already created by CWallet::create).
+    auto addrs = w->address_manager().get_receive_addresses();
+    if (!addrs.empty()) {
+        printf("Receive address: %s\n", addrs[0].address.c_str());
     }
 
     auto save_result = w->save();
