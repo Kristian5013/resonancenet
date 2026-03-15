@@ -125,6 +125,10 @@ static JsonValue rpc_getblocktemplate(const RPCRequest& req,
     result.set("d_ff", JsonValue(static_cast<int64_t>(tip->header.d_ff)));
     result.set("stagnation_count",
                JsonValue(static_cast<int64_t>(tip->header.stagnation_count)));
+    result.set("difficulty_delta",
+               JsonValue(static_cast<double>(tip->header.difficulty_delta)));
+    result.set("vocab_size",
+               JsonValue(static_cast<int64_t>(tip->header.vocab_size)));
 
     // 4. Transactions available from mempool.
     JsonValue transactions = JsonValue::array();
