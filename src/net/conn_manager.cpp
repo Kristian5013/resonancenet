@@ -857,6 +857,10 @@ void ConnManager::send_version(CConnection& conn) {
     ver.start_height = best_height_.load();
     ver.relay        = true;
 
+    // Tell the peer what address we see them as (their external IP).
+    // This lets them discover their own routable address.
+    ver.addr_recv = conn.addr();
+
     core::DataStream ss;
     ver.serialize(ss);
     conn.send_message(msg::VERSION, ss.span());
