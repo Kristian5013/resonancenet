@@ -373,6 +373,13 @@ static JsonValue rpc_submittrainingblock(const RPCRequest& req,
     int train_steps = static_cast<int>(steps_v.as_int());
     std::string address = addr_v.as_string();
 
+    // 1b. Dataset hash — pins the training data for verifiability.
+    std::string dataset_hash_str;
+    const auto& dh_v = proof["dataset_hash"];
+    if (dh_v.is_string()) {
+        dataset_hash_str = dh_v.as_string();
+    }
+
     // 2. Validate chainstate.
     if (!ctx.chainstate) {
         return make_rpc_error(RPC_INTERNAL_ERROR, "chainstate not available");
@@ -413,7 +420,12 @@ static JsonValue rpc_submittrainingblock(const RPCRequest& req,
     block.prev_val_loss  = tip->val_loss;
     block.train_steps    = static_cast<uint32_t>(train_steps);
     block.checkpoint_hash = rnet::uint256::from_hex(checkpoint_hash);
-    block.dataset_hash   = tip->header.dataset_hash;
+    // Use miner-provided dataset hash, or inherit from parent.
+    if (!dataset_hash_str.empty()) {
+        block.dataset_hash = rnet::uint256::from_hex(dataset_hash_str);
+    } else {
+        block.dataset_hash = tip->header.dataset_hash;
+    }
 
     // 8. Compute difficulty_delta for this block height.
     uint64_t period_start_ts = tip->timestamp;

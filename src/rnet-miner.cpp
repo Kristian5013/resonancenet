@@ -9,6 +9,7 @@
 #include "core/hex.h"
 #include "core/logging.h"
 #include "crypto/ed25519.h"
+#include "crypto/hash.h"
 #include "crypto/keccak.h"
 #include "gpu/backend.h"
 #include "gpu/context.h"
@@ -28,6 +29,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -448,6 +450,24 @@ static int run_mining_loop(const MinerCliConfig& cfg)
     }
     printf("Validation data: %zu tokens\n", val_loader.total_tokens());
 
+    // 5b. Compute dataset hash (keccak256d of train + val files).
+    std::string dataset_hash_hex;
+    {
+        rnet::crypto::HashWriter hasher{};
+        auto append_file = [&](const std::string& path) {
+            std::ifstream f(path, std::ios::binary);
+            char buf[65536];
+            while (f.read(buf, sizeof(buf)) || f.gcount() > 0) {
+                hasher.write(reinterpret_cast<const uint8_t*>(buf),
+                             static_cast<size_t>(f.gcount()));
+            }
+        };
+        append_file(cfg.train_data);
+        append_file(cfg.val_data);
+        dataset_hash_hex = hasher.get_hash256().to_hex();
+        printf("Dataset hash: %s\n", dataset_hash_hex.c_str());
+    }
+
     // 6. Load consensus parameters (mainnet defaults).
     auto consensus = rnet::consensus::ConsensusParams::mainnet();
 
@@ -657,7 +677,8 @@ static int run_mining_loop(const MinerCliConfig& cfg)
                           << "\"checkpoint_hash\":\"" << new_hash << "\","
                           << "\"val_loss\":" << new_val_loss << ","
                           << "\"train_steps\":" << n_steps << ","
-                          << "\"address\":\"" << cfg.miner_address << "\""
+                          << "\"address\":\"" << cfg.miner_address << "\","
+                          << "\"dataset_hash\":\"" << dataset_hash_hex << "\""
                           << "}]";
 
             auto submit_resp = rpc_call(cfg.host, cfg.port, auth,
