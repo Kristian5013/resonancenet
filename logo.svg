@@ -10,7 +10,85 @@
       <stop offset="100%" stop-color="#FFF" stop-opacity="0"/>
     </radialGradient>
   </defs>
+
+  <!-- Gold coin -->
   <circle cx="256" cy="256" r="250" fill="url(#g)"/>
+
+  <!-- Tilted R with neural pattern inside, rotated ~12 degrees right -->
+  <g transform="rotate(12, 256, 256)">
+
+    <!-- R shape as clip path reference - draw R outline -->
+    <clipPath id="rClip">
+      <!-- Custom R path -->
+      <path d="
+        M 170 400 L 170 112
+        L 280 112 Q 350 112 350 182 Q 350 245 280 252
+        L 350 400 L 310 400 L 245 258
+        L 210 258 L 210 400 Z
+        M 210 148 L 210 225 L 270 225 Q 310 225 310 186
+        Q 310 148 270 148 Z
+      "/>
+    </clipPath>
+
+    <!-- Neural network INSIDE the R -->
+    <g clip-path="url(#rClip)">
+      <!-- R background -->
+      <rect x="150" y="100" width="220" height="320" fill="#8B6914"/>
+
+      <!-- Neural connections inside R -->
+      <g stroke="#DAA520" stroke-width="1.8" opacity="0.5" stroke-linecap="round">
+        <line x1="185" y1="140" x2="230" y2="180"/>
+        <line x1="185" y1="140" x2="270" y2="170"/>
+        <line x1="185" y1="140" x2="250" y2="210"/>
+        <line x1="230" y1="180" x2="290" y2="200"/>
+        <line x1="230" y1="180" x2="270" y2="240"/>
+        <line x1="270" y1="170" x2="320" y2="200"/>
+        <line x1="270" y1="170" x2="290" y2="240"/>
+        <line x1="290" y1="200" x2="320" y2="240"/>
+        <line x1="250" y1="210" x2="220" y2="260"/>
+        <line x1="250" y1="210" x2="280" y2="270"/>
+        <line x1="270" y1="240" x2="310" y2="280"/>
+        <line x1="270" y1="240" x2="250" y2="300"/>
+        <line x1="220" y1="260" x2="195" y2="310"/>
+        <line x1="220" y1="260" x2="250" y2="300"/>
+        <line x1="280" y1="270" x2="320" y2="310"/>
+        <line x1="280" y1="270" x2="310" y2="340"/>
+        <line x1="195" y1="310" x2="195" y2="360"/>
+        <line x1="195" y1="310" x2="220" y2="350"/>
+        <line x1="250" y1="300" x2="220" y2="350"/>
+        <line x1="310" y1="280" x2="330" y2="330"/>
+        <line x1="310" y1="280" x2="340" y2="360"/>
+        <line x1="320" y1="310" x2="340" y2="360"/>
+        <line x1="195" y1="360" x2="195" y2="395"/>
+        <line x1="220" y1="350" x2="195" y2="395"/>
+        <line x1="330" y1="330" x2="340" y2="395"/>
+      </g>
+
+      <!-- Neural nodes inside R -->
+      <g fill="#FFD700" opacity="0.7">
+        <circle cx="185" cy="140" r="4"/>
+        <circle cx="230" cy="180" r="4.5"/>
+        <circle cx="270" cy="170" r="4"/>
+        <circle cx="290" cy="200" r="4"/>
+        <circle cx="250" cy="210" r="4.5"/>
+        <circle cx="320" cy="200" r="3.5"/>
+        <circle cx="320" cy="240" r="3.5"/>
+        <circle cx="270" cy="240" r="4.5"/>
+        <circle cx="220" cy="260" r="4"/>
+        <circle cx="280" cy="270" r="4"/>
+        <circle cx="195" cy="310" r="4.5"/>
+        <circle cx="250" cy="300" r="4"/>
+        <circle cx="310" cy="280" r="4"/>
+        <circle cx="320" cy="310" r="3.5"/>
+        <circle cx="195" cy="360" r="4"/>
+        <circle cx="220" cy="350" r="4"/>
+        <circle cx="330" cy="330" r="3.5"/>
+        <circle cx="310" cy="340" r="3.5"/>
+        <circle cx="340" cy="360" r="3.5"/>
+      </g>
+    </g>
+  </g>
+
+  <!-- Shine -->
   <circle cx="256" cy="256" r="250" fill="url(#s)"/>
-  <text x="256" y="290" text-anchor="middle" font-family="Georgia, serif" font-size="180" font-weight="bold" fill="#8B6914">R</text>
 </svg>
