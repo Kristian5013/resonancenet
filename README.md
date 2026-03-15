@@ -98,39 +98,159 @@ L0  rnet_util
 
 ## Quick Start
 
-### Download
+### 1. Download
 
 Pre-built binaries for Linux, macOS, and Windows are available on the [Releases](https://github.com/Kristian5013/resonancenet/releases) page.
+
+| Platform | Archive |
+|----------|---------|
+| Windows x64 | `resonancenet-X.X.X-win64.zip` |
+| Linux x86_64 | `resonancenet-X.X.X-x86_64-linux.tar.gz` |
+| macOS ARM64 | `resonancenet-X.X.X-arm64-darwin.tar.gz` |
+
+### 2. Extract
+
+**Windows:**
+```
+# Right-click the .zip → Extract All, or:
+tar -xf resonancenet-0.1.0-win64.zip
+cd resonancenet-0.1.0-win64
+```
+
+**Linux / macOS:**
+```bash
+tar xzf resonancenet-0.1.0-x86_64-linux.tar.gz
+cd resonancenet-0.1.0-x86_64-linux
+```
+
+### 3. Run a Full Node (Mainnet)
+
+```bash
+# Start the node — it will connect to seed nodes automatically
+./rnetd
+
+# On Windows:
+rnetd.exe
+```
+
+The node creates a data directory at:
+- **Windows**: `%APPDATA%\ResonanceNet\`
+- **Linux**: `~/.resonancenet/`
+- **macOS**: `~/Library/Application Support/ResonanceNet/`
+
+### 4. Check Node Status
+
+Open a second terminal in the same folder:
+
+```bash
+./rnet-cli getblockchaininfo
+```
+
+This shows: current block height, best block hash, validation loss, model dimensions, and sync progress.
+
+### 5. Create a Wallet
+
+```bash
+# Create a new HD wallet with a 24-word recovery phrase
+./rnet-wallet-tool create
+
+# IMPORTANT: Write down your recovery phrase and store it safely!
+# Without it, your coins are unrecoverable.
+
+# Get your receiving address (starts with rn1...)
+./rnet-cli getnewaddress
+```
+
+### 6. Start Mining (Training the AI)
+
+Mining = training the shared neural network. You need a GPU (CUDA, Vulkan, or Metal).
+
+```bash
+# Start the miner — connects to your local node
+./rnet-miner
+
+# On Windows:
+rnet-miner.exe
+```
+
+The miner will:
+1. Load the latest model checkpoint from the chain tip
+2. Train the MinGRU model on the consensus dataset
+3. Evaluate validation loss after training
+4. If loss improved by >= `difficulty_delta` → valid block found!
+5. Block reward: **50 RNET** (halves as supply grows)
+
+Expected block time: **~10 minutes** (same as Bitcoin).
+
+### 7. Send and Receive RNET
+
+```bash
+# Check your balance
+./rnet-cli getbalance
+
+# Send coins to another address
+./rnet-cli sendtoaddress rn1qxyz...destination...address 10.0
+
+# View transaction history
+./rnet-cli listtransactions
+```
+
+### 8. Lightning Network (Instant Payments)
+
+For instant off-chain transactions:
+
+```bash
+# Open a payment channel with a peer (locks 1.0 RNET)
+./rnet-cli openchannel <peer_pubkey> 1.0
+
+# Pay a Lightning invoice instantly
+./rnet-cli pay <invoice>
+
+# Create an invoice for receiving
+./rnet-cli createinvoice 0.5 "Payment for service"
+
+# List open channels
+./rnet-cli listchannels
+```
+
+### 9. Useful RPC Commands
+
+```bash
+./rnet-cli help                    # List all available commands
+./rnet-cli getblockchaininfo       # Chain status, model info
+./rnet-cli getmininginfo           # Mining difficulty, hashrate
+./rnet-cli gettraininginfo         # Model config, loss history
+./rnet-cli getpeerinfo             # Connected peers
+./rnet-cli getblock <hash>         # Full block data with PoT fields
+./rnet-cli getblockcount           # Current block height
+./rnet-cli stop                    # Gracefully shut down the node
+```
+
+---
 
 ### Join the Testnet
 
 ```bash
-# Extract and run
-tar xzf resonancenet-0.1.0-testnet-x86_64-linux.tar.gz
-cd resonancenet-0.1.0-testnet
-
-# Connect to the seed node
-./rnetd -testnet -addnode=188.137.227.180:19555
-
-# Check sync status
+# Add -testnet flag to any command
+./rnetd -testnet
 ./rnet-cli -testnet getblockchaininfo
-
-# Start mining (training the AI)
 ./rnet-miner -testnet
 ```
+
+Testnet seed node: `188.137.227.180:19555`
 
 ### Local Development (regtest)
 
 ```bash
-# Start a regtest node
-./rnetd -regtest -datadir=./data1 -port=19555 -rpcport=19556
+# Start a regtest node (10s block time, instant mining)
+./rnetd -regtest -datadir=./data1 -port=29555 -rpcport=29554
 
 # Generate blocks
-./rnet-cli -regtest -rpcport=19556 generate 10
+./rnet-cli -regtest -rpcport=29554 generate 10
 
 # Two-node test
-./rnetd -regtest -datadir=./data2 -port=19565 -rpcport=19566 -connect=127.0.0.1:19555
-./rnet-cli -regtest -rpcport=19556 getpeerinfo
+./rnetd -regtest -datadir=./data2 -port=29565 -rpcport=29564 -connect=127.0.0.1:29555
+./rnet-cli -regtest -rpcport=29554 getpeerinfo
 ```
 
 ---
@@ -164,11 +284,11 @@ ninja -C build
 
 ## Network
 
-| Network | P2P Port | RPC Port | Seed Node |
-|---------|----------|----------|-----------|
-| Mainnet | 9555 | 9556 | — |
-| Testnet | 19555 | 19556 | `188.137.227.180:19555` |
-| Regtest | 19555 | 19556 | localhost |
+| Network | P2P Port | RPC Port | Lightning Port | Seed Node |
+|---------|----------|----------|----------------|-----------|
+| Mainnet | 9555 | 9554 | 9556 | `188.137.227.180:9555` |
+| Testnet | 19555 | 19554 | 19556 | `188.137.227.180:19555` |
+| Regtest | 29555 | 29554 | 29556 | localhost |
 
 ## RPC API
 
