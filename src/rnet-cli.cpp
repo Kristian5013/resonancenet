@@ -315,46 +315,6 @@ static std::string extract_json_field(const std::string& json,
 //  Chat REPL mode
 // ===========================================================================
 
-// ---------------------------------------------------------------------------
-// run_chat_mode
-// ---------------------------------------------------------------------------
-// Interactive AI chat loop: sends user messages via the "chat" RPC method
-// and prints responses until the user types "exit" or "quit".
-// ---------------------------------------------------------------------------
-static int run_chat_mode(const std::string& host, uint16_t port,
-                          const std::string& auth)
-{
-    fprintf(stderr, "ResonanceNet AI Chat (connected to %s:%u)\n", host.c_str(), port);
-    fprintf(stderr, "Type your message and press Enter. Type 'exit' to quit.\n\n");
-
-    std::string line;
-    while (true) {
-        fprintf(stderr, "You> ");
-        if (!std::getline(std::cin, line)) break;
-        if (line == "exit" || line == "quit") break;
-        if (line.empty()) continue;
-
-        std::string rpc_body = build_json_rpc("chat", {line});
-        auto resp = http_post(host, port, "/", rpc_body, auth);
-
-        if (resp.status_code < 0) {
-            fprintf(stderr, "Error: %s\n", resp.body.c_str());
-            continue;
-        }
-
-        std::string error_val = extract_json_field(resp.body, "error");
-        if (!error_val.empty() && error_val != "null") {
-            std::string msg = extract_json_field(error_val, "message");
-            fprintf(stderr, "RPC error: %s\n", msg.empty() ? error_val.c_str() : msg.c_str());
-            continue;
-        }
-
-        std::string result = extract_json_field(resp.body, "result");
-        fprintf(stdout, "AI> %s\n\n", result.c_str());
-    }
-    return 0;
-}
-
 // ===========================================================================
 //  Argument parsing
 // ===========================================================================
@@ -367,7 +327,6 @@ struct CliConfig {
     std::string cookie_file;
     std::string method;
     std::vector<std::string> params;
-    bool chat_mode = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -385,9 +344,6 @@ static void print_usage()
         "  -rpcpassword=<pw>     RPC password\n"
         "  -rpccookiefile=<path> Path to .cookie file\n"
         "  -help                 Show this help message\n"
-        "\n"
-        "Special modes:\n"
-        "  rnet-cli chat         Interactive AI chat REPL\n"
         "\n"
         "Common commands:\n"
         "  getblockchaininfo     Get blockchain state\n"
@@ -426,9 +382,6 @@ static CliConfig parse_cli_args(int argc, char* argv[])
         } else if (arg[0] != '-') {
             if (cfg.method.empty()) {
                 cfg.method = arg;
-                if (cfg.method == "chat") {
-                    cfg.chat_mode = true;
-                }
             } else {
                 cfg.params.push_back(arg);
             }
@@ -471,7 +424,7 @@ int main(int argc, char* argv[])
 
     CliConfig cfg = parse_cli_args(argc, argv);
 
-    if (cfg.method.empty() && !cfg.chat_mode) {
+    if (cfg.method.empty()) {
         print_usage();
         return 1;
     }
@@ -505,16 +458,7 @@ int main(int argc, char* argv[])
         }
     }
 
-    // 2. Chat mode.
-    if (cfg.chat_mode) {
-        int rc = run_chat_mode(cfg.host, cfg.port, auth);
-#ifdef _WIN32
-        WSACleanup();
-#endif
-        return rc;
-    }
-
-    // 3. Single RPC call.
+    // 2. Single RPC call.
     std::string rpc_body = build_json_rpc(cfg.method, cfg.params);
     auto resp = http_post(cfg.host, cfg.port, "/", rpc_body, auth);
 
