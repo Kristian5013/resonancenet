@@ -172,9 +172,12 @@ int64_t CConnection::recv_data() {
     }
 
     if (n == 0) {
-        // Graceful close
-        LogPrint(NET, "Peer %llu closed connection",
-                 static_cast<unsigned long long>(id_));
+        // Graceful close — log once and mark disconnected.
+        if (!disconnected_) {
+            disconnected_ = true;
+            LogPrint(NET, "Peer %llu closed connection",
+                     static_cast<unsigned long long>(id_));
+        }
         return 0;
     }
 

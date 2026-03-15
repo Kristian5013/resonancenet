@@ -238,6 +238,7 @@ private:
     socket_t socket_;
 
     std::atomic<ConnState> state_{ConnState::CONNECTING};
+    bool disconnected_{false};  ///< Log disconnect only once
 
     // Version handshake state
     int32_t version_ = 0;
