@@ -558,6 +558,13 @@ Result<void> init_network(NodeContext& ctx)
                 std::span<const uint8_t>(block_data.data(), block_data.size()));
             primitives::CBlock block;
             try { block.unserialize(ss); } catch (...) { return false; }
+
+            // Skip if block is already known (prevents relay loops).
+            auto block_hash = block.hash();
+            if (ctx.chainstate->lookup_block_index(block_hash)) {
+                return true;  // already have it, no relay needed
+            }
+
             auto res = ctx.chainstate->accept_block(block);
             if (res.is_err()) {
                 LogPrint(NET, "Block from peer %llu rejected: %s",
