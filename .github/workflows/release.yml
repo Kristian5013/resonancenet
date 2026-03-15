@@ -113,7 +113,7 @@ jobs:
           VERSION="${{ steps.version.outputs.VERSION }}"
           PKG_NAME="resonancenet-${VERSION}-${{ matrix.name }}"
           mkdir -p "${PKG_NAME}"
-          for bin in rnetd rnet-cli rnet-tx rnet-wallet-tool rnet-util rnet-miner; do
+          for bin in rnetd rnet-cli rnet-tx rnet-wallet-tool rnet-util rnet-miner rnet-prepare-dataset rnet-train-test; do
             cp "build/${bin}" "${PKG_NAME}/" 2>/dev/null || true
           done
           cp COPYING README.md "${PKG_NAME}/"
@@ -127,7 +127,7 @@ jobs:
           VERSION="${{ steps.version.outputs.VERSION }}"
           PKG_NAME="resonancenet-${VERSION}-${{ matrix.name }}"
           mkdir -p "${PKG_NAME}"
-          for bin in rnetd rnet-cli rnet-tx rnet-wallet-tool rnet-util rnet-miner; do
+          for bin in rnetd rnet-cli rnet-tx rnet-wallet-tool rnet-util rnet-miner rnet-prepare-dataset rnet-train-test; do
             cp "build/${bin}.exe" "${PKG_NAME}/" 2>/dev/null || true
           done
           cp COPYING README.md "${PKG_NAME}/"
