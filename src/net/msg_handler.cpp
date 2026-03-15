@@ -227,6 +227,14 @@ void MsgHandler::process_addr(CConnection& conn, const std::string& /*cmd*/,
                  static_cast<unsigned long long>(addrs.size()),
                  static_cast<unsigned long long>(conn.id()));
     }
+
+    // 5. Relay to other peers (probabilistic, like Bitcoin).
+    //    Small addr messages (<=10) are relayed immediately;
+    //    larger batches (e.g. getaddr responses) are not relayed
+    //    to avoid flooding.
+    if (!addrs.empty() && addrs.size() <= 10) {
+        relay_addr(conn.id(), addrs);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -957,6 +965,156 @@ void MsgHandler::send_notfound(CConnection& conn,
 
     // 2. Send the notfound message.
     conn.send_message(msg::NOTFOUND, payload.span());
+}
+
+// ---------------------------------------------------------------------------
+// set_local_addr
+// ---------------------------------------------------------------------------
+// Records the node's externally-reachable address, typically learned from
+// the addr_recv field of incoming version messages.  Called by ConnManager
+// after the handshake so we know what IP peers see us as.
+// ---------------------------------------------------------------------------
+void MsgHandler::set_local_addr(const CNetAddr& addr) {
+    // 1. Ignore non-routable addresses (loopback, private, etc.).
+    if (!addr.is_routable()) return;
+
+    // 2. Store the address under lock.
+    {
+        LOCK(cs_local_addr_);
+        local_addr_ = addr;
+    }
+    local_addr_set_.store(true);
+
+    LogPrint(NET, "Discovered local address: %s", addr.to_string().c_str());
+}
+
+// ---------------------------------------------------------------------------
+// push_local_addr
+// ---------------------------------------------------------------------------
+// Sends our own listening address to a single peer as a one-entry addr
+// message.  Called right after the version/verack handshake completes so
+// the remote peer learns about us and can share our address with others.
+// ---------------------------------------------------------------------------
+void MsgHandler::push_local_addr(CConnection& conn) {
+    // 1. Only advertise if we have discovered our external address.
+    if (!local_addr_set_.load()) return;
+
+    // 2. Build a single-entry addr message with our address.
+    CNetAddr our_addr;
+    {
+        LOCK(cs_local_addr_);
+        our_addr = local_addr_;
+    }
+    our_addr.time = core::get_time();
+
+    std::vector<CNetAddr> addrs = {our_addr};
+    auto payload = build_addr_payload(addrs);
+    conn.send_message(msg::ADDR, payload.span());
+
+    LogDebug(NET, "Advertised local address %s to peer %llu",
+             our_addr.to_string().c_str(),
+             static_cast<unsigned long long>(conn.id()));
+}
+
+// ---------------------------------------------------------------------------
+// advertise_local_addr
+// ---------------------------------------------------------------------------
+// Sends our own address to a randomly chosen connected peer.  Called
+// periodically (~30 minutes) from the maintenance loop to keep our
+// address fresh in the network's addr tables.
+// ---------------------------------------------------------------------------
+void MsgHandler::advertise_local_addr() {
+    // 1. Only advertise if we have a known external address.
+    if (!local_addr_set_.load()) return;
+
+    // 2. Get all connected peers.
+    auto conns = connman_.get_connections();
+    if (conns.empty()) return;
+
+    // 3. Filter to handshake-complete peers.
+    std::vector<std::shared_ptr<CConnection>> ready;
+    for (auto& c : conns) {
+        if (c->handshake_complete() && c->is_connected()) {
+            ready.push_back(c);
+        }
+    }
+    if (ready.empty()) return;
+
+    // 4. Pick a random peer.
+    size_t idx = static_cast<size_t>(core::get_rand_range(ready.size()));
+    auto& chosen = ready[idx];
+
+    // 5. Send our address.
+    CNetAddr our_addr;
+    {
+        LOCK(cs_local_addr_);
+        our_addr = local_addr_;
+    }
+    our_addr.time = core::get_time();
+
+    std::vector<CNetAddr> addrs = {our_addr};
+    auto payload = build_addr_payload(addrs);
+    chosen->send_message(msg::ADDR, payload.span());
+
+    LogDebug(NET, "Periodic addr advertisement to peer %llu",
+             static_cast<unsigned long long>(chosen->id()));
+}
+
+// ---------------------------------------------------------------------------
+// relay_addr
+// ---------------------------------------------------------------------------
+// Relays a set of addresses to other connected peers with ~50%
+// probability per peer (Bitcoin-style stochastic relay).  The sender
+// is excluded to prevent echo loops.  At most 2 peers are selected
+// per address batch to limit bandwidth.
+// ---------------------------------------------------------------------------
+void MsgHandler::relay_addr(uint64_t from_id,
+                            const std::vector<CNetAddr>& addrs) {
+    if (addrs.empty()) return;
+
+    // 1. Serialize the addr payload once.
+    auto payload = build_addr_payload(addrs);
+
+    // 2. Collect eligible peers (not the sender).
+    auto conns = connman_.get_connections();
+    std::vector<std::shared_ptr<CConnection>> targets;
+    for (auto& c : conns) {
+        if (c->id() != from_id &&
+            c->handshake_complete() &&
+            c->is_connected()) {
+            targets.push_back(c);
+        }
+    }
+    if (targets.empty()) return;
+
+    // 3. Relay to each target with ~50% probability, up to 2 peers.
+    int relayed = 0;
+    for (auto& t : targets) {
+        if (relayed >= 2) break;
+        if (core::get_rand_bool()) {
+            t->send_message(msg::ADDR, payload.span());
+            ++relayed;
+            LogDebug(NET, "Relayed %zu addr(s) to peer %llu",
+                     addrs.size(),
+                     static_cast<unsigned long long>(t->id()));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// build_addr_payload
+// ---------------------------------------------------------------------------
+// Serializes a vector of CNetAddr into a wire-format addr message
+// payload: [compact_size count] [addr_1] [addr_2] ...
+// ---------------------------------------------------------------------------
+core::DataStream MsgHandler::build_addr_payload(
+    const std::vector<CNetAddr>& addrs) {
+    core::DataStream payload;
+    core::serialize_compact_size(payload, addrs.size());
+    for (const auto& addr : addrs) {
+        addr.serialize(payload);
+    }
+    return payload;
 }
 
 } // namespace rnet::net

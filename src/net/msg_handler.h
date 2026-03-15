@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <span>
@@ -121,10 +122,30 @@ public:
         checkpoint_store_ = store;
     }
 
+    // ── Addr propagation ────────────────────────────────────────────
+
+    /// Set our discovered external address (learned from version messages).
+    /// Once set, this address is advertised to newly-connected peers and
+    /// periodically re-broadcast to keep it fresh in the network.
+    void set_local_addr(const CNetAddr& addr);
+
+    /// Send our local address to a specific peer as an addr message.
+    /// Called after handshake completion to self-advertise.
+    void push_local_addr(CConnection& conn);
+
+    /// Send our local address to a random connected peer.
+    /// Called periodically (~30 min) by the maintenance loop.
+    void advertise_local_addr();
+
 private:
     ConnManager& connman_;
     AddrManager* addrman_ = nullptr;
     CheckpointStore* checkpoint_store_ = nullptr;
+
+    // Addr propagation state
+    mutable core::Mutex cs_local_addr_;
+    CNetAddr local_addr_;                   ///< Our discovered external address
+    std::atomic<bool> local_addr_set_{false}; ///< True once local_addr_ is valid
 
     // Callbacks
     BlockCallback on_new_block_;
@@ -185,6 +206,13 @@ private:
 
     /// Send notfound for items we don't have
     void send_notfound(CConnection& conn, const std::vector<CInv>& items);
+
+    /// Relay addresses to other connected peers (probabilistic, ~50%).
+    /// Excludes the originating peer to prevent echo loops.
+    void relay_addr(uint64_t from_id, const std::vector<CNetAddr>& addrs);
+
+    /// Build a serialized addr message payload from an address list.
+    static core::DataStream build_addr_payload(const std::vector<CNetAddr>& addrs);
 };
 
 }  // namespace rnet::net

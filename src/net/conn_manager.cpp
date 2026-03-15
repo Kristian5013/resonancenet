@@ -634,7 +634,14 @@ void ConnManager::maintenance_loop() {
             disconnect(id);
         }
 
-        // 3. Auto-connect: fill outbound slots from AddrManager.
+        // 3. Periodic addr self-advertisement (~every 30 min).
+        if (addr_broadcast_fn_ &&
+            (now - last_addr_broadcast_) > ADDR_BROADCAST_INTERVAL) {
+            last_addr_broadcast_ = now;
+            addr_broadcast_fn_();
+        }
+
+        // 4. Auto-connect: fill outbound slots from AddrManager.
         if (addrman_ && outbound_count() < static_cast<size_t>(MAX_OUTBOUND)) {
             CNetAddr addr = addrman_->select();
             if (addr.port != 0 && !is_connected(addr) && !is_banned(addr)) {
@@ -802,12 +809,22 @@ void ConnManager::handle_version(CConnection& conn,
     conn.set_relay(ver.relay);
     conn.set_version_received(true);
 
-    // 3. If this is an inbound peer, send our own VERSION first.
+    // 3. Learn our external address from the peer's addr_recv field.
+    //    The remote node tells us what IP+port it connected to, which
+    //    is how we discover our externally-reachable address.
+    if (ver.addr_recv.is_routable() && external_addr_fn_) {
+        CNetAddr discovered = ver.addr_recv;
+        discovered.port = listen_port_;
+        discovered.services = local_services_;
+        external_addr_fn_(discovered);
+    }
+
+    // 4. If this is an inbound peer, send our own VERSION first.
     if (conn.is_inbound() && !conn.version_sent()) {
         send_version(conn);
     }
 
-    // 4. Acknowledge with VERACK.
+    // 5. Acknowledge with VERACK.
     conn.send_message(msg::VERACK);
 
     LogPrint(NET, "Received version from peer %llu: %s v%d height=%d",

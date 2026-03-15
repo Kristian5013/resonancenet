@@ -41,6 +41,9 @@ public:
     /// Inactivity timeout (seconds) — disconnect if no recv in this time
     static constexpr int64_t INACTIVITY_TIMEOUT = 600;
 
+    /// Periodic addr self-advertisement interval (seconds, ~30 min)
+    static constexpr int64_t ADDR_BROADCAST_INTERVAL = 1800;
+
     /// Message handler callback type
     using MessageHandler = std::function<void(
         CConnection& conn, const std::string& command,
@@ -132,6 +135,21 @@ public:
     void set_best_height(int32_t h) { best_height_ = h; }
     int32_t best_height() const { return best_height_.load(); }
 
+    /// Set a callback invoked periodically (~30 min) for addr broadcast.
+    /// The maintenance loop calls this so the MsgHandler can push our
+    /// address to a random peer without ConnManager knowing about it.
+    using AddrBroadcastFn = std::function<void()>;
+    void set_addr_broadcast_fn(AddrBroadcastFn fn) {
+        addr_broadcast_fn_ = std::move(fn);
+    }
+
+    /// Set a callback invoked when we learn our external address from
+    /// a peer's version message (addr_recv field).
+    using ExternalAddrFn = std::function<void(const CNetAddr&)>;
+    void set_external_addr_fn(ExternalAddrFn fn) {
+        external_addr_fn_ = std::move(fn);
+    }
+
     // ── Ban management ──────────────────────────────────────────────
 
     /// Ban a peer address for a duration (default 24 hours)
@@ -183,6 +201,15 @@ private:
 
     /// Address manager for peer discovery
     AddrManager* addrman_ = nullptr;
+
+    /// Periodic addr self-advertisement callback (set by init code)
+    AddrBroadcastFn addr_broadcast_fn_;
+
+    /// External address discovery callback (set by init code)
+    ExternalAddrFn external_addr_fn_;
+
+    /// Timestamp of last addr broadcast (unix seconds)
+    int64_t last_addr_broadcast_ = 0;
 
     /// Thread group for network threads
     core::ThreadGroup threads_;

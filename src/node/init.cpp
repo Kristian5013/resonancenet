@@ -674,10 +674,41 @@ Result<void> init_network(NodeContext& ctx)
             return true;
         });
 
-    // 15. Register all P2P message handlers
+    // 15. Addr propagation — self-advertisement + relay
+    //
+    //     a) When a peer sends us a version message, its addr_recv field
+    //        reveals what IP address the remote peer sees us as.  Feed
+    //        that into MsgHandler so it knows our external address.
+    //     b) After each handshake completes, push our address to the new
+    //        peer so they learn about us and can relay it to others.
+    //     c) Every ~30 minutes, re-advertise our address to a random
+    //        peer to keep it fresh in the network.
+    ctx.connman->set_external_addr_fn(
+        [&ctx](const net::CNetAddr& addr) {
+            if (ctx.msg_handler) {
+                ctx.msg_handler->set_local_addr(addr);
+            }
+        });
+
+    ctx.connman->set_addr_broadcast_fn(
+        [&ctx]() {
+            if (ctx.msg_handler) {
+                ctx.msg_handler->advertise_local_addr();
+            }
+        });
+
+    ctx.connman->on_connected.connect(
+        [&ctx](net::CConnection& conn) {
+            // 15a. Self-advertise to new peer after handshake.
+            if (ctx.msg_handler) {
+                ctx.msg_handler->push_local_addr(conn);
+            }
+        });
+
+    // 16. Register all P2P message handlers
     ctx.msg_handler->register_handlers();
 
-    // 16. Best-height update: when chainstate connects a new block, keep
+    // 17. Best-height update: when chainstate connects a new block, keep
     //     ConnManager's advertised height current for VERSION messages.
     //     Block relay is handled separately:
     //       - Peer-received blocks: relayed in step 11a via broadcast_except
@@ -687,12 +718,12 @@ Result<void> init_network(NodeContext& ctx)
             [&ctx](const chain::CBlockIndex* pindex) {
                 if (!ctx.connman || !pindex) return;
 
-                // 16a. Update ConnManager best height for version messages.
+                // 17a. Update ConnManager best height for version messages.
                 ctx.connman->set_best_height(pindex->height);
             });
     }
 
-    // 17. IBD: when a new peer connects with a higher height, start syncing
+    // 18. IBD: when a new peer connects with a higher height, start syncing
     if (ctx.block_sync && ctx.chainstate) {
         ctx.connman->on_connected.connect(
             [&ctx](net::CConnection& conn) {
@@ -704,7 +735,7 @@ Result<void> init_network(NodeContext& ctx)
                          peer_height, our_height);
 
                 if (peer_height > our_height) {
-                    // 17a. This peer has blocks we need -- start IBD
+                    // 18a. This peer has blocks we need -- start IBD
                     net::CPeer peer;
                     peer.id = conn.id();
                     peer.start_height = peer_height;
@@ -719,7 +750,7 @@ Result<void> init_network(NodeContext& ctx)
             });
     }
 
-    // 18. Start listening if configured
+    // 19. Start listening if configured
     if (ctx.listen) {
         auto start_res = ctx.connman->start(ctx.listen_port);
         if (start_res.is_err()) {
@@ -728,7 +759,7 @@ Result<void> init_network(NodeContext& ctx)
         }
     }
 
-    // 19. Connect to -connect= and -addnode= peers
+    // 20. Connect to -connect= and -addnode= peers
     auto connect_to_peers = [&](const std::vector<std::string>& peers) {
         for (const auto& peer_str : peers) {
             // Parse "host:port"
