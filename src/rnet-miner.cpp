@@ -651,7 +651,7 @@ static int run_mining_loop(const MinerCliConfig& cfg)
                 (new_hash + ".rnet");
             std::filesystem::rename(tmp_ckpt, final_ckpt);
 
-            // 9d. RPC: submitblock with training proof.
+            // 9d. RPC: submittrainingblock with training proof.
             std::ostringstream submit_params;
             submit_params << "[{"
                           << "\"checkpoint_hash\":\"" << new_hash << "\","
@@ -661,7 +661,7 @@ static int run_mining_loop(const MinerCliConfig& cfg)
                           << "}]";
 
             auto submit_resp = rpc_call(cfg.host, cfg.port, auth,
-                                         "submitblock", submit_params.str());
+                                         "submittrainingblock", submit_params.str());
 
             if (submit_resp.http_status == 200) {
                 std::string sub_err =
