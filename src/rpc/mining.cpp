@@ -8,11 +8,13 @@
 #include "consensus/block_reward.h"
 #include "consensus/growth_policy.h"
 #include "consensus/merkle.h"
+#include "consensus/proof_of_training.h"
 #include "core/logging.h"
 #include "core/stream.h"
 #include "core/time.h"
 #include "mempool/pool.h"
 #include "node/context.h"
+#include "primitives/address.h"
 #include "primitives/block.h"
 #include "primitives/outpoint.h"
 #include "primitives/transaction.h"
@@ -376,23 +378,141 @@ static JsonValue rpc_submittrainingblock(const RPCRequest& req,
     }
 
     // 3. Get the current tip.
-    auto tip = ctx.chainstate->tip();
+    auto* tip = ctx.chainstate->tip();
+    if (!tip) {
+        return make_rpc_error(RPC_INTERNAL_ERROR, "no chain tip");
+    }
 
-    // 4. Log acceptance.
-    LogPrintf("SubmitTrainingBlock: val_loss=%.6f  steps=%d  ckpt=%s  addr=%s",
-              static_cast<double>(val_loss), train_steps,
-              checkpoint_hash.c_str(), address.c_str());
+    const auto& params = ctx.chainstate->params();
 
-    // 5. For now, return success with the block info.
-    //    Full block construction and chainstate integration requires
-    //    assembling the coinbase, signing with miner key, etc.
-    //    This will be completed when block assembly is wired up.
-    JsonValue result = JsonValue::object();
-    result.set("accepted", JsonValue(true));
-    result.set("val_loss", JsonValue(static_cast<double>(val_loss)));
-    result.set("checkpoint_hash", JsonValue(checkpoint_hash));
-    result.set("train_steps", JsonValue(static_cast<int64_t>(train_steps)));
-    return result;
+    // 4. Decode the miner reward address into a scriptPubKey.
+    auto decoded = primitives::decode_address(address);
+    if (decoded.is_err()) {
+        return make_rpc_error(RPC_INVALID_PARAMS,
+                              "invalid address: " + decoded.error());
+    }
+    auto script_pub_key = primitives::script_from_address(decoded.value());
+
+    // 5. Construct the block header fields.
+    primitives::CBlock block;
+    block.version   = 1;
+    block.height    = tip->height + 1;
+    block.prev_hash = tip->block_hash;
+    block.timestamp = static_cast<uint64_t>(core::get_time());
+    if (block.timestamp <= tip->timestamp) {
+        block.timestamp = tip->timestamp + 1;
+    }
+
+    // 6. Enforce minimum block interval.
+    uint64_t earliest = tip->timestamp
+                      + static_cast<uint64_t>(params.min_block_interval);
+    if (block.timestamp < earliest) {
+        return make_rpc_error(RPC_VERIFY_ERROR,
+            "block too soon: must wait until timestamp >= " +
+            std::to_string(earliest));
+    }
+
+    // 7. PoT fields from the submitted training proof.
+    block.val_loss       = val_loss;
+    block.prev_val_loss  = tip->val_loss;
+    block.train_steps    = static_cast<uint32_t>(train_steps);
+    block.checkpoint_hash = rnet::uint256::from_hex(checkpoint_hash);
+    block.dataset_hash   = tip->header.dataset_hash;
+
+    // 8. Compute difficulty_delta for this block height.
+    uint64_t period_start_ts = tip->timestamp;
+    if (tip->prev) {
+        period_start_ts = tip->prev->timestamp;
+    }
+    block.difficulty_delta = consensus::compute_next_difficulty(
+        block.height, tip->header.difficulty_delta,
+        period_start_ts, tip->timestamp, params);
+
+    // 9. Check PoT improvement meets difficulty threshold.
+    float improvement = block.prev_val_loss - block.val_loss;
+    if (improvement < block.difficulty_delta) {
+        return make_rpc_error(RPC_VERIFY_ERROR,
+            "insufficient improvement: " + std::to_string(improvement) +
+            " < required " + std::to_string(block.difficulty_delta));
+    }
+
+    // 10. Growth policy — compute new model dimensions.
+    bool loss_improved = block.val_loss < tip->val_loss;
+    consensus::GrowthState gstate{};
+    gstate.d_model   = tip->d_model;
+    gstate.n_layers  = tip->n_layers;
+    gstate.stagnation = tip->header.stagnation_count;
+    gstate.last_loss = tip->val_loss;
+
+    auto growth = consensus::GrowthPolicy::compute_growth(gstate, loss_improved);
+
+    block.d_model          = growth.new_d_model;
+    block.n_layers         = growth.new_n_layers;
+    block.d_ff             = growth.new_d_ff;
+    block.n_slots          = tip->header.n_slots;
+    block.vocab_size       = tip->header.vocab_size;
+    block.max_seq_len      = tip->header.max_seq_len;
+    block.n_conv_branches  = tip->header.n_conv_branches;
+    block.kernel_sizes     = tip->header.kernel_sizes;
+    block.stagnation_count = growth.new_stagnation;
+    block.growth_delta     = growth.delta_d_model;
+
+    // 11. Coinbase transaction — block reward to the miner's address.
+    consensus::EmissionState emission{};
+    auto reward = consensus::compute_block_reward(
+        block.height, emission, params);
+
+    primitives::CMutableTransaction mtx;
+    mtx.version = 1;
+
+    primitives::COutPoint null_outpoint;
+    null_outpoint.set_null();
+    std::string height_msg = "block " + std::to_string(block.height);
+    std::vector<uint8_t> script_sig(height_msg.begin(), height_msg.end());
+    primitives::CTxIn coinbase_in(null_outpoint, std::move(script_sig),
+                                  0xFFFFFFFF);
+    mtx.vin.push_back(std::move(coinbase_in));
+
+    primitives::CTxOut coinbase_out(reward.total(), std::move(script_pub_key));
+    mtx.vout.push_back(std::move(coinbase_out));
+    mtx.locktime = 0;
+
+    block.vtx.push_back(primitives::MakeTransactionRef(std::move(mtx)));
+
+    // 12. Compute merkle root.
+    block.merkle_root = consensus::block_merkle_root(block);
+
+    // 13. Submit block to chainstate for full validation and connection.
+    auto result = ctx.chainstate->accept_block(block);
+    if (result.is_err()) {
+        LogPrintf("SubmitTrainingBlock REJECTED: %s", result.error().c_str());
+        JsonValue resp = JsonValue::object();
+        resp.set("accepted", JsonValue(false));
+        resp.set("reject_reason", JsonValue(result.error()));
+        return resp;
+    }
+
+    // 14. Log the accepted block.
+    auto bhash = block.hash();
+    LogPrintf("SubmitTrainingBlock ACCEPTED: height=%d hash=%s "
+              "val_loss=%.6f d_model=%u",
+              block.height, bhash.to_hex().c_str(),
+              static_cast<double>(block.val_loss), block.d_model);
+
+    // 15. Broadcast to peers via the new-tip signal.
+    //     The on_new_tip signal is fired by accept_block internally.
+
+    // 16. Return result.
+    JsonValue resp = JsonValue::object();
+    resp.set("accepted", JsonValue(true));
+    resp.set("hash", JsonValue(bhash.to_hex()));
+    resp.set("height", JsonValue(static_cast<int64_t>(block.height)));
+    resp.set("val_loss", JsonValue(static_cast<double>(block.val_loss)));
+    resp.set("checkpoint_hash", JsonValue(checkpoint_hash));
+    resp.set("train_steps", JsonValue(static_cast<int64_t>(train_steps)));
+    resp.set("d_model", JsonValue(static_cast<int64_t>(block.d_model)));
+    resp.set("n_layers", JsonValue(static_cast<int64_t>(block.n_layers)));
+    return resp;
 }
 
 void register_mining_rpcs(RPCTable& table) {
