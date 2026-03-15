@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -192,9 +193,9 @@ struct MinerCliConfig {
     std::string rpcuser;
     std::string rpcpassword;
     std::string miner_pubkey;
-    std::string train_data;
-    std::string val_data;
-    std::string checkpoint_dir = "./checkpoints";
+    std::string train_data = "data/train.bin";
+    std::string val_data = "data/val.bin";
+    std::string checkpoint_dir = "checkpoints";
     int steps_per_attempt = 1000;
     int num_workers = 1;
     bool benchmark = false;
@@ -276,9 +277,33 @@ static int run_mining_loop(const MinerCliConfig& cfg)
         return 1;
     }
 
+    // Verify dataset files exist.
+    if (!std::filesystem::exists(cfg.train_data)) {
+        fprintf(stderr, "Error: training dataset not found: %s\n", cfg.train_data.c_str());
+        fprintf(stderr, "Use -traindata=<path> to specify the training data file.\n");
+        fprintf(stderr, "\nDataset preparation:\n");
+        fprintf(stderr, "  1. Download a text corpus (e.g. OpenWebText, Wikipedia)\n");
+        fprintf(stderr, "  2. Tokenize with GPT-2 tokenizer (vocab_size=50257)\n");
+        fprintf(stderr, "  3. Save as binary uint16 tokens: data/train.bin, data/val.bin\n");
+        return 1;
+    }
+    if (!std::filesystem::exists(cfg.val_data)) {
+        fprintf(stderr, "Error: validation dataset not found: %s\n", cfg.val_data.c_str());
+        fprintf(stderr, "Use -valdata=<path> to specify the validation data file.\n");
+        return 1;
+    }
+
+    // Create checkpoint directory if needed.
+    if (!std::filesystem::exists(cfg.checkpoint_dir)) {
+        std::filesystem::create_directories(cfg.checkpoint_dir);
+    }
+
     printf("ResonanceNet Miner v0.1\n");
     printf("Connecting to %s:%u\n", cfg.host.c_str(), cfg.port);
     printf("Miner pubkey: %s\n", cfg.miner_pubkey.c_str());
+    printf("Train data: %s\n", cfg.train_data.c_str());
+    printf("Val data: %s\n", cfg.val_data.c_str());
+    printf("Checkpoint dir: %s\n", cfg.checkpoint_dir.c_str());
     printf("Training steps per attempt: %d\n", cfg.steps_per_attempt);
     printf("Workers: %d\n", cfg.num_workers);
     printf("\n");
