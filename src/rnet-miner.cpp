@@ -9,6 +9,7 @@
 #include "core/logging.h"
 #include "crypto/ed25519.h"
 #include "crypto/keccak.h"
+#include "primitives/address.h"
 
 // Standard library.
 #include <array>
@@ -192,7 +193,7 @@ struct MinerCliConfig {
     uint16_t port = 9554;
     std::string rpcuser;
     std::string rpcpassword;
-    std::string miner_pubkey;
+    std::string miner_address;
     std::string train_data = "data/train.bin";
     std::string val_data = "data/val.bin";
     std::string checkpoint_dir = "checkpoints";
@@ -220,7 +221,7 @@ static void print_usage()
         "  -rpcport=<port>            RPC port (default: 9554)\n"
         "  -rpcuser=<user>            RPC username\n"
         "  -rpcpassword=<pw>          RPC password\n"
-        "  -minerkey=<pubkey_hex>     Miner's Ed25519 public key (64 hex chars)\n"
+        "  -address=<rn1...>          Miner's reward address (bech32)\n"
         "  -traindata=<path>          Path to training dataset\n"
         "  -valdata=<path>            Path to validation dataset\n"
         "  -checkpointdir=<path>      Directory for checkpoints (default: ./checkpoints)\n"
@@ -243,7 +244,7 @@ static MinerCliConfig parse_args(int argc, char* argv[])
         else if (arg.find("-rpcport=") == 0) cfg.port = static_cast<uint16_t>(std::atoi(arg.c_str() + 9));
         else if (arg.find("-rpcuser=") == 0) cfg.rpcuser = arg.substr(9);
         else if (arg.find("-rpcpassword=") == 0) cfg.rpcpassword = arg.substr(13);
-        else if (arg.find("-minerkey=") == 0) cfg.miner_pubkey = arg.substr(10);
+        else if (arg.find("-address=") == 0) cfg.miner_address = arg.substr(9);
         else if (arg.find("-traindata=") == 0) cfg.train_data = arg.substr(11);
         else if (arg.find("-valdata=") == 0) cfg.val_data = arg.substr(9);
         else if (arg.find("-checkpointdir=") == 0) cfg.checkpoint_dir = arg.substr(15);
@@ -272,8 +273,17 @@ static int run_mining_loop(const MinerCliConfig& cfg)
         auth = base64_encode(cfg.rpcuser + ":" + cfg.rpcpassword);
     }
 
-    if (cfg.miner_pubkey.empty()) {
-        fprintf(stderr, "Error: -minerkey=<pubkey_hex> is required\n");
+    if (cfg.miner_address.empty()) {
+        fprintf(stderr, "Error: -address=<rn1...> is required\n");
+        fprintf(stderr, "Use your wallet address to receive mining rewards.\n");
+        fprintf(stderr, "Get one with: rnet-wallet-tool create && rnet-cli getnewaddress\n");
+        return 1;
+    }
+
+    // Validate the miner address.
+    if (!rnet::primitives::is_valid_address(cfg.miner_address)) {
+        fprintf(stderr, "Error: invalid address '%s'\n", cfg.miner_address.c_str());
+        fprintf(stderr, "Expected bech32 address starting with 'rn1'\n");
         return 1;
     }
 
@@ -300,7 +310,7 @@ static int run_mining_loop(const MinerCliConfig& cfg)
 
     printf("ResonanceNet Miner v0.1\n");
     printf("Connecting to %s:%u\n", cfg.host.c_str(), cfg.port);
-    printf("Miner pubkey: %s\n", cfg.miner_pubkey.c_str());
+    printf("Reward address: %s\n", cfg.miner_address.c_str());
     printf("Train data: %s\n", cfg.train_data.c_str());
     printf("Val data: %s\n", cfg.val_data.c_str());
     printf("Checkpoint dir: %s\n", cfg.checkpoint_dir.c_str());
@@ -316,7 +326,7 @@ static int run_mining_loop(const MinerCliConfig& cfg)
         // 1. Get block template from rnetd.
         auto tmpl_resp = rpc_call(cfg.host, cfg.port, auth,
                                    "getblocktemplate",
-                                   "[{\"minerkey\":\"" + cfg.miner_pubkey + "\"}]");
+                                   "[{\"address\":\"" + cfg.miner_address + "\"}]");
         if (tmpl_resp.http_status < 0) {
             fprintf(stderr, "Error: cannot connect to rnetd: %s\n", tmpl_resp.body.c_str());
             fprintf(stderr, "Retrying in 5 seconds...\n");
