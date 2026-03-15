@@ -87,7 +87,12 @@ public:
                    const char* file, int line,
                    const std::string& message);
 
-    /// Formatted log
+    /// Formatted log (no-args overload avoids -Wformat-security)
+    void log_printf(LogCategory cat, LogLevel level,
+                    const char* file, int line,
+                    const char* fmt);
+
+    /// Formatted log (variadic)
     template<typename... Args>
     void log_printf(LogCategory cat, LogLevel level,
                     const char* file, int line,
@@ -127,7 +132,17 @@ private:
 /// Format a log message with snprintf
 std::string format_log_message(const char* fmt, ...);
 
-// Implementation of template log_printf
+// Non-variadic overload: plain string, no snprintf (avoids -Wformat-security).
+inline void Logger::log_printf(LogCategory cat, LogLevel level,
+                                const char* file, int line,
+                                const char* fmt) {
+    if (!is_enabled(cat)) return;
+    if (static_cast<int>(level) < min_level_.load(
+            std::memory_order_relaxed)) return;
+    log_write(cat, level, file, line, std::string(fmt));
+}
+
+// Variadic overload: format with snprintf.
 template<typename... Args>
 void Logger::log_printf(LogCategory cat, LogLevel level,
                         const char* file, int line,

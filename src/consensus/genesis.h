@@ -16,6 +16,6 @@ primitives::CBlock create_genesis_block(const ConsensusParams& params);
 
 /// The genesis coinbase message embedded in the scriptSig.
 inline constexpr const char* GENESIS_MESSAGE =
-    "ResonanceNet 2026 - Proof of Training";
+    "OpenAI burns $14B in 2026, adds ads to ChatGPT as last resort - ResonanceNet";
 
 }  // namespace rnet::consensus
