@@ -9,6 +9,7 @@
 #include "consensus/growth_policy.h"
 #include "consensus/merkle.h"
 #include "consensus/proof_of_training.h"
+#include "crypto/ed25519.h"
 #include "core/logging.h"
 #include "core/stream.h"
 #include "core/time.h"
@@ -481,6 +482,30 @@ static JsonValue rpc_submittrainingblock(const RPCRequest& req,
 
     // 12. Compute merkle root.
     block.merkle_root = consensus::block_merkle_root(block);
+
+    // 12b. Ed25519 sign the block — generate ephemeral keypair per block.
+    auto keypair_result = crypto::ed25519_generate();
+    if (!keypair_result) {
+        return make_rpc_error(RPC_INTERNAL_ERROR,
+                              "failed to generate Ed25519 keypair");
+    }
+    auto& keypair = keypair_result.value();
+
+    // Copy public key into block header.
+    std::copy(keypair.public_key.data.begin(), keypair.public_key.data.end(),
+              block.miner_pubkey.begin());
+
+    // Sign the unsigned header bytes.
+    const auto unsigned_bytes = block.serialize_unsigned();
+    auto sig_result = crypto::ed25519_sign(
+        keypair.secret,
+        std::span<const uint8_t>(unsigned_bytes.data(), unsigned_bytes.size()));
+    if (!sig_result) {
+        return make_rpc_error(RPC_INTERNAL_ERROR,
+                              "Ed25519 signing failed");
+    }
+    std::copy(sig_result.value().data.begin(), sig_result.value().data.end(),
+              block.signature.begin());
 
     // 13. Submit block to chainstate for full validation and connection.
     auto result = ctx.chainstate->accept_block(block);

@@ -664,9 +664,9 @@ static int run_mining_loop(const MinerCliConfig& cfg)
                                          "submittrainingblock", submit_params.str());
 
             if (submit_resp.http_status == 200) {
-                std::string sub_err =
-                    extract_json_field(submit_resp.body, "error");
-                if (sub_err.empty() || sub_err == "null") {
+                std::string accepted =
+                    extract_json_field(submit_resp.body, "accepted");
+                if (accepted == "true") {
                     blocks_found++;
                     printf("\n*** BLOCK FOUND! ***\n");
                     printf("  Height:          %llu\n",
@@ -680,7 +680,9 @@ static int run_mining_loop(const MinerCliConfig& cfg)
                     printf("  Blocks found:    %llu\n\n",
                            static_cast<unsigned long long>(blocks_found));
                 } else {
-                    fprintf(stderr, "Submit rejected: %s\n", sub_err.c_str());
+                    std::string reason =
+                        extract_json_field(submit_resp.body, "reject_reason");
+                    fprintf(stderr, "Submit rejected: %s\n", reason.c_str());
                 }
             } else {
                 fprintf(stderr, "Submit RPC error (HTTP %d): %s\n",
