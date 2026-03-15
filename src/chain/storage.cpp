@@ -198,9 +198,9 @@ Result<primitives::CBlockHeader> BlockStorage::read_block_header(
 //   3. Collect all successfully deserialised blocks
 //   4. Return the collected blocks
 // ---------------------------------------------------------------------------
-Result<std::vector<primitives::CBlock>> BlockStorage::scan_block_files() const
+Result<std::vector<BlockStorage::StoredBlock>> BlockStorage::scan_block_files() const
 {
-    std::vector<primitives::CBlock> blocks;
+    std::vector<StoredBlock> blocks;
 
     // 1. Iterate blk files starting at file 0
     for (int file_num = 0; ; ++file_num) {
@@ -221,6 +221,9 @@ Result<std::vector<primitives::CBlock>> BlockStorage::scan_block_files() const
 
         // 3. Read blocks sequentially until EOF
         while (true) {
+            // Record position before the size prefix.
+            int64_t block_pos = static_cast<int64_t>(std::ftell(f));
+
             uint32_t size = 0;
             if (std::fread(&size, 4, 1, f) != 1) {
                 break;  // EOF or read error
@@ -235,12 +238,15 @@ Result<std::vector<primitives::CBlock>> BlockStorage::scan_block_files() const
                 break;  // truncated block
             }
 
-            // 4. Deserialise the block
+            // 4. Deserialise the block and record its disk position.
             try {
                 core::DataStream ss(std::move(data));
                 primitives::CBlock block;
                 block.unserialize(ss);
-                blocks.push_back(std::move(block));
+                DiskBlockPos dpos;
+                dpos.file_number = file_num;
+                dpos.pos = block_pos;
+                blocks.push_back(StoredBlock{std::move(block), dpos});
             } catch (...) {
                 break;  // corrupt data, stop scanning this file
             }
@@ -249,7 +255,7 @@ Result<std::vector<primitives::CBlock>> BlockStorage::scan_block_files() const
         std::fclose(f);
     }
 
-    return Result<std::vector<primitives::CBlock>>::ok(std::move(blocks));
+    return Result<std::vector<StoredBlock>>::ok(std::move(blocks));
 }
 
 // ---------------------------------------------------------------------------

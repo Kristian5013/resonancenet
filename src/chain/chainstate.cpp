@@ -130,24 +130,28 @@ Result<void> CChainState::load_block_index() {
             "Failed to scan block files: " + scan_result.error());
     }
 
-    const auto& blocks = scan_result.value();
-    if (blocks.empty()) {
+    const auto& stored_blocks = scan_result.value();
+    if (stored_blocks.empty()) {
         LogPrintf("No blocks found on disk; starting from genesis");
         return Result<void>::ok();
     }
 
     // 2. Insert each block into the block index with parent linkage
     int loaded = 0;
-    for (const auto& block : blocks) {
-        const auto hash = block.hash();
+    for (const auto& sb : stored_blocks) {
+        const auto hash = sb.block.hash();
 
         // Skip if already in the index (e.g. genesis)
         if (block_index_.count(hash)) {
+            // Update disk position for genesis too.
+            auto* existing = block_index_[hash].get();
+            existing->file_number = sb.pos.file_number;
+            existing->data_pos = sb.pos.pos;
             continue;
         }
 
         // Find parent in the index
-        auto parent_it = block_index_.find(block.prev_hash);
+        auto parent_it = block_index_.find(sb.block.prev_hash);
         if (parent_it == block_index_.end()) {
             LogPrintf("load_block_index: skipping orphan block %s (no parent)",
                      hash.to_hex().c_str());
@@ -155,13 +159,15 @@ Result<void> CChainState::load_block_index() {
         }
         auto* parent = parent_it->second.get();
 
-        // Build block index entry
+        // Build block index entry with disk position
         auto idx = std::make_unique<CBlockIndex>(
-            static_cast<const primitives::CBlockHeader&>(block));
+            static_cast<const primitives::CBlockHeader&>(sb.block));
         idx->prev = parent;
         idx->status = CBlockIndex::FULLY_VALIDATED;
         idx->chain_tx = parent->chain_tx
-                        + static_cast<int64_t>(block.vtx.size());
+                        + static_cast<int64_t>(sb.block.vtx.size());
+        idx->file_number = sb.pos.file_number;
+        idx->data_pos = sb.pos.pos;
 
         auto* raw = idx.get();
         block_index_[hash] = std::move(idx);
