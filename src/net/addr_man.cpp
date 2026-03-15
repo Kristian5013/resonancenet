@@ -318,8 +318,8 @@ std::vector<CNetAddr> AddrManager::get_default_seeds(
     std::vector<std::string> seed_ips;
 
     if (network == "mainnet") {
-        // 1. Add mainnet seed IPs here
-        // seed_ips.push_back("198.51.100.1");
+        // 1. Mainnet seed nodes
+        seed_ips.push_back("188.137.227.180");
     } else if (network == "testnet") {
         seed_ips.push_back("188.137.227.180");
     } else {
