@@ -297,7 +297,10 @@ Result<void> TrainingEngine::load_checkpoint(const std::filesystem::path& path)
     if (init_result.is_err()) {
         return init_result;
     }
-    step_ = hdr.step;
+    // Reset step to 0 so AdamW bias correction starts fresh.
+    // Optimizer state (adam_m_, adam_v_) is not saved in checkpoint,
+    // so restoring step to a high value causes erratic updates.
+    step_ = 0;
 
     // 3. Read tensor data from the file.
     auto tensors_result = read_checkpoint(path);

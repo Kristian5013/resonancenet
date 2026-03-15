@@ -551,23 +551,13 @@ static int run_mining_loop(const MinerCliConfig& cfg)
                d_model, n_layers);
 
         // 3. Build the model configuration from the template.
-        //    For non-genesis mining, use PARENT model dimensions
-        //    (d_model - 2) so checkpoint loads correctly. The model
-        //    grows during training via the growth policy.
-        bool is_genesis_check = (ckpt_hash_str.empty() ||
-            ckpt_hash_str == std::string(64, '0'));
+        //    load_checkpoint() will re-init with the checkpoint's own
+        //    config, so these values are only used for genesis mining.
         rnet::training::ModelConfig model_cfg;
-        if (is_genesis_check) {
-            model_cfg.d_model   = d_model;
-            model_cfg.n_layers  = n_layers;
-        } else {
-            // Parent dimensions: template reports NEW size, checkpoint
-            // was saved with parent (old) size.
-            model_cfg.d_model   = d_model >= 2 ? d_model - 2 : d_model;
-            model_cfg.n_layers  = n_layers;
-        }
+        model_cfg.d_model   = d_model;
+        model_cfg.n_layers  = n_layers;
         model_cfg.n_slots   = n_slots;
-        model_cfg.d_ff      = model_cfg.d_model * 2;
+        model_cfg.d_ff      = d_model * 2;
         model_cfg.vocab_size = vocab_size;
 
         // 4. Create TrainingEngine.
