@@ -10,6 +10,7 @@
 #include "primitives/txin.h"
 #include "primitives/txout.h"
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 
@@ -55,8 +56,11 @@ primitives::CBlock create_genesis_block(const ConsensusParams& params)
     // 4b. Initial difficulty delta
     block.difficulty_delta = params.genesis_difficulty_delta;
 
-    // 5. Miner pubkey and signature are zero (genesis is unsigned)
-    block.miner_pubkey = {};
+    // 5. Miner pubkey: set to the genesis founder key.
+    //    Signature remains zero — genesis is unsigned by convention
+    //    (check_block_header skips signature check for genesis).
+    std::copy(std::begin(GENESIS_PUBKEY), std::end(GENESIS_PUBKEY),
+              block.miner_pubkey.begin());
     block.signature = {};
 
     // 6. Coinbase transaction
