@@ -12,6 +12,7 @@
 #include "crypto/hash.h"
 #include "primitives/address.h"
 #include "script/recovery_script.h"
+#include "wallet/addresses.h"
 #include "wallet/wallet.h"
 
 // Standard library.
@@ -256,6 +257,18 @@ static int cmd_info(const WalletToolConfig& cfg)
 
     auto coins = w->get_unspent_coins();
     printf("UTXOs: %zu\n", coins.size());
+
+    // 1. Show receive addresses.
+    auto addrs = w->address_manager().get_receive_addresses();
+    if (!addrs.empty()) {
+        printf("\nReceive addresses:\n");
+        for (const auto& a : addrs) {
+            printf("  %s", a.address.c_str());
+            if (!a.label.empty()) printf("  (%s)", a.label.c_str());
+            if (a.is_used) printf("  [used]");
+            printf("\n");
+        }
+    }
 
     return 0;
 }
