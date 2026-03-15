@@ -69,6 +69,10 @@ static WalletToolConfig parse_args(int argc, char* argv[])
     WalletToolConfig cfg;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
+        // Strip leading double-dash to single-dash (accept both --flag and -flag).
+        if (arg.size() > 2 && arg[0] == '-' && arg[1] == '-') {
+            arg = arg.substr(1);
+        }
         if (arg.find("-passphrase=") == 0) {
             cfg.passphrase = arg.substr(12);
         } else if (arg.find("-network=") == 0) {
