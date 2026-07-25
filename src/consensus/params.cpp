@@ -125,9 +125,16 @@ NetworkParams MakeMain() {
                           /*round_deadline_ms=*/600'000,
                           /*challenge_percent=*/10, /*challenge_deadline=*/3,
                           /*retained=*/5, /*slash_quorum=*/3);
-    // Populated when the seed infrastructure is stood up. Empty is honest: a node
-    // with no seeds and no peers says so rather than pretending it is connected.
-    p.dns_seeds = {};
+    // Where a node with no peers looks first. Not part of any hashed artifact —
+    // which hostnames a network trusts is operational, not consensus — so adding
+    // one does not move an anchor.
+    //
+    // A hostname that does not resolve is not an error: BootstrapFromSeeds logs it
+    // and moves on, because a node that refuses to start when one hostname is down
+    // is a node that can be stopped by taking down one hostname.
+    p.dns_seeds = {"seed.resonancenet.org"};
+    // Literal addresses, consulted only when every seed is unreachable. Filled in
+    // once the seed node has a stable address.
     p.fixed_seeds = {};
     // The state every node starts from. Not distributed as a file — derived from
     // this very descriptor (see consensus/init.h) and pinned here, so a node can
@@ -146,6 +153,12 @@ NetworkParams MakeTest() {
     p.message_magic = {0x52, 0x4E, 0x54, 0x31};   // "RNT1"
     p.default_port = 19444;
     p.round.network_magic = MagicWord(p.message_magic);   // distinct genesis from main
+    // Cleared deliberately. This function starts from MakeMain(), so without this
+    // line the test network would inherit main's seed and every test node would
+    // knock on the door of the production one. A test network needs its own
+    // hostname, and until that exists it has none.
+    p.dns_seeds = {};
+    p.fixed_seeds = {};
     p.policy = MakePolicy(MagicWord(p.message_magic), 50, 1, 2, 2, 1u << 20,
                           /*round_deadline_ms=*/120'000,
                           /*challenge_percent=*/25,   // cheap chain: verify aggressively
@@ -167,6 +180,11 @@ NetworkParams MakeRegtest() {
     p.default_port = 19555;
     p.round.network_magic = MagicWord(p.message_magic);
     p.round.round_id = 0;
+    // Regtest is a single machine talking to itself. Seeds would be meaningless
+    // and a lookup against a public hostname from a local test is worse than
+    // meaningless.
+    p.dns_seeds = {};
+    p.fixed_seeds = {};
     p.round.model = RegtestModel();
     p.round.determinism_class = DeterminismClass::Pending;
     p.round.optimizer = OptimizerId::Adafactor;

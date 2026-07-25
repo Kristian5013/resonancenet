@@ -80,6 +80,12 @@ BootstrapResult BootstrapFromSeeds(const consensus::NetworkParams& params,
     for (const auto& hostname : params.dns_seeds) {
         ++result.seeds_queried;
 
+        // Said before the call, not after. getaddrinfo blocks, and a name that
+        // does not resolve costs the resolver's full timeout — twenty seconds is
+        // typical. Without this line the node looks hung during a wait that is
+        // both normal and explainable, which is how an operator concludes the
+        // software is broken and stops it halfway.
+        RNET_LOG_INFO("bootstrap: resolving {}", hostname);
         auto resolved = ResolveSeed(hostname, params.default_port);
         if (!resolved) {
             // Networks are partly offline all the time. A node that refuses to

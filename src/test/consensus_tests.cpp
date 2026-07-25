@@ -381,3 +381,38 @@ RNET_TEST(Init, TheGenesisCheckpointFollowsFromTheAnchor) {
                          Params(net).genesis_weights_hash_hex);
     }
 }
+
+// Which hostnames a network trusts to find its first peer is the single best
+// place to attack it. Two properties are worth asserting rather than assuming.
+RNET_TEST(Seeds, EachNetworkHasItsOwnAndTestDoesNotInheritMain) {
+    const auto& main_params = Params(Network::Main);
+    const auto& test_params = Params(Network::Test);
+    const auto& regtest_params = Params(Network::Regtest);
+
+    // MakeTest() starts from MakeMain(), so without an explicit clear the test
+    // network would inherit main's seed and every test node would knock on the
+    // door of the production one.
+    for (const auto& hostname : test_params.dns_seeds) {
+        for (const auto& main_hostname : main_params.dns_seeds) {
+            if (hostname == main_hostname) {
+                RNET_FAIL("the test network inherited main's seed '{}'", hostname);
+            }
+        }
+    }
+
+    // Regtest is one machine talking to itself; a lookup against a public
+    // hostname from a local test is worse than useless.
+    RNET_CHECK(regtest_params.dns_seeds.empty());
+    RNET_CHECK(regtest_params.fixed_seeds.empty());
+}
+
+// Seeds are operational, not consensus: they appear in no hashed artifact, so
+// adding one must not move an anchor. If this ever fails, a seed change has
+// become a hard fork.
+RNET_TEST(Seeds, AddingASeedDoesNotMoveAnyAnchor) {
+    for (auto net : {Network::Main, Network::Test, Network::Regtest}) {
+        const auto& params = Params(net);
+        RNET_CHECK_STREQ(GenesisHash(net), params.genesis_hash_hex);
+        RNET_CHECK_STREQ(PolicyHash(net), params.policy_hash_hex);
+    }
+}
