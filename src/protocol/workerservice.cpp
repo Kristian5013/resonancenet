@@ -459,15 +459,32 @@ Result<std::vector<uint8_t>> WorkerService::ReadSealedPayload(int fd, uint64_t e
     }
     const auto* bytes = static_cast<const uint8_t*>(mapping);
 
+    // Hashed WHILE copying, in one pass, not hashed and then copied.
+    //
+    // The distinction is the whole guarantee. The daemon serves peers from this
+    // copy, so what must be true is that the bytes it hashed are the bytes it
+    // kept. Two passes leave a window between them in which a writable holder
+    // could change the source, and closing that window is the only thing the
+    // memfd seal is doing here. One pass closes it by construction: each slice is
+    // hashed from the same buffer that is retained, so no later change to the
+    // source can make the two disagree.
+    //
+    // The seal is still required on admission — it costs nothing and is a stronger
+    // statement — but the correctness of what gets served no longer rests on it.
+    // That also makes this routine portable to systems that have no such seal.
+    //
+    // And it is half the work: one traversal of a gigabyte instead of two.
+    std::vector<uint8_t> copy(static_cast<size_t>(expected_bytes));
     crypto::Sha3Hasher hasher;
     for (uint64_t offset = 0; offset < expected_bytes; offset += kHashSlice) {
         const size_t length =
             static_cast<size_t>(std::min<uint64_t>(kHashSlice, expected_bytes - offset));
-        hasher.Update(std::span<const uint8_t>(bytes + offset, length));
+        std::copy(bytes + offset, bytes + offset + length,
+                  copy.begin() + static_cast<ptrdiff_t>(offset));
+        hasher.Update(std::span<const uint8_t>(copy.data() + offset, length));
     }
     hash_out = hasher.Finalize();
 
-    std::vector<uint8_t> copy(bytes, bytes + expected_bytes);
     ::munmap(mapping, static_cast<size_t>(expected_bytes));
     return copy;
 }
