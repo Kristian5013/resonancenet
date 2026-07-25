@@ -24,9 +24,30 @@ Three properties define the design:
   published on an ongoing cadence, each one gated on not regressing against a
   held-out set, with rollback if a later measurement disagrees.
 
-> Status: **pre-launch**. The consensus core (canonical serialization, genesis,
-> corpus integrity, deterministic scheduling) is implemented and tested. The
-> networking, aggregation and incentive layers are in progress.
+> Status: **pre-launch — there is no network to join.**
+>
+> Implemented and tested: canonical serialization, the genesis trust anchor,
+> derived initial weights, corpus integrity, deterministic batch derivation,
+> quantised pseudo-gradients and integer aggregation, challenge selection and
+> bit-exact replay, the peer-to-peer transport, and the local channel between a
+> node and a training worker. A full cycle runs end to end on one machine:
+> contribute, close the round, elect a producer, aggregate, publish a checkpoint,
+> and let a second worker catch up from it.
+>
+> What is missing, and why you cannot join yet:
+>
+> - **The corpus root is unpinned.** `dataset_root` is all-zero on every network,
+>   so no worker can be told which tokens to train on.
+> - **No seed infrastructure.** `seed.resonancenet.org` does not resolve. Nodes
+>   find each other only through `--connect`.
+> - **Slashing runs in shadow mode.** Evidence is built and recorded; nothing is
+>   settled. The economic consequence of a false accusation is permanent, so it
+>   waits until the evidence has been produced by real hardware for long enough
+>   to be believed.
+> - **No incentive layer.** Contributions are verified but not rewarded.
+>
+> Linux only for a full node. `rnet-tool` is portable and is how you verify the
+> anchors on any platform; a Windows GPU can run the Linux build under WSL2.
 
 ## Design in one page
 
