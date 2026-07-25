@@ -1,0 +1,196 @@
+# Release binaries.
+#
+# What ships where, and why the two platforms differ:
+#
+#   LINUX gets everything. `rnetd` rests on POSIX sockets throughout, and the
+#   local channel to a worker rests on AF_UNIX with SCM_RIGHTS and sealed memfds.
+#
+#   WINDOWS gets `rnet-tool` only. Windows has had AF_UNIX since 2018 but has no
+#   SCM_RIGHTS and no equivalent, and no sealed anonymous memory. The seal is not
+#   an implementation detail to be shimmed — it is what makes "the bytes I hashed
+#   are the bytes I will serve to peers" a fact rather than a hope. Porting means
+#   finding a different argument for that property, not a different API for the
+#   same call. Until then a Windows GPU joins through WSL2, which runs the Linux
+#   build unchanged and passes CUDA through.
+#
+#   `rnet-tool` touches no socket. It works on consensus artifacts — genesis,
+#   policy, derived weights, corpus manifests — and that is precisely what someone
+#   on any platform needs in order to check the network's anchors before trusting
+#   anything else. Shipping it for Windows is not a token gesture; verifying a
+#   genesis hash you did not compute yourself is the whole trust bootstrap.
+#
+# Binaries are built statically where the platform allows, so a release runs on a
+# machine that does not have the toolchain that built it.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    name: linux-x86_64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++-14
+
+      - name: Build
+        env:
+          CC: gcc-14
+          CXX: g++-14
+        run: |
+          cmake -B build -S . \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTS=ON \
+            -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++"
+          cmake --build build -j"$(nproc)"
+
+      # A release that has not run its own tests is a release nobody checked.
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      # The three anchors must be reproducible from the source being released, or
+      # the binaries and the artifacts they claim to implement are not the same
+      # protocol.
+      - name: Verify consensus anchors
+        run: |
+          for net in main test regtest; do
+            ./build/rnet-tool genesis-emit --network "$net" --out /tmp/genesis
+          done
+          ./build/rnet-tool genesis-weights --network regtest
+
+      - name: Package
+        run: |
+          mkdir -p dist/resonancenet-linux-x86_64
+          cp build/rnetd build/rnet-tool dist/resonancenet-linux-x86_64/
+          cp COPYING README.md dist/resonancenet-linux-x86_64/
+          cp -r share/genesis dist/resonancenet-linux-x86_64/genesis
+          cd dist
+          tar czf resonancenet-linux-x86_64.tar.gz resonancenet-linux-x86_64
+          sha256sum resonancenet-linux-x86_64.tar.gz > resonancenet-linux-x86_64.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: dist/*.tar.gz*
+
+  windows:
+    name: windows-x86_64 (rnet-tool only)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        shell: pwsh
+        run: |
+          cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON
+          cmake --build build --config Release -j
+
+      # The consensus half of the test suite. Its job here is narrow and
+      # important: prove that a Windows build reaches the same hashes as a Linux
+      # one. A protocol whose anchors depend on the platform that computed them
+      # has no anchors.
+      - name: Test the consensus core
+        shell: pwsh
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Verify consensus anchors match Linux
+        shell: pwsh
+        run: |
+          .\build\Release\rnet-tool.exe genesis-show --network main
+          .\build\Release\rnet-tool.exe genesis-weights --network regtest
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist\resonancenet-windows-x86_64 | Out-Null
+          Copy-Item build\Release\rnet-tool.exe dist\resonancenet-windows-x86_64\
+          Copy-Item COPYING, README.md dist\resonancenet-windows-x86_64\
+          Copy-Item -Recurse share\genesis dist\resonancenet-windows-x86_64\genesis
+          # Said in the package, not only in the release notes: someone who
+          # downloads this and looks for rnetd.exe deserves to find the reason it
+          # is absent rather than conclude the build is broken.
+          @"
+          This package contains rnet-tool only.
+
+          rnetd is not built for Windows. The node's local channel to a worker
+          passes file descriptors over a Unix domain socket (SCM_RIGHTS) and
+          transfers gigabyte payloads as sealed memfds. Windows supports AF_UNIX
+          but has neither of those, and the seal is what guarantees the bytes a
+          node hashed are the bytes it later serves to peers.
+
+          To run a node on Windows, use WSL2 with the Linux release. CUDA passes
+          through, so a Windows GPU can train.
+
+          rnet-tool works fully here: it verifies genesis and policy artifacts,
+          re-derives the initial weights, and checks corpus manifests. Use it to
+          confirm the network's anchors before trusting a binary you did not
+          build.
+          "@ | Out-File -Encoding utf8 dist\resonancenet-windows-x86_64\WINDOWS-NOTES.txt
+          Compress-Archive -Path dist\resonancenet-windows-x86_64 -DestinationPath dist\resonancenet-windows-x86_64.zip
+          $hash = (Get-FileHash dist\resonancenet-windows-x86_64.zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  resonancenet-windows-x86_64.zip" | Out-File -Encoding ascii dist\resonancenet-windows-x86_64.zip.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: dist/*.zip*
+
+  publish:
+    name: publish
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
+          body: |
+            ## What is in this release
+
+            - **Linux x86_64** — `rnetd` and `rnet-tool`, plus the genesis artifacts.
+            - **Windows x86_64** — `rnet-tool` only. See `WINDOWS-NOTES.txt`; run a
+              node under WSL2 with the Linux build.
+
+            Checksums are alongside each archive. Verify before running:
+
+            ```
+            sha256sum -c resonancenet-linux-x86_64.tar.gz.sha256
+            ```
+
+            ## Before trusting these binaries
+
+            The consensus anchors are reproducible from source. Check that the
+            binary you downloaded agrees with the artifacts it ships:
+
+            ```
+            ./rnet-tool genesis-emit --network main --out /tmp/check
+            ./rnet-tool genesis-weights --network main
+            ```
+
+            The second re-derives roughly a billion initial parameters and hashes
+            them. It takes a couple of minutes and is real work, not a lookup — if
+            it disagrees with the pinned anchor, the binary would train a different
+            model than the network agreed on.
+
+            ## The network is not live
+
+            No seed infrastructure is running and the corpus root is unpinned, so
+            there is nothing to join yet. These binaries are for reading,
+            building and verifying.

@@ -1,13 +1,44 @@
 #include "crypto/random.h"
 
-#include <sys/random.h>
-
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <format>
+
+#ifdef _WIN32
+#include <windows.h>
+// After windows.h, which bcrypt.h requires.
+#include <bcrypt.h>
+#else
+#include <sys/random.h>
+#endif
 
 namespace rnet::crypto {
+
+// Two implementations of one requirement: bytes an attacker cannot predict, or a
+// loud failure. Neither falls back to anything weaker — a seeded generator here
+// would eventually be switched on in production, and the addrman key it produces
+// decides which bucket every address lands in.
+
+#ifdef _WIN32
+
+Status RandomBytes(std::span<uint8_t> out) {
+    if (out.empty()) return Status::Ok();
+    // BCRYPT_USE_SYSTEM_PREFERRED_RNG asks for the OS generator rather than an
+    // algorithm handle this process opened, so there is no configuration through
+    // which a caller could weaken it.
+    const NTSTATUS status = ::BCryptGenRandom(nullptr, reinterpret_cast<PUCHAR>(out.data()),
+                                              static_cast<ULONG>(out.size()),
+                                              BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    if (status < 0) {
+        return Err(std::format("BCryptGenRandom failed with 0x{:08x}",
+                               static_cast<unsigned long>(status)));
+    }
+    return Status::Ok();
+}
+
+#else
 
 Status RandomBytes(std::span<uint8_t> out) {
     size_t filled = 0;
@@ -24,6 +55,8 @@ Status RandomBytes(std::span<uint8_t> out) {
     }
     return Status::Ok();
 }
+
+#endif
 
 Hash256 RandomHashOrDie() {
     Hash256 out{};
