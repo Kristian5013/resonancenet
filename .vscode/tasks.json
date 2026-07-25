@@ -1,0 +1,53 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "configure",
+            "type": "shell",
+            "command": "cmake -B build -S .",
+            // Run this first, and again after adding a file. It is what writes
+            // build/compile_commands.json, which is where the editor gets every
+            // include path and the language standard.
+            "problemMatcher": []
+        },
+        {
+            "label": "build",
+            "type": "shell",
+            "command": "cmake --build build -j$(nproc)",
+            "group": { "kind": "build", "isDefault": true },
+            "dependsOn": "configure",
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            "label": "test",
+            "type": "shell",
+            "command": "./build/rnet_tests",
+            "group": { "kind": "test", "isDefault": true },
+            "dependsOn": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "full check",
+            "type": "shell",
+            // Everything CI would have run: build, unit tests, artifact
+            // reproducibility, cross-language agreement, the worker-to-daemon
+            // channel, and the protocol end to end on one machine.
+            "command": "ci/run_tests.sh",
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            "label": "release",
+            "type": "shell",
+            "command": "ci/build_release.sh ${input:version}",
+            "problemMatcher": []
+        }
+    ],
+    "inputs": [
+        {
+            "id": "version",
+            "type": "promptString",
+            "description": "Release version, e.g. v0.2.0",
+            "default": "dev"
+        }
+    ]
+}

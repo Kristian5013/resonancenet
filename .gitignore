@@ -30,8 +30,12 @@ peers.dat
 weights/
 .rnet/
 
-# editor and OS noise
-.vscode/
+# editor and OS noise. .vscode/ is NOT ignored: the C++ settings there are what
+# make an editor understand C++26 and the src/ include root, and every
+# contributor would otherwise rediscover them. Personal overrides go in
+# .vscode/settings.local.json, which is.
+.vscode/settings.local.json
+.vscode/*.log
 .idea/
 *.swp
 .DS_Store
