@@ -73,8 +73,16 @@ Status Service::OnObjectMessage(net::Peer& peer, const net::ReceivedMessage& mes
     ++rejected_;
     // Scored against the peer that sent it. A peer that keeps offering
     // contributions for the wrong model is not making mistakes.
+    //
+    // Returning Ok afterwards is deliberate. The node charges a flat ten points for
+    // any handler that returns an error, which is right for handlers with no
+    // judgement of their own — but here the participant has already made a graded
+    // one, from "malformed, twenty" to "forged identity, fifty" to "refused, but
+    // not your fault, zero". Reporting the rejection upward silently added ten to
+    // every one of those and turned every deliberate zero into a ten.
+    //   proven by: protocol_tests.cpp ANodeBehindTheTipDoesNotBanThePeersThatAreOnIt
     if (verdict.misbehaviour > 0) peer.Misbehaving(verdict.misbehaviour, verdict.reason);
-    return Err(verdict.reason);
+    return Status::Ok();
 }
 
 void Service::PublishOutgoing(int64_t now_ms) {

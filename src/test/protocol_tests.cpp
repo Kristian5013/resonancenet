@@ -139,14 +139,16 @@ RNET_TEST(Participant, RefusesAContributionThatDidTheWrongAmountOfWork) {
 
 // A contribution against weights this node has never seen cannot be placed. It is
 // refused, but as an unknown base rather than as a forgery: the sender may simply
-// be ahead.
-RNET_TEST(Participant, RefusesAContributionAgainstUnknownWeights) {
+// be ahead — and if this node is the one behind, every honest contribution on the
+// network arrives looking exactly like this.
+RNET_TEST(Participant, RefusesAContributionAgainstUnknownWeightsWithoutBlamingTheSender) {
     Participant participant(Config(1), GenesisCheckpoint());
 
     auto header = Contribution(2, crypto::Sha3_256(std::string_view("weights nobody published")));
     const auto verdict =
         Offer(participant, net::InvType::Contribution, header.ToContainer(), header.Id());
-    RNET_CHECK_EQ(static_cast<int>(verdict.admission), static_cast<int>(Admission::Rejected));
+    RNET_CHECK_EQ(static_cast<int>(verdict.admission), static_cast<int>(Admission::NotForUs));
+    RNET_CHECK_EQ(verdict.misbehaviour, 0);
     RNET_CHECK_EQ(participant.submission_count(), uint32_t{0});
 }
 
@@ -486,16 +488,74 @@ RNET_TEST(Service, ConsensusRejectionsAreScoredAgainstThePeerThatSentThem) {
     PumpBoth(node_a, service_a, node_b, service_b,
              [&] { return node_a.ReadyCount() == 1 && node_b.ReadyCount() == 1; });
 
-    // A contribution claiming a different parameter count: well-formed bytes, and
-    // a model this network is not training.
-    auto forged = Contribution(1, GenesisCheckpoint().Id());
-    forged.n_params = P().round.model.ParameterCount() * 2;
-    RNET_CHECK_OK(node_a.Publish(net::InvType::Contribution, forged.ToContainer(), 1000));
-
-    const bool judged = PumpBoth(node_a, service_a, node_b, service_b,
-                                 [&] { return service_b.objects_rejected() > 0; });
-    if (!judged) RNET_FAIL("a contribution for the wrong model was not refused");
+    // Contributions claiming a different parameter count: well-formed bytes, and a
+    // model this network is not training. Fifty points each against a threshold of
+    // a hundred, so a peer doing this cannot keep doing it for long.
+    for (uint64_t worker = 1; worker <= 4; ++worker) {
+        auto forged = Contribution(worker, GenesisCheckpoint().Id());
+        forged.n_params = P().round.model.ParameterCount() * 2;
+        RNET_CHECK_OK(node_a.Publish(net::InvType::Contribution, forged.ToContainer(), 1000));
+        PumpBoth(node_a, service_a, node_b, service_b, [&] { return false; });
+    }
+    if (service_b.objects_rejected() == 0) {
+        RNET_FAIL("a contribution for the wrong model was not refused");
+    }
     RNET_CHECK_EQ(victim.submission_count(), uint32_t{0});
+
+    // Refusing is not enough on its own: a score that never reaches the connection
+    // layer lets the peer go on sending forever. Disconnection is how that score
+    // is observable from here, and without it this test would pass on a node that
+    // merely counted rejections.
+    if (node_b.ReadyCount() != 0) {
+        RNET_FAIL("the peer kept its connection after four forgeries; the score never reached "
+                  "the connection layer");
+    }
+}
+
+// Being behind the tip is not misbehaviour, and a node must not answer it by
+// banning the network.
+//
+// A node that has just started, or that was offline for a round, does not hold the
+// checkpoint the rest of the network is building on. Every contribution it hears
+// is therefore based on something it cannot find — which is exactly what a node
+// that needs to catch up should expect, and the peers relaying that work are the
+// only ones who can help it catch up.
+//
+// Scored as misbehaviour, it is a self-inflicted eclipse: the node disconnects
+// everyone who is current, keeps whoever is as stale as it is, and never advances.
+RNET_TEST(Service, ANodeBehindTheTipDoesNotBanThePeersThatAreOnIt) {
+    Participant current(Config(1), GenesisCheckpoint());
+    Participant behind(Config(2), GenesisCheckpoint());
+
+    net::Node node_a(ServiceNodeConfig(19823), crypto::Sha3_256(std::string_view("a")), 1111);
+    net::Node node_b(ServiceNodeConfig(0), crypto::Sha3_256(std::string_view("b")), 2222);
+    protocol::Service service_a(node_a, current);
+    protocol::Service service_b(node_b, behind);
+    service_a.Attach();
+    service_b.Attach();
+
+    RNET_CHECK_OK(node_a.Start());
+    RNET_CHECK_OK(node_b.Start());
+    auto target = net::NetAddress::FromString("127.0.0.1:19823", 19823);
+    RNET_CHECK_OK(target);
+    RNET_CHECK_OK(node_b.ConnectTo(target.value(), 1000));
+    PumpBoth(node_a, service_a, node_b, service_b,
+             [&] { return node_a.ReadyCount() == 1 && node_b.ReadyCount() == 1; });
+    RNET_CHECK_EQ(node_b.ReadyCount(), size_t{1});
+
+    // Honest work on a tip this node has not synced. Twenty of them: at ten points
+    // each the peer is gone after ten, and the node is alone.
+    const auto tip_it_lacks = crypto::Sha3_256(std::string_view("a checkpoint two steps ahead"));
+    for (uint64_t worker = 1; worker <= 20; ++worker) {
+        auto header = Contribution(worker, tip_it_lacks);
+        RNET_CHECK_OK(node_a.Publish(net::InvType::Contribution, header.ToContainer(), 1000));
+        PumpBoth(node_a, service_a, node_b, service_b, [&] { return false; });
+    }
+
+    RNET_CHECK_EQ(behind.submission_count(), uint32_t{0});
+    if (node_b.ReadyCount() != 1) {
+        RNET_FAIL("the node disconnected the only peer that could have brought it up to date");
+    }
 }
 
 // Two nodes on the same network must reach the same starting state without

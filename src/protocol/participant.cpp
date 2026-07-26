@@ -135,7 +135,7 @@ ObjectVerdict Participant::OnContribution(const crypto::Hash256& id,
     // round lapsed should start the next one, not be refused for the timing of a
     // tick it had no way to know about.
     if (!round_ || round_->StateAt(now_ms) == diloco::RoundState::Abandoned) {
-        if (auto st = OpenRound(now_ms); !st) return Reject(st.error(), 0);
+        if (auto st = OpenRound(now_ms); !st) return NotForUs(st.error());
     }
 
     // Consensus checks. Each of these is a way a contribution can be well-formed
@@ -153,8 +153,21 @@ ObjectVerdict Participant::OnContribution(const crypto::Hash256& id,
     // A worker that computed from weights this node does not have has not
     // contributed to this model, whatever its arithmetic was. Accepting it would
     // aggregate a delta against the wrong base.
+    //
+    // Refused, but NOT scored — and the distinction is the whole point. A node that
+    // just started, or that missed a round, does not hold the checkpoint everyone
+    // else is building on, so every honest contribution on the network looks like
+    // this to it. Charging for them makes the node ban precisely the peers that are
+    // current, keep the ones as stale as itself, and never catch up: an eclipse it
+    // inflicts on itself. A checkpoint whose parent is missing is already treated
+    // this way twenty lines below; there was no reason for contributions to differ.
+    //
+    // It does leave a free way to send bytes that get refused. That belongs to the
+    // transport's rate limiting, which does not have to guess whether the sender is
+    // honest — and guessing wrong here costs the node the whole network.
+    //   proven by: protocol_tests.cpp ANodeBehindTheTipDoesNotBanThePeersThatAreOnIt
     if (!chain_.Has(header.value().base_checkpoint)) {
-        return Reject("contribution is based on a checkpoint this node does not hold", 10);
+        return NotForUs("contribution is based on a checkpoint this node does not hold");
     }
     if (header.value().base_checkpoint != base_checkpoint_) {
         // Not misbehaviour: a slow worker submitting against the previous tip is
