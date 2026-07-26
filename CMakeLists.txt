@@ -173,7 +173,15 @@ if(BUILD_TESTS)
     target_link_libraries(rnet_tests PRIVATE rnet_protocol)
   endif()
   add_test(NAME unit COMMAND rnet_tests)
-  set_tests_properties(unit PROPERTIES TIMEOUT 300)
+  # The instrumented build is roughly ten times slower, and the tests that dominate
+  # the runtime are the ones that aggregate a real model's worth of parameters. One
+  # number cannot serve both: 300s is a useful regression alarm on the fast build
+  # and a guaranteed false failure on the sanitized one.
+  if(WITH_SANITIZERS)
+    set_tests_properties(unit PROPERTIES TIMEOUT 1800)
+  else()
+    set_tests_properties(unit PROPERTIES TIMEOUT 300)
+  endif()
 endif()
 
 message(STATUS "ResonanceNet ${PROJECT_VERSION} | C++${CMAKE_CXX_STANDARD} | ${CMAKE_BUILD_TYPE}"

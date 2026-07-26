@@ -26,10 +26,11 @@ namespace {
 // The ordering nobody can steer: it depends on the parent checkpoint's identity,
 // which was fixed before this round opened.
 crypto::Hash256 ProducerTicket(const crypto::Hash256& parent, uint64_t outer_step,
-                               uint64_t worker_id) {
+                               uint64_t slot, uint64_t worker_id) {
     canon::Writer w;
     w.Hash(parent);
     w.U64(outer_step);
+    w.U64(slot);
     w.U64(worker_id);
     return crypto::Sha3_256(w.data());
 }
@@ -37,7 +38,7 @@ crypto::Hash256 ProducerTicket(const crypto::Hash256& parent, uint64_t outer_ste
 }  // namespace
 
 Result<uint64_t> ElectProducer(const crypto::Hash256& parent, uint64_t outer_step,
-                               std::span<const uint64_t> eligible) {
+                               std::span<const uint64_t> eligible, uint64_t slot) {
     if (eligible.empty()) {
         // A step with nobody entitled to publish is a stalled network. Saying so
         // is more useful than quietly electing worker 0, which is the unset value.
@@ -49,7 +50,7 @@ Result<uint64_t> ElectProducer(const crypto::Hash256& parent, uint64_t outer_ste
     bool have_winner = false;
     for (uint64_t worker_id : eligible) {
         if (worker_id == 0) continue;   // the unset value is not a worker
-        const auto ticket = ProducerTicket(parent, outer_step, worker_id);
+        const auto ticket = ProducerTicket(parent, outer_step, slot, worker_id);
         // Ties are broken by worker id, so the result is total even in the
         // astronomically unlikely case of a hash collision.
         if (!have_winner || ticket < best || (ticket == best && worker_id < winner)) {
@@ -63,8 +64,8 @@ Result<uint64_t> ElectProducer(const crypto::Hash256& parent, uint64_t outer_ste
 }
 
 bool IsProducer(const crypto::Hash256& parent, uint64_t outer_step,
-                std::span<const uint64_t> eligible, uint64_t worker_id) {
-    auto elected = ElectProducer(parent, outer_step, eligible);
+                std::span<const uint64_t> eligible, uint64_t worker_id, uint64_t slot) {
+    auto elected = ElectProducer(parent, outer_step, eligible, slot);
     return elected.ok() && elected.value() == worker_id;
 }
 

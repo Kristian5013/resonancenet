@@ -132,6 +132,7 @@ public:
         std::vector<int64_t> update;
         crypto::Hash256 evidence_hash{};
         uint32_t contributor_count{0};
+        uint64_t staged_ms{0};               // when it was staged; bounds the wait
     };
 
     // The update waiting to be applied, or nullptr. Borrowed: for the launch model
@@ -190,6 +191,14 @@ public:
     // Whether this node is the elected producer for the step in progress. Derived,
     // never volunteered: see diloco/producer.h.
     bool IsProducerForThisStep() const;
+
+    // The election slot the wall clock is in. Not a count of local retries: rounds
+    // open at different moments on different nodes, and a counter anchored to a
+    // local event would give each node a different answer. Absolute time divided
+    // by a consensus-fixed slot length gives every node with a synced clock the
+    // same value at the same instant.
+    //   proven by: protocol_tests.cpp TwoNodesWhoseRoundsOpenedApartStillAgree
+    uint64_t ProducerSlotAt(uint64_t now_ms) const;
 
     // --- state ---
     const diloco::CheckpointChain& chain() const { return chain_; }
@@ -253,6 +262,9 @@ private:
     uint64_t optimizer_stepped_through_{0};
     crypto::Hash256 optimizer_state_{};
     bool optimizer_desynced_{false};
+    // The slot the last election used. Stored so IsProducerForThisStep(), which has
+    // no clock, answers the same question Tick() asked.
+    mutable uint64_t producer_slot_{0};
     // The update this node computed for the step in progress. The producer
     // publishes it; everyone else keeps it only to prove they reached the same
     // place.

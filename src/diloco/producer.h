@@ -46,18 +46,38 @@ namespace rnet::diloco {
 // produce the same value regardless of arrival order.
 crypto::Hash256 EvidenceHashOf(std::span<const canon::ContributionHeader> contributions);
 
-// The worker that must publish the checkpoint for `outer_step`.
+// The worker that must publish the checkpoint for `outer_step`, in `slot`.
 //
 // `eligible` is the pool, which the caller draws from the PREVIOUS checkpoint's
 // contributors. Fails on an empty pool rather than picking a default: a step with
 // nobody entitled to publish is a stalled network, and saying so is more useful
 // than quietly electing worker 0.
+//
+// `slot` exists because the other three inputs are frozen exactly when the network
+// most needs them to move. The parent, the step and the pool all change only when
+// the tip advances — so if the elected producer dies, every honest node re-elects
+// the same corpse on every retry, forever, and the whole network burns GPU without
+// completing a step. A worker running out of memory partway through applying a
+// multi-gigabyte update is not an exotic failure; it is the expected one for that
+// operation.
+//   proven by: protocol_tests.cpp TheWinnerRotatesAcrossSlotsSoADeadOneIsReplaced
+//
+// The slot is absolute time divided by a consensus-fixed length, not a count of
+// local retries. Rounds open when each node happens to open them, so a counter
+// anchored to a local event gives each node a different answer and splits the
+// election instead of rotating it.
+//   proven by: protocol_tests.cpp TwoNodesWhoseRoundsOpenedApartStillAgree
+//
+// Nodes therefore agree whenever their clocks agree to better than a slot — twenty
+// minutes on main. Near a boundary they briefly disagree and two checkpoints may be
+// published, which is a fork the chain rule resolves; that is a better failure than
+// a network that cannot advance at all.
 Result<uint64_t> ElectProducer(const crypto::Hash256& parent, uint64_t outer_step,
-                               std::span<const uint64_t> eligible);
+                               std::span<const uint64_t> eligible, uint64_t slot = 0);
 
-// True if `worker_id` is the producer for this step. Convenience for the common
-// question, so callers do not each re-derive it slightly differently.
+// True if `worker_id` is the producer for this step and slot. Convenience for the
+// common question, so callers do not each re-derive it slightly differently.
 bool IsProducer(const crypto::Hash256& parent, uint64_t outer_step,
-                std::span<const uint64_t> eligible, uint64_t worker_id);
+                std::span<const uint64_t> eligible, uint64_t worker_id, uint64_t slot = 0);
 
 }  // namespace rnet::diloco

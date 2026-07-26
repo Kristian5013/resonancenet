@@ -81,6 +81,7 @@ Status Participant::OpenRound(uint64_t now_ms) {
 
     round_ = std::make_unique<diloco::Round>(params_.round.round_id, outer_step_, base_checkpoint_,
                                              now_ms, config);
+    producer_slot_ = ProducerSlotAt(now_ms);
     accepted_.clear();
     payloads_held_.clear();
     return Status::Ok();
@@ -401,6 +402,34 @@ Status Participant::SubmitOwn(const canon::ContributionHeader& header, uint64_t 
     return Status::Ok();
 }
 
+uint64_t Participant::ProducerSlotAt(uint64_t now_ms) const {
+    // The election's other three inputs — parent, step and pool — change only when
+    // the tip advances, which is exactly what a dead producer prevents. Without a
+    // fourth input the whole network re-elects the same corpse on every retry and
+    // never completes a step, each node burning a GPU on contributions that will
+    // never be published.
+    //
+    // The fourth input has to be something every node computes identically without
+    // talking to anyone, and there is no such thing in the chain: a checkpoint
+    // header carries no timestamp, and rounds are opened locally, so any counter
+    // anchored to a local event — reopen count, time since this node closed its
+    // round — differs per node and would split the election instead of rotating it.
+    // An earlier version of this function counted elapsed deadlines since the local
+    // round closed, and it was worse than useless: reopening reset the count, so the
+    // same producer was elected again on every cycle.
+    //
+    // Absolute time divided by a fixed slot is the one thing left. Two nodes agree
+    // whenever their clocks agree to better than a slot; near a boundary they
+    // briefly disagree and two checkpoints may be published, which is a fork the
+    // chain rule already resolves — a far better failure than a network that cannot
+    // advance at all.
+    //
+    // The slot is two deadlines: a producer elected as its round closes gets a full
+    // cycle to publish before the slot moves on.
+    if (params_.policy.round_deadline_ms == 0) return 0;
+    return now_ms / (params_.policy.round_deadline_ms * 2);
+}
+
 bool Participant::IsProducerForThisStep() const {
     // A node that cannot reproduce the chain's optimizer state is not a candidate,
     // whatever the election says. Producing from momentum nobody else has is the
@@ -417,9 +446,11 @@ bool Participant::IsProducerForThisStep() const {
         for (const auto& header : round_->OrderedSubmissions()) {
             contributors.push_back(header.worker_id);
         }
-        return diloco::IsProducer(base_checkpoint_, outer_step_, contributors, config_.worker_id);
+        return diloco::IsProducer(base_checkpoint_, outer_step_, contributors, config_.worker_id,
+                                  producer_slot_);
     }
-    return diloco::IsProducer(base_checkpoint_, outer_step_, producer_pool_, config_.worker_id);
+    return diloco::IsProducer(base_checkpoint_, outer_step_, producer_pool_, config_.worker_id,
+                              producer_slot_);
 }
 
 Status Participant::Tick(uint64_t now_ms) {
@@ -462,6 +493,31 @@ Status Participant::Tick(uint64_t now_ms) {
     // exactly as it would have.
     const uint64_t closed_at = round_->opened_ms() + params_.policy.round_deadline_ms;
     const bool waited_long_enough = now_ms > closed_at + params_.policy.round_deadline_ms;
+
+    // Recomputed every tick: a producer that fails to publish must be replaced when
+    // the slot turns over, not re-elected by every node forever.
+    producer_slot_ = ProducerSlotAt(now_ms);
+
+    // A staged update is the third way to die here, and the easiest to miss,
+    // because from the outside the node looks like it is working: it aggregated,
+    // it holds the answer, it is simply waiting for a worker to apply it. But
+    // ProduceCheckpoint returns early while `pending_` is set, so if the worker
+    // that was going to apply it never comes back — out of GPU memory partway
+    // through a multi-gigabyte update is the expected failure for that operation,
+    // not an exotic one — this node never produces again.
+    //
+    // Dropped after one deadline. If this node is still the elected producer it
+    // simply stages a fresh one; if the slot has turned over the step is somebody
+    // else's to publish. Either way the wait is bounded.
+    //   proven by: protocol_tests.cpp
+    //   AStagedUpdateNoWorkerAppliesIsDroppedRatherThanHeldForever
+    if (pending_ && now_ms > pending_->staged_ms + params_.policy.round_deadline_ms) {
+        RNET_LOG_WARN(
+            "participant: the update staged for step {} was never applied; dropping it after {}ms "
+            "so this node is not stuck holding it",
+            pending_->outer_step, now_ms - pending_->staged_ms);
+        pending_.reset();
+    }
 
     // Aggregation needs every accepted contribution's bytes. Producing from a
     // subset while claiming the whole set would give an evidence hash nobody could
@@ -604,6 +660,7 @@ Status Participant::ProduceCheckpoint(uint64_t now_ms) {
     pending.update = pending_update_;
     pending.evidence_hash = pending_evidence_;
     pending.contributor_count = pending_contributors_;
+    pending.staged_ms = now_ms;
     pending_ = std::move(pending);
     RNET_LOG_INFO("participant: staged step {} from {} contributions, awaiting the worker",
                   pending_->outer_step, pending_->contributor_count);

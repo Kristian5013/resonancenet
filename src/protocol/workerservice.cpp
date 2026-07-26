@@ -86,6 +86,26 @@ Status WorkerService::Poll(int64_t now_ms) {
     for (auto it = assignments_.begin(); it != assignments_.end();) {
         it = server_.Find(it->first) == nullptr ? assignments_.erase(it) : std::next(it);
     }
+
+    // The apply slot is exclusive, so whatever holds it must be able to let go.
+    // Two ways it is left holding nothing:
+    //
+    //   * The worker died mid-apply. Nobody sends the reply that would clear the
+    //     slot, and every other worker is refused with "another worker is already
+    //     applying" for as long as the process lives.
+    //   * The participant dropped the staged update because it went unapplied.
+    //     The slot then names an assignment that no longer exists.
+    //
+    // Either way the node keeps answering polls and never completes a step again.
+    //   proven by: protocol_tests.cpp
+    //   TheApplySlotIsReleasedWhenTheWorkerHoldingItDisappears
+    if (applying_client_ != 0 &&
+        (server_.Find(applying_client_) == nullptr || participant_.Pending() == nullptr)) {
+        RNET_LOG_WARN("ipc: releasing the apply slot held by worker {} for assignment {}",
+                      applying_client_, applying_assignment_);
+        applying_client_ = 0;
+        applying_assignment_ = 0;
+    }
     server_.Sweep(now_ms);
     return Status::Ok();
 }

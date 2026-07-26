@@ -8,6 +8,7 @@
 // The refusals matter more than the acceptances here. An accepted contribution is
 // arithmetic; an accepted forgery is consensus.
 #include <format>
+#include <set>
 
 #include "consensus/genesis.h"
 #include "protocol/participant.h"
@@ -900,6 +901,21 @@ namespace {
 // be driven without a GPU. The applier stands in for the worker; what it returns
 // is a hash of its inputs, which is enough to prove the checkpoint commits to the
 // right base and the right update.
+// Which worker the genesis-step election names at `now_ms`, for a round whose
+// contributors are `pool`.
+//
+// Asked of the election directly rather than by standing up a second Participant
+// and polling it: constructing one derives the model's weights from genesis, which
+// under the sanitizers costs more than the test it would serve. The tests that use
+// this must not hard-code a winner — an earlier version did, and it broke the
+// moment the election gained an input, which is the election working correctly.
+uint64_t ProducerAtGenesis(uint64_t now_ms, std::vector<uint64_t> pool) {
+    const uint64_t slot = now_ms / (P().policy.round_deadline_ms * 2);
+    auto winner = diloco::ElectProducer(GenesisCheckpoint().Id(), 0, pool, slot);
+    RNET_CHECK_OK(winner);
+    return winner.value();
+}
+
 struct DrivenParticipant {
     std::map<crypto::Hash256, std::vector<uint8_t>> payloads;
     std::unique_ptr<Participant> participant;
@@ -970,7 +986,8 @@ RNET_TEST(Round, TheDeadlineIsAConsensusValueAndIsNonZero) {
 // The whole point: a round closes, its contributions are aggregated, and a
 // checkpoint appears that names what went into it.
 RNET_TEST(Round, ClosingProducesACheckpointThatNamesItsInputs) {
-    DrivenParticipant driven(1);
+    // Whichever worker the election picks, discovered rather than assumed.
+    DrivenParticipant driven(ProducerAtGenesis(100'000 + P().policy.round_deadline_ms + 1, {1, 2}));
     auto& participant = *driven.participant;
 
     const uint64_t opened = 100'000;
@@ -1064,7 +1081,7 @@ RNET_TEST(Round, OnlyTheElectedProducerPublishes) {
 // A node that accepts from itself what it would refuse from a stranger is a node
 // whose bugs reach the network before anyone notices.
 RNET_TEST(Round, TheProducerValidatesItsOwnCheckpoint) {
-    DrivenParticipant driven(1);
+    DrivenParticipant driven(ProducerAtGenesis(100'000 + P().policy.round_deadline_ms + 1, {1, 2}));
     const uint64_t opened = 100'000;
     driven.Contribute(1, opened);
     driven.Contribute(2, opened);
@@ -1197,6 +1214,156 @@ RNET_TEST(Round, AFollowerWhoseProducerNeverPublishesEventuallyReopens) {
                                                         fresh.ToContainer(), later);
     if (!verdict.accepted()) {
         RNET_FAIL("a follower whose producer never published refused new work: {}", verdict.reason);
+    }
+}
+
+// The apply slot is exclusive, so whatever holds it must be able to let go.
+//
+// One worker at a time applies the update — two would each report a hash and the
+// node would have to choose between them. But a worker that dies mid-apply sends
+// no reply, so nothing clears the slot, and every other worker is refused with
+// "another worker is already applying" for as long as the daemon lives. The node
+// keeps answering polls and never completes another step.
+RNET_TEST(WorkerService, TheApplySlotIsReleasedWhenTheWorkerHoldingItDisappears) {
+    const auto dir = WorkerSocketDir("applyslot");
+    std::filesystem::remove_all(dir);
+
+    ipc::Server server;
+    RNET_CHECK_OK(server.Listen(dir / "rnet.sock"));
+
+    net::NodeConfig node_config;
+    node_config.network = consensus::Network::Regtest;
+    net::Node node(node_config, crypto::Sha3_256(std::string_view("slot")), 78);
+    RNET_CHECK_OK(node.Start());
+
+    DrivenParticipant driven(ProducerAtGenesis(100'000 + P().policy.round_deadline_ms + 1, {1, 2}));
+    driven.Contribute(1, 100'000);
+    driven.Contribute(2, 100'000);
+    RNET_CHECK_OK(driven.participant->Tick(100'000 + P().policy.round_deadline_ms + 1));
+    RNET_CHECK(driven.participant->Pending() != nullptr);
+
+    protocol::WorkerService service(server, node, *driven.participant);
+
+    int64_t clock = 1000;
+    const int doomed = ConnectWorker(dir / "rnet.sock");
+    RNET_CHECK(doomed >= 0);
+    RNET_CHECK_OK(SendFrame(doomed, ipc::MessageType::Hello, 1,
+                            HelloPayload(P().genesis_hash_hex, P().policy_hash_hex)));
+    RNET_CHECK_OK(Exchange(service, doomed, clock));
+
+    // It takes the slot, then vanishes without replying — out of GPU memory
+    // partway through a multi-gigabyte update is the expected failure here, not
+    // an exotic one.
+    RNET_CHECK_OK(SendFrame(doomed, ipc::MessageType::GetAssignment, 2, ipc::CborWriter()
+                                                                           .BeginMap(0)
+                                                                           .Take()
+                                                                           .value()));
+    auto assigned = Exchange(service, doomed, clock);
+    RNET_CHECK_OK(assigned);
+    RNET_CHECK_EQ(static_cast<int>(assigned.value().first),
+                  static_cast<int>(ipc::MessageType::AssignApply));
+    ::close(doomed);
+
+    // Long enough for the server to notice the socket is gone.
+    clock += 60'000;
+    for (int i = 0; i < 4; ++i) RNET_CHECK_OK(service.Poll(clock));
+
+    const int successor = ConnectWorker(dir / "rnet.sock");
+    RNET_CHECK(successor >= 0);
+    RNET_CHECK_OK(SendFrame(successor, ipc::MessageType::Hello, 1,
+                            HelloPayload(P().genesis_hash_hex, P().policy_hash_hex)));
+    RNET_CHECK_OK(Exchange(service, successor, clock));
+    RNET_CHECK_OK(SendFrame(successor, ipc::MessageType::GetAssignment, 2, ipc::CborWriter()
+                                                                              .BeginMap(0)
+                                                                              .Take()
+                                                                              .value()));
+    auto second = Exchange(service, successor, clock);
+    RNET_CHECK_OK(second);
+    if (second.value().first != ipc::MessageType::AssignApply) {
+        RNET_FAIL("the successor was refused the update: the slot is still held by a worker "
+                  "that no longer exists");
+    }
+
+    ::close(successor);
+    server.Stop();
+    std::filesystem::remove_all(dir);
+}
+
+// The election must not be a function of three frozen inputs.
+//
+// Parent, step and pool all change only when the tip advances — which is exactly
+// what a dead producer prevents. Without a fourth input every honest node on the
+// network re-derives the same dead worker on every retry, forever, and the step
+// never completes. This test fails with a single winner if the slot is dropped
+// from the ticket.
+RNET_TEST(Producer, TheWinnerRotatesAcrossSlotsSoADeadOneIsReplaced) {
+    const std::vector<uint64_t> pool{1, 2, 3, 4, 5};
+    const auto parent = GenesisCheckpoint().Id();
+    std::set<uint64_t> winners;
+    for (uint64_t slot = 0; slot < 24; ++slot) {
+        auto winner = diloco::ElectProducer(parent, 7, pool, slot);
+        RNET_CHECK_OK(winner);
+        winners.insert(winner.value());
+    }
+    if (winners.size() < 3) {
+        RNET_FAIL("24 slots produced only {} distinct producer(s); a dead one is never replaced",
+                  winners.size());
+    }
+}
+
+// The slot is absolute time, not a local count, and that is the whole point.
+//
+// Rounds open when each node happens to open them, so any counter anchored to a
+// local event — reopens, time since this node's round closed — gives each node a
+// different answer and splits the election instead of rotating it. Two nodes
+// ticking at the same instant must name the same producer even though their
+// rounds opened minutes apart.
+RNET_TEST(Producer, TwoNodesWhoseRoundsOpenedApartStillAgree) {
+    const uint64_t deadline = P().policy.round_deadline_ms;
+    DrivenParticipant early(1), late(1);   // same worker id: same question, both nodes
+    early.Contribute(1, 100'000);
+    early.Contribute(2, 100'000);
+    late.Contribute(1, 100'000 + deadline / 2);
+    late.Contribute(2, 100'000 + deadline / 2);
+
+    const uint64_t now = 100'000 + deadline * 8 + 1;
+    RNET_CHECK_OK(early.participant->Tick(now));
+    RNET_CHECK_OK(late.participant->Tick(now));
+    RNET_CHECK_EQ(early.participant->IsProducerForThisStep(),
+                  late.participant->IsProducerForThisStep());
+}
+
+// A staged update is a state, so it needs an exit.
+//
+// From outside, a node holding one looks healthy: it aggregated, it has the
+// answer, it is merely waiting for a worker to apply it. But ProduceCheckpoint
+// returns early while something is staged, so if the worker never comes back the
+// node never produces again — and running out of GPU memory partway through a
+// multi-gigabyte update is the expected failure for that operation.
+RNET_TEST(Round, AStagedUpdateNoWorkerAppliesIsDroppedRatherThanHeldForever) {
+    DrivenParticipant driven(ProducerAtGenesis(100'000 + P().policy.round_deadline_ms + 1, {1, 2}));
+    auto& participant = *driven.participant;
+
+    const uint64_t opened = 100'000;
+    const uint64_t deadline = P().policy.round_deadline_ms;
+    driven.Contribute(1, opened);
+    driven.Contribute(2, opened);
+
+    RNET_CHECK_OK(participant.Tick(opened + deadline + 1));
+    RNET_CHECK(participant.Pending() != nullptr);
+
+    const uint64_t first_staged = participant.Pending()->staged_ms;
+
+    // The worker never applies it. Nothing else about the node changes.
+    //
+    // What must NOT happen is the node holding this same staged update forever.
+    // Dropping it and — while still elected — staging a fresh one is the right
+    // outcome; the point is that the wait is bounded, so a worker that vanished
+    // cannot pin the node behind an update nobody will ever apply.
+    RNET_CHECK_OK(participant.Tick(opened + deadline * 2 + 2));
+    if (participant.Pending() != nullptr && participant.Pending()->staged_ms == first_staged) {
+        RNET_FAIL("the node is still holding the update it staged at {}ms, {}ms later",
+                  first_staged, deadline + 1);
     }
 }
 
