@@ -166,6 +166,49 @@ def test_schedule_agrees() -> None:
             )
 
 
+def test_chunking_agrees() -> None:
+    """Both sides must cut the corpus in the same places.
+
+    The two implementations do it differently on purpose. Python seeks to each
+    boundary and searches from there; C++ streams the file once and finds
+    boundaries in the block already in hand, because seeking seven million times
+    on a network volume took eighteen hours. Different algorithms, one rule — and
+    if they ever disagree, two honest workers train on different text and each
+    looks like a cheat.
+    """
+    print("[chunking]")
+    import random, tempfile
+    sys.path.insert(0, os.path.join(ROOT, "worker"))
+    from rn_worker.corpus import LocalCorpus
+
+    random.seed(11)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "corpus.txt")
+        # Shapes chosen to be awkward: runs of blank lines, documents far shorter
+        # and far longer than the target, boundaries landing on block edges.
+        with open(path, "w", encoding="utf-8") as f:
+            for i in range(3000):
+                n = random.choice([50, 400, 3000, 12000])
+                f.write(f"Doc {i}. " + "x" * n)
+                f.write("\n\n" if i % 97 else "\n\n\n")
+
+        for target in (4096, 8192, 65536):
+            py_offsets = LocalCorpus(path, target, tokenizer=None).offsets
+            out = run_tool("dataset-build", "--file", path, "--out", os.path.join(tmp, "m"),
+                           "--chunk-bytes", str(target), "--network", "regtest")
+            cpp = json.loads(out[out.index("{"):out.rindex("}") + 1])
+            check(
+                f"target {target}: same number of chunks",
+                len(py_offsets) - 1 == cpp["n_chunks"],
+                f"python {len(py_offsets) - 1} != C++ {cpp['n_chunks']}",
+            )
+            check(
+                f"target {target}: same corpus length",
+                py_offsets[-1] == cpp["n_bytes"],
+                f"python {py_offsets[-1]} != C++ {cpp['n_bytes']}",
+            )
+
+
 def test_policy_agrees() -> None:
     """Policy is the second consensus artifact; both sides must read it identically."""
     print("[policy]")
@@ -461,6 +504,7 @@ def main() -> int:
     test_policy_agrees()
     test_tampered_genesis_is_refused()
     test_schedule_agrees()
+    test_chunking_agrees()
     test_diloco_math_agrees()
     test_initial_weights_agree()
     test_bf16_rounding_agrees()
