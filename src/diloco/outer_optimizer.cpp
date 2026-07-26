@@ -9,6 +9,46 @@ namespace rnet::diloco {
 
 namespace {
 constexpr int32_t kMaxRescaleShift = 32;
+
+// Every value that leaves this file must fit an int64, and the bound that matters
+// is on the PRODUCT, not on the shift.
+//
+// Bounding the shift alone is what let this through: kMaxAlignShift of 24 permits
+// an aggregate of 127·2^24, kMaxRescaleShift of 32 shifts that to 127·2^56 — which
+// fits, just — and then momentum accumulates toward g/(1-momentum) and the very
+// next addition does not. Confirmed with UBSan on inputs that pass every existing
+// validation: scale_exp -32 is inside [-64, 64], the shift is exactly the
+// permitted maximum, and the value is exactly what alignment produces.
+//
+// Overflow here is undefined behaviour, which means the result is whatever the
+// compiler and the target decide — so two nodes could disagree about the update
+// and neither would be wrong about its own arithmetic. That is a chain split
+// arriving through a language rule.
+//
+// So the arithmetic runs in 128 bits and every narrowing is checked. For inputs
+// that already fit, the value is identical: this changes no hashed output, only
+// what happens to inputs that previously had none.
+Result<int64_t> Narrow(__int128 value, std::string_view what) {
+    if (value > static_cast<__int128>(INT64_MAX) || value < static_cast<__int128>(INT64_MIN)) {
+        return Err(std::format(
+            "outer optimizer: {} left the representable range — the aggregate is too large for "
+            "this optimizer's fixed-point domain",
+            what));
+    }
+    return static_cast<int64_t>(value);
+}
+
+// MulQ16 in 128 bits, returning the wide result so the caller decides when to
+// narrow. Same rounding as MulQ16 and RoundedDiv, so all three agree.
+__int128 MulQ16Wide(__int128 value, int64_t q16) {
+    const __int128 product = value * static_cast<__int128>(q16);
+    const bool negative = product < 0;
+    const unsigned __int128 magnitude =
+        negative ? static_cast<unsigned __int128>(-product) : static_cast<unsigned __int128>(product);
+    const unsigned __int128 rounded = (magnitude + (kQ16One / 2)) >> 16;
+    const __int128 result = static_cast<__int128>(rounded);
+    return negative ? -result : result;
+}
 }
 
 int64_t MulQ16(int64_t value, int64_t q16) {
@@ -56,21 +96,36 @@ Result<std::vector<int64_t>> OuterOptimizer::Step(const Aggregate& aggregate) {
 
     std::vector<int64_t> update(static_cast<size_t>(n_params_), 0);
     for (size_t i = 0; i < update.size(); ++i) {
-        int64_t g = aggregate.values[i];
+        // Widened before the shift, not after: the shift itself is where the first
+        // overflow lived, and a value that has already wrapped cannot be checked.
+        __int128 g = static_cast<__int128>(aggregate.values[i]);
         if (shift > 0) {
             g <<= shift;
         } else if (shift < 0) {
             const int64_t divisor = int64_t{1} << (-shift);
-            g = RoundedDiv(g, divisor);
+            auto narrowed = Narrow(g, std::format("aggregate value at index {}", i));
+            if (!narrowed) return Err(narrowed.error());
+            g = static_cast<__int128>(RoundedDiv(narrowed.value(), divisor));
+        }
+        {
+            auto check = Narrow(g, std::format("aggregate value at index {} after rescaling", i));
+            if (!check) return Err(check.error());
         }
 
-        // buf = momentum * buf + g
-        int64_t buf = MulQ16(momentum_[i], config_.momentum_q16) + g;
-        momentum_[i] = buf;
+        // buf = momentum * buf + g. Momentum converges toward g/(1 - momentum), so
+        // this is the addition that overflows first once g is near the edge.
+        const __int128 buf_wide = MulQ16Wide(momentum_[i], config_.momentum_q16) + g;
+        auto buf = Narrow(buf_wide, std::format("momentum at index {}", i));
+        if (!buf) return Err(buf.error());
+        momentum_[i] = buf.value();
 
         // Nesterov looks ahead one momentum application; classical does not.
-        const int64_t direction = config_.nesterov ? g + MulQ16(buf, config_.momentum_q16) : buf;
-        update[i] = MulQ16(direction, config_.outer_lr_q16);
+        const __int128 direction_wide =
+            config_.nesterov ? g + MulQ16Wide(buf_wide, config_.momentum_q16) : buf_wide;
+        auto step = Narrow(MulQ16Wide(direction_wide, config_.outer_lr_q16),
+                           std::format("update at index {}", i));
+        if (!step) return Err(step.error());
+        update[i] = step.value();
     }
 
     ++steps_taken_;

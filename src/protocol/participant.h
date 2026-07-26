@@ -113,6 +113,18 @@ public:
     // What the worker does here is a COMPUTATION, not a judgement: anyone holding
     // the same base weights and the same update reaches the same hash. That is
     // exactly what makes a published checkpoint checkable by everyone else.
+    // True while this node cannot reproduce the optimizer state the chain is at.
+    //
+    // It happens legitimately: a node that joined late, or whose payloads never
+    // arrived, has no way to replay the aggregates that built the momentum. Such a
+    // node can still FOLLOW the chain — it has the weights hash — but it must not
+    // PRODUCE, because its update would be computed from momentum nobody else has.
+    //
+    // Said out loud rather than tracked silently, because the failure it prevents
+    // is precisely the one that leaves every test green.
+    bool optimizer_desynced() const { return optimizer_desynced_; }
+    const crypto::Hash256& optimizer_state() const { return optimizer_state_; }
+
     struct PendingProduction {
         uint64_t outer_step{0};              // the step being produced (parent + 1)
         crypto::Hash256 base_weights{};      // what the update applies to
@@ -201,6 +213,12 @@ private:
     Status OpenRound(uint64_t now_ms);
     Status IssueChallenges(uint64_t closed_step);
     Status ProduceCheckpoint(uint64_t now_ms);
+
+    // Aggregates the closed round and advances the optimizer. Run by EVERY node,
+    // producer or not: momentum is state the whole network shares, and a node that
+    // only steps when it happens to be elected arrives at its turn with momentum
+    // nobody else has.
+    Status AdvanceOptimizer();
     crypto::Hash256 BeaconFor(uint64_t outer_step) const;
 
     ParticipantConfig config_;
@@ -228,6 +246,20 @@ private:
     PayloadProvider payloads_;
     std::unique_ptr<diloco::OuterOptimizer> optimizer_;
     std::optional<PendingProduction> pending_;
+
+    // The optimizer advances exactly once per outer step. Ticking twice while a
+    // round sits Closed must not step twice — that would be the same divergence
+    // this whole change exists to remove, arriving by a different door.
+    uint64_t optimizer_stepped_through_{0};
+    crypto::Hash256 optimizer_state_{};
+    bool optimizer_desynced_{false};
+    // The update this node computed for the step in progress. The producer
+    // publishes it; everyone else keeps it only to prove they reached the same
+    // place.
+    std::vector<int64_t> pending_update_;
+    int32_t pending_scale_exp_{0};
+    crypto::Hash256 pending_evidence_{};
+    uint32_t pending_contributors_{0};
 
     std::vector<Outgoing> outgoing_;
 };

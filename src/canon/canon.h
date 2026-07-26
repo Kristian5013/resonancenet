@@ -28,7 +28,21 @@ inline constexpr uint8_t kMagic[4] = {'R', 'N', 'E', 'T'};
 
 // major << 16 | minor. A change to any serialized layout REQUIRES bumping this;
 // nodes reject containers whose version they do not implement.
-inline constexpr uint32_t kProtocolVersion = 0x0001'0000;  // 1.0
+// 1.1 — CheckpointHeader gained optimizer_state_hash.
+//
+// The outer optimizer's momentum is state the whole network shares, and until this
+// version nothing committed to it: the update was accepted on the producer's word.
+// Because the optimizer used to step only on the producing node, a follower
+// arrived at its own turn with momentum nobody else had and computed a different
+// update from identical contributions — 56 against 33 from the same aggregate,
+// compounding after that because Nesterov feeds momentum through the lookahead
+// point. Every test stayed green while the only product of the protocol diverged
+// on every node.
+//
+// Bumping this re-pins all three networks' anchors. That is free before launch and
+// a hard fork after it, which is why every format-breaking change was gathered
+// into this one version.
+inline constexpr uint32_t kProtocolVersion = 0x0001'0001;  // 1.1
 
 enum class ObjectType : uint16_t {
     RoundDescriptor = 1,

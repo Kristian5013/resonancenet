@@ -196,6 +196,30 @@ ObjectVerdict Participant::OnCheckpoint(const crypto::Hash256& id,
     if (!chain_.Has(header.value().parent)) {
         return NotForUs("checkpoint extends a parent this node does not hold yet");
     }
+    // The producer's momentum, checked against this node's own rather than taken on
+    // its word. This is the whole point of committing it: a checkpoint whose
+    // optimizer state disagrees means the two nodes computed different updates from
+    // the same contributions, and everything after it would compound the gap.
+    if (optimizer_stepped_through_ > header.value().outer_step - 1 && !optimizer_desynced_) {
+        if (header.value().optimizer_state_hash != optimizer_state_) {
+            return Reject(
+                std::format("checkpoint claims optimizer state {} but this node reached {} from "
+                            "the same contributions",
+                            util::ToHex(header.value().optimizer_state_hash).substr(0, 16),
+                            util::ToHex(optimizer_state_).substr(0, 16)),
+                50);
+        }
+    } else {
+        // Cannot verify: this node never reproduced the aggregate for that step.
+        // The chain may still be followed — the weights hash is there — but this
+        // node knows it cannot produce until it catches up, and says so.
+        optimizer_desynced_ = true;
+        RNET_LOG_WARN(
+            "participant: accepting checkpoint at step {} without verifying its optimizer state; "
+            "this node cannot produce until it reproduces one",
+            header.value().outer_step);
+    }
+
     if (auto st = chain_.Append(header.value()); !st) {
         return Reject("checkpoint rejected by the chain: " + st.error(), 20);
     }
@@ -220,6 +244,11 @@ ObjectVerdict Participant::OnCheckpoint(const crypto::Hash256& id,
         round_.reset();
         accepted_.clear();
         payloads_held_.clear();
+        // The update was for the step just closed. The momentum inside the
+        // optimizer carries forward — that is the point — but the staged update
+        // does not, or the next step would publish the previous one's arithmetic.
+        pending_update_.clear();
+        pending_contributors_ = 0;
         RNET_LOG_INFO("participant: tip is now step {} ({})", outer_step_,
                       util::ToHex(id).substr(0, 16));
     }
@@ -373,6 +402,11 @@ Status Participant::SubmitOwn(const canon::ContributionHeader& header, uint64_t 
 }
 
 bool Participant::IsProducerForThisStep() const {
+    // A node that cannot reproduce the chain's optimizer state is not a candidate,
+    // whatever the election says. Producing from momentum nobody else has is the
+    // failure this change exists to remove.
+    if (optimizer_desynced_) return false;
+
     if (producer_pool_.empty()) {
         // Genesis has no previous evidence set, so the pool falls back to whoever
         // contributed to the round being closed. This is the one step where a
@@ -408,57 +442,104 @@ Status Participant::Tick(uint64_t now_ms) {
     }
     if (state != diloco::RoundState::Closed) return Status::Ok();
 
+    // A CLOSED round is also a place to die in, and for longer than it took to
+    // find that out for Abandoned.
+    //
+    // Closed has exactly two ways to end: this node produces the checkpoint, or
+    // someone else's arrives and moves the tip. Both can simply not happen — a
+    // payload that never lands, or an elected producer that crashed — and until
+    // one does, `Round::Submit` refuses every new contribution because the round
+    // is not Open. The node keeps ticking, logs nothing, and never accepts work
+    // again.
+    //
+    // So a round that has been Closed for as long again as it was open has waited
+    // long enough. One further deadline rather than a new consensus value: the
+    // deadline already means "how long we wait for work", and waiting the same
+    // for the aftermath is symmetric and adds nothing to re-pin.
+    //
+    // Reopening is safe for the follower case. A checkpoint that arrives late
+    // still names the same parent, so OnCheckpoint accepts it and advances the tip
+    // exactly as it would have.
+    const uint64_t closed_at = round_->opened_ms() + params_.policy.round_deadline_ms;
+    const bool waited_long_enough = now_ms > closed_at + params_.policy.round_deadline_ms;
+
     // Aggregation needs every accepted contribution's bytes. Producing from a
     // subset while claiming the whole set would give an evidence hash nobody could
     // reproduce.
     const auto missing = MissingPayloads();
-    if (!missing.empty()) return Status::Ok();
+    if (!missing.empty()) {
+        if (!waited_long_enough) return Status::Ok();
+        RNET_LOG_WARN(
+            "participant: step {} closed with {} payload(s) that never arrived; abandoning them "
+            "and reopening rather than waiting forever",
+            outer_step_, missing.size());
+        return OpenRound(now_ms);
+    }
 
     if (auto st = IssueChallenges(round_->outer_step()); !st) return st;
+
+    // EVERY node advances the optimizer here, producer or not.
+    //
+    // Momentum accumulates across steps and, with Nesterov, enters the next update
+    // through the lookahead point rather than additively — so a node that steps
+    // only when it happens to be elected arrives at its turn with momentum nobody
+    // else has, and computes a different update from identical inputs. Measured
+    // before this change: the same aggregate gave 56 on a node that had stepped
+    // before and 33 on one that had not, and every test stayed green.
+    if (auto st = AdvanceOptimizer(); !st) {
+        RNET_LOG_ERROR("participant: cannot advance the optimizer at step {}: {}", outer_step_,
+                       st.error());
+        return Status::Ok();
+    }
 
     // Exactly one node publishes; everyone else recomputes and compares. If each
     // node aggregated its own view, every node would produce a different checkpoint
     // for the same step and there would be no fact of the matter about which was
     // right.
-    if (!IsProducerForThisStep()) return Status::Ok();
+    if (!IsProducerForThisStep()) {
+        // Waiting for the producer's checkpoint is the normal state here. Waiting
+        // for one that is never coming is not, and the two look identical from
+        // inside this node.
+        if (waited_long_enough) {
+            RNET_LOG_WARN(
+                "participant: step {} closed but the elected producer published nothing; "
+                "reopening rather than waiting forever",
+                outer_step_);
+            return OpenRound(now_ms);
+        }
+        return Status::Ok();
+    }
     return ProduceCheckpoint(now_ms);
 }
 
-Status Participant::ProduceCheckpoint(uint64_t now_ms) {
-    (void)now_ms;
-    // Already staged and waiting for the worker; producing again would discard the
-    // update the worker may be halfway through applying.
-    if (pending_) return Status::Ok();
+Status Participant::AdvanceOptimizer() {
+    // Once per outer step. Ticking twice while a round sits Closed must not step
+    // twice — that is the same divergence arriving by a different door.
+    if (optimizer_stepped_through_ > outer_step_) return Status::Ok();
 
-    // A node without a local worker cannot produce. That is not a tick failure —
-    // it is a node that was elected and cannot serve, which stalls the step until
-    // the next election. Said out loud rather than swallowed, because a silently
-    // stalled network is the hardest kind to diagnose.
     if (!payloads_) {
-        RNET_LOG_WARN(
-            "participant: elected to produce step {} but this node has no local worker to "
-            "aggregate with — the step will not advance until an elected node can",
-            outer_step_ + 1);
-        return Status::Ok();
+        // Without the payload bytes this node cannot reproduce the aggregate, so it
+        // cannot reach the state the chain is about to be at. It may still follow;
+        // it may not produce. Marked rather than ignored.
+        optimizer_desynced_ = true;
+        return Err("no payload provider");
     }
-
-    auto tip = chain_.Tip();
-    if (!tip) return Err("participant: no tip to extend");
-
     const auto contributions = round_->OrderedSubmissions();
     if (contributions.empty()) return Status::Ok();
 
-    // Borrowed, never copied: each payload is one byte per parameter, so a copy
-    // per contribution would be a gigabyte per contributor.
+    // Borrowed, never copied: each payload is one byte per parameter, so a copy per
+    // contribution would be a gigabyte per contributor.
     std::vector<diloco::Contribution> inputs;
     inputs.reserve(contributions.size());
     for (const auto& header : contributions) {
         const auto* bytes = payloads_(header.payload_hash);
         if (bytes == nullptr) {
-            return Err("participant: a payload vanished between acceptance and aggregation");
+            optimizer_desynced_ = true;
+            return Err("a payload vanished between acceptance and aggregation");
         }
         if (bytes->size() != header.n_params) {
-            return Err("participant: a payload is not one byte per parameter");
+            optimizer_desynced_ = true;
+            return Err("a payload is not one byte per parameter");
         }
         inputs.push_back(diloco::Contribution{
             header.worker_id, header.scale_exp,
@@ -466,7 +547,10 @@ Status Participant::ProduceCheckpoint(uint64_t now_ms) {
     }
 
     auto aggregate = diloco::AverageContributions(inputs, params_.round.model.ParameterCount());
-    if (!aggregate) return Err("participant: aggregation failed: " + aggregate.error());
+    if (!aggregate) {
+        optimizer_desynced_ = true;
+        return Err("aggregation failed: " + aggregate.error());
+    }
 
     if (!optimizer_) {
         diloco::OuterOptimizerConfig config;
@@ -477,17 +561,49 @@ Status Participant::ProduceCheckpoint(uint64_t now_ms) {
             params_.round.model.ParameterCount(), aggregate.value().scale_exp, config);
     }
     auto update = optimizer_->Step(aggregate.value());
-    if (!update) return Err("participant: outer step failed: " + update.error());
+    if (!update) {
+        optimizer_desynced_ = true;
+        return Err("outer step failed: " + update.error());
+    }
 
-    // Staged. The weights live in the worker's memory, so the second phase happens
-    // there and comes back through CompleteProduction.
+    pending_update_ = std::move(update.value());
+    pending_scale_exp_ = optimizer_->scale_exp();
+    pending_evidence_ = diloco::EvidenceHashOf(contributions);
+    pending_contributors_ = static_cast<uint32_t>(contributions.size());
+    optimizer_state_ = optimizer_->StateHash();
+    optimizer_stepped_through_ = outer_step_ + 1;
+    optimizer_desynced_ = false;
+    return Status::Ok();
+}
+
+Status Participant::ProduceCheckpoint(uint64_t now_ms) {
+    (void)now_ms;
+    // Already staged and waiting for the worker; producing again would discard the
+    // update the worker may be halfway through applying.
+    if (pending_) return Status::Ok();
+
+    // A node that could not reach the chain's optimizer state must not publish one.
+    // Its update would be computed from momentum nobody else has, and the network
+    // would accept it because nothing else can check.
+    if (optimizer_desynced_ || pending_update_.empty()) {
+        RNET_LOG_WARN(
+            "participant: elected to produce step {} but this node has not reproduced the "
+            "optimizer state; refusing to publish an update nobody could verify",
+            outer_step_ + 1);
+        return Status::Ok();
+    }
+
+
+    auto tip = chain_.Tip();
+    if (!tip) return Err("participant: no tip to extend");
+
     PendingProduction pending;
     pending.outer_step = outer_step_ + 1;
     pending.base_weights = tip.value().header.weights_hash;
-    pending.scale_exp = optimizer_->scale_exp();
-    pending.update = std::move(update.value());
-    pending.evidence_hash = diloco::EvidenceHashOf(contributions);
-    pending.contributor_count = static_cast<uint32_t>(contributions.size());
+    pending.scale_exp = pending_scale_exp_;
+    pending.update = pending_update_;
+    pending.evidence_hash = pending_evidence_;
+    pending.contributor_count = pending_contributors_;
     pending_ = std::move(pending);
     RNET_LOG_INFO("participant: staged step {} from {} contributions, awaiting the worker",
                   pending_->outer_step, pending_->contributor_count);
@@ -513,6 +629,9 @@ Status Participant::CompleteProduction(const crypto::Hash256& weights_hash, uint
     // arithmetic and compare. Without it the checkpoint states an outcome and names
     // no inputs.
     header.evidence_hash = pending_->evidence_hash;
+    // What this node's optimizer reached. A follower recomputes its own and
+    // compares; without this the update is accepted on the producer's word.
+    header.optimizer_state_hash = optimizer_state_;
     header.weight_dtype = 1;   // bf16
     pending_.reset();
     if (auto st = header.Validate(); !st) return Err(st.error());

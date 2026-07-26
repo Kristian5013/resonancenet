@@ -22,6 +22,9 @@ MIN_SCALE_EXP = -64
 MAX_ALIGN_SHIFT = 24
 Q16_ONE = 1 << 16
 
+# The domain both implementations share. A value past it is refused, not wrapped.
+_INT64_MAX = (1 << 63) - 1
+
 
 class DilocoError(Exception):
     pass
@@ -333,23 +336,60 @@ def aggregate_and_step_chunked(contributions, n_params: int, momentum: "_np.ndar
     return update, target_exp, count
 
 
+class FixedPointOverflow(OverflowError):
+    """The fixed-point domain was left. Never recoverable in place.
+
+    Mirrors the C++ side, which returns an error rather than narrowing. Both must
+    refuse the same inputs, or a value one implementation rejects is a value the
+    other silently wraps — and the two nodes then disagree about the update while
+    each is correct about its own arithmetic.
+    """
+
+
 def outer_step_array(momentum: "_np.ndarray", aggregate: "_np.ndarray", shift: int,
                      momentum_q16: int, outer_lr_q16: int, nesterov: bool) -> "_np.ndarray":
-    """One Nesterov step in Q16 fixed point, vectorised. Mutates `momentum`."""
+    """One Nesterov step in Q16 fixed point, vectorised. Mutates `momentum`.
+
+    numpy int64 wraps silently on overflow — no exception, no warning, just a
+    different number. The C++ side used to invoke undefined behaviour in the same
+    place, which is worse only in that the compiler is allowed to do anything at
+    all. Both now refuse.
+
+    The arithmetic runs in Python's unbounded integers via object dtype at the
+    points that can leave the domain, and the result is range-checked before it
+    returns to int64. For inputs that already fit, every value is identical: this
+    changes no hashed output, only what happens to inputs that previously had none.
+    """
     def mul_q16_arr(values, q16):
         product = values * int(q16)
         sign = _np.sign(product)
         return sign * ((_np.abs(product) + (Q16_ONE // 2)) >> 16)
 
+    def check(values, what):
+        # Python ints do not wrap, so the check is on the value rather than on
+        # whether a wrap already happened.
+        widest = int(_np.max(_np.abs(values))) if values.size else 0
+        if widest > _INT64_MAX:
+            raise FixedPointOverflow(
+                f"outer step: {what} left the representable range — the aggregate is too large "
+                f"for this optimizer's fixed-point domain"
+            )
+        return values
+
+    # Widened before the shift, not after: the shift is where the first overflow
+    # lives, and a value that has already wrapped cannot be checked.
+    wide = aggregate.astype(object)
     if shift > 0:
-        g = aggregate << shift
+        g = check(wide << shift, "aggregate value after rescaling")
     elif shift < 0:
         divisor = 1 << (-shift)
-        sign = _np.sign(aggregate)
-        g = sign * ((_np.abs(aggregate) + divisor // 2) // divisor)
+        sign = _np.sign(wide)
+        g = sign * ((_np.abs(wide) + divisor // 2) // divisor)
     else:
-        g = aggregate
+        g = wide
 
-    momentum[:] = mul_q16_arr(momentum, momentum_q16) + g
-    direction = g + mul_q16_arr(momentum, momentum_q16) if nesterov else momentum
-    return mul_q16_arr(direction, outer_lr_q16)
+    momentum_wide = momentum.astype(object)
+    buf = check(mul_q16_arr(momentum_wide, momentum_q16) + g, "momentum")
+    momentum[:] = buf.astype(_np.int64)
+    direction = g + mul_q16_arr(buf, momentum_q16) if nesterov else buf
+    return check(mul_q16_arr(direction, outer_lr_q16), "update").astype(_np.int64)

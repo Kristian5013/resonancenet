@@ -133,6 +133,21 @@ struct CheckpointHeader {
     // checkable rather than merely announced.
     crypto::Hash256 evidence_hash{};
 
+    // The outer optimizer's momentum after this step.
+    //
+    // Momentum is state that accumulates across steps, and with Nesterov it enters
+    // the next update through the lookahead point rather than additively — so two
+    // nodes whose momentum differs do not merely disagree by a constant, they
+    // diverge faster every step. Measured on this codebase before the fix: the same
+    // aggregate produced 56 on a node that had stepped before and 33 on one that
+    // had not.
+    //
+    // Committing it here is what lets a follower say "I reached the same state" and
+    // not merely "I received the same weights hash". Without it, the update is
+    // accepted on the producer's word, the network stays green, and the only
+    // product of the whole protocol quietly differs on every node.
+    crypto::Hash256 optimizer_state_hash{};
+
     uint8_t weight_dtype{};              // 1 = bf16, 2 = fp32
 
     bool IsGenesis() const { return parent == crypto::Hash256{}; }

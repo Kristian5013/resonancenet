@@ -18,15 +18,15 @@ from . import canon
 # Two artifacts per network, because they change for different reasons: the round
 # is frozen until a hard fork, the policy may be retuned from real network data.
 GENESIS_HASH = {
-    "main": "305780b8c751e8c9a540344de2eda40df7c2b84fb2cd7ed385ae9b6aaddcb78a",
-    "test": "199fa0bd946726a0a416da7b5103891fc6302b337ba84f558740e0bd8338c61d",
-    "regtest": "af61f8fdebe3b92867fdf54010c040363adadb4d32f4b76740b502c789f71928",
+    "main": "888a43d234425ca6efb9b802b9faf369beddfea55f3de82513471811b75f75c4",
+    "test": "b05405fba484144102881b44497a3311283c5b95847a4d3520d2dbd4d348b84f",
+    "regtest": "48babab7e69b3433a96563af65913423571af5b7be9caf78910c667215d22e51",
 }
 
 POLICY_HASH = {
-    "main": "d9a253a89a6381cd8cfdfcb219b253b36d55e47d808c91452e2b03e9d30d88d7",
-    "test": "ed4cfcfa75c2e2a29464dbc00bcc4882aac706d00be60e6ddd2278523b3a0992",
-    "regtest": "a2d482f1f4d85fe786c259a4e38074691e830e2902e3f1ccd878ec35c0fa067f",
+    "main": "58d7f7b520ea639c891ed6552c40d8a5809931c9b4a0642d666f67157229dc5c",
+    "test": "9a85901e93c71de37c6120fea8aac54e71c345407e574025a4c7367b353db56b",
+    "regtest": "d6783edd2b5f1996a677995219f888335bf8f91d40cd3485a87f1fb5822db8d2",
 }
 
 

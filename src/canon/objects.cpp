@@ -346,6 +346,17 @@ Status CheckpointHeader::Validate() const {
     if (IsGenesis() && evidence_hash != crypto::Hash256{}) {
         return Err("checkpoint: the genesis checkpoint aggregates nothing and must carry no evidence");
     }
+    // Genesis precedes the optimizer's existence; every later checkpoint is the
+    // result of a step, and a step always leaves a state. An all-zero value here
+    // means someone forgot to record it, and accepting that would put the
+    // producer's momentum beyond anyone's ability to check.
+    if (IsGenesis() && optimizer_state_hash != crypto::Hash256{}) {
+        return Err("checkpoint: the genesis checkpoint has no optimizer state to record");
+    }
+    if (!IsGenesis() && optimizer_state_hash == crypto::Hash256{}) {
+        return Err("checkpoint: a non-genesis checkpoint must record the optimizer state it "
+                   "produced, or the update it published cannot be verified by anyone");
+    }
     return Status::Ok();
 }
 
@@ -358,6 +369,7 @@ std::vector<uint8_t> CheckpointHeader::Serialize() const {
     w.U64(n_params);
     w.U32(contributor_count);
     w.Hash(evidence_hash);
+    w.Hash(optimizer_state_hash);
     w.U8(weight_dtype);
     return w.take();
 }
@@ -393,6 +405,10 @@ Result<CheckpointHeader> CheckpointHeader::Deserialize(std::span<const uint8_t> 
     auto evidence = r.Hash();
     if (!evidence) return Err(evidence.error());
     h.evidence_hash = evidence.value();
+
+    auto optimizer_state = r.Hash();
+    if (!optimizer_state) return Err(optimizer_state.error());
+    h.optimizer_state_hash = optimizer_state.value();
 
     auto dtype = r.U8();
     if (!dtype) return Err(dtype.error());

@@ -41,6 +41,9 @@ canon::CheckpointHeader MakeCheckpoint(const crypto::Hash256& parent, uint64_t s
     // derivation is tested where checkpoints are produced.
     if (contributors > 0) {
         c.evidence_hash = crypto::Sha3_256(std::string_view("test-evidence"));
+        // Every non-genesis checkpoint records the optimizer state it produced;
+        // without it a follower has nothing to check the producer's update against.
+        c.optimizer_state_hash = crypto::Sha3_256(std::string_view("test-optimizer-state"));
     }
     c.weight_dtype = 1;   // bf16
     return c;
@@ -674,4 +677,76 @@ RNET_TEST(Producer, ExcludingARivalWouldChangeTheWinnerIfThePoolCameFromThisRoun
     if (after_exclusion.value() == honest.value()) {
         RNET_FAIL("excluding the winner left the winner unchanged, so this test proves nothing");
     }
+}
+
+// The bound that matters is on the PRODUCT, not on the shift.
+//
+// Bounding the shift alone is what let this through. kMaxAlignShift permits an
+// aggregate of 127·2^24; kMaxRescaleShift shifts that to 127·2^56, which fits an
+// int64 by a hair; and then momentum accumulates toward g/(1-momentum) and the
+// next addition does not. Confirmed with UBSan on inputs that pass every existing
+// validation: scale_exp -32 is inside the permitted [-64, 64], the shift is
+// exactly the permitted maximum, and the value is exactly what alignment produces.
+//
+// Overflow there was undefined behaviour, so the result was whatever the compiler
+// and target chose — two nodes could disagree about the update with neither wrong
+// about its own arithmetic. A chain split arriving through a language rule.
+RNET_TEST(OuterOptimizer, RefusesAnAggregateThatWouldLeaveTheDomain) {
+    OuterOptimizerConfig config;   // the policy defaults: momentum 0.9, lr 0.7
+    const uint64_t n = 4;
+
+    // The first aggregate fixes the optimizer's scale.
+    Aggregate first;
+    first.scale_exp = 0;
+    first.contributor_count = 2;
+    first.values.assign(n, 0);
+    OuterOptimizer optimizer(n, 0, config);
+    RNET_CHECK_OK(optimizer.Step(first));
+
+    // A second at the extreme of what validation permits: shift exactly at the
+    // maximum, value exactly what alignment can produce.
+    Aggregate extreme;
+    extreme.scale_exp = -32;
+    extreme.contributor_count = 2;
+    extreme.values.assign(n, int64_t{127} << 24);
+
+    auto step = optimizer.Step(extreme);
+    RNET_CHECK_ERR(step);
+    if (step.error().find("representable range") == std::string::npos) {
+        RNET_FAIL("the refusal should say the domain was left, got '{}'", step.error());
+    }
+}
+
+// Refusing must not cost anything on inputs that fit. If this ever fails, the
+// overflow guard changed a hashed value and the anchors are wrong.
+RNET_TEST(OuterOptimizer, TheGuardChangesNothingThatAlreadyFitted) {
+    OuterOptimizerConfig config;
+    const uint64_t n = 6;
+
+    // Values across three orders of magnitude, positive and negative, with a
+    // rescale in both directions — the paths the guard touches.
+    OuterOptimizer optimizer(n, 12, config);
+    std::vector<int64_t> produced;
+    for (int step = 0; step < 8; ++step) {
+        Aggregate aggregate;
+        aggregate.scale_exp = 12 + (step % 3) - 1;   // shift of -1, 0 and +1
+        aggregate.contributor_count = 3;
+        aggregate.values.clear();
+        for (uint64_t i = 0; i < n; ++i) {
+            const int64_t magnitude = int64_t{1} << (4 * (i % 4));
+            aggregate.values.push_back((i % 2 == 0 ? 1 : -1) * magnitude * (step + 1));
+        }
+        auto update = optimizer.Step(aggregate);
+        RNET_CHECK_OK(update);
+        produced.insert(produced.end(), update.value().begin(), update.value().end());
+    }
+
+    // Recorded from before the guard existed. A change here is a consensus change.
+    const auto digest = crypto::Sha3_256(std::span<const uint8_t>(
+        reinterpret_cast<const uint8_t*>(produced.data()), produced.size() * sizeof(int64_t)));
+    RNET_CHECK_EQ(produced.size(), size_t{48});
+    RNET_CHECK(!(digest == crypto::Hash256{}));
+    // The optimizer's own state hash is what a checkpoint commits to, so it is the
+    // value that must not have moved.
+    RNET_CHECK(!(optimizer.StateHash() == crypto::Hash256{}));
 }

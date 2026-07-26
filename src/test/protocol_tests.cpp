@@ -188,6 +188,7 @@ RNET_TEST(Participant, RefusesACheckpointWithAnUnknownParent) {
     orphan.n_params = P().round.model.ParameterCount();
     orphan.contributor_count = 2;
     orphan.evidence_hash = crypto::Sha3_256(std::string_view("orphan evidence"));
+    orphan.optimizer_state_hash = crypto::Sha3_256(std::string_view("orphan optimizer"));
     orphan.weight_dtype = 1;
 
     const auto verdict =
@@ -215,6 +216,7 @@ RNET_TEST(Participant, AdvancingTheTipOpensAFreshRound) {
     next.n_params = P().round.model.ParameterCount();
     next.contributor_count = 2;
     next.evidence_hash = crypto::Sha3_256(std::string_view("step 1 evidence"));
+    next.optimizer_state_hash = crypto::Sha3_256(std::string_view("step 1 optimizer"));
     next.weight_dtype = 1;
 
     RNET_CHECK(
@@ -1127,4 +1129,211 @@ RNET_TEST(Round, AnExpiredRoundIsReopenedRatherThanLeftDead) {
         RNET_FAIL("a contribution after an expired round was refused: {}", verdict.reason);
     }
     RNET_CHECK_EQ(participant.submission_count(), uint32_t{1});
+}
+
+// A CLOSED round is a place to die in, and it took longer to find than Abandoned
+// because it has two exits and both can silently lead nowhere: a payload that
+// never lands, or an elected producer that crashed. Until one resolves,
+// Round::Submit refuses every contribution because the round is not Open — so the
+// node keeps ticking, logs nothing, and never accepts work again.
+//
+// The first fix for this class covered Abandoned only. These cover the rest.
+
+RNET_TEST(Round, AClosedRoundWithAStrandedPayloadEventuallyReopens) {
+    DrivenParticipant driven(1);
+    const uint64_t opened = 100'000;
+    driven.Contribute(1, opened);
+
+    auto stranded = Contribution(2, GenesisCheckpoint().Id());
+    stranded.payload_hash = crypto::Sha3_256(std::string_view("bytes that never came"));
+    RNET_CHECK(driven.participant
+                   ->OnObject(net::InvType::Contribution, stranded.Id(), stranded.ToContainer(),
+                              opened)
+                   .accepted());
+
+    const uint64_t deadline = P().policy.round_deadline_ms;
+
+    // Just past closing the round is right to wait; the payload may still land.
+    RNET_CHECK_OK(driven.participant->Tick(opened + deadline + 1));
+    RNET_CHECK_EQ(driven.participant->MissingPayloads().size(), size_t{1});
+
+    // A full further deadline later it has waited long enough.
+    RNET_CHECK_OK(driven.participant->Tick(opened + deadline * 2 + 2));
+
+    const uint64_t later = opened + deadline * 2 + 3;
+    const auto fresh = Contribution(3, GenesisCheckpoint().Id());
+    const auto verdict = driven.participant->OnObject(net::InvType::Contribution, fresh.Id(),
+                                                      fresh.ToContainer(), later);
+    if (!verdict.accepted()) {
+        RNET_FAIL("a node whose round closed on a stranded payload refused new work: {}",
+                  verdict.reason);
+    }
+}
+
+RNET_TEST(Round, AFollowerWhoseProducerNeverPublishesEventuallyReopens) {
+    DrivenParticipant first(1);
+    DrivenParticipant second(2);
+    const uint64_t opened = 100'000;
+    for (auto* driven : {&first, &second}) {
+        driven->Contribute(1, opened);
+        driven->Contribute(2, opened);
+    }
+    auto& follower = first.participant->IsProducerForThisStep() ? second : first;
+    RNET_CHECK(!follower.participant->IsProducerForThisStep());
+
+    const uint64_t deadline = P().policy.round_deadline_ms;
+
+    // Waiting for the producer's checkpoint is correct here — and that is what
+    // makes the bug invisible: waiting for one that is coming and waiting for one
+    // that never will look identical from inside.
+    RNET_CHECK_OK(follower.participant->Tick(opened + deadline + 1));
+    RNET_CHECK_EQ(follower.participant->chain().Height(), uint64_t{0});
+
+    RNET_CHECK_OK(follower.participant->Tick(opened + deadline * 2 + 2));
+
+    const uint64_t later = opened + deadline * 2 + 3;
+    const auto fresh = Contribution(3, GenesisCheckpoint().Id());
+    const auto verdict = follower.participant->OnObject(net::InvType::Contribution, fresh.Id(),
+                                                        fresh.ToContainer(), later);
+    if (!verdict.accepted()) {
+        RNET_FAIL("a follower whose producer never published refused new work: {}", verdict.reason);
+    }
+}
+
+// Reopening must not cost a checkpoint that was merely late: it names the same
+// parent, so it is still valid when it finally arrives.
+RNET_TEST(Round, ALateCheckpointIsStillAcceptedAfterReopening) {
+    DrivenParticipant driven(9);
+    const uint64_t opened = 100'000;
+    driven.Contribute(1, opened);
+    driven.Contribute(2, opened);
+
+    const uint64_t deadline = P().policy.round_deadline_ms;
+    RNET_CHECK_OK(driven.participant->Tick(opened + deadline * 2 + 2));
+
+    canon::CheckpointHeader late;
+    late.parent = GenesisCheckpoint().Id();
+    late.round_id = P().round.round_id;
+    late.outer_step = 1;
+    late.weights_hash = crypto::Sha3_256(std::string_view("weights published late"));
+    late.n_params = P().round.model.ParameterCount();
+    late.contributor_count = 2;
+    late.evidence_hash = crypto::Sha3_256(std::string_view("what it aggregated"));
+    // The state this node itself reached. A fabricated value here is refused, and
+    // that refusal is the subject of its own test below — here the point is that a
+    // LATE but honest checkpoint still lands.
+    late.optimizer_state_hash = driven.participant->optimizer_state();
+    late.weight_dtype = 1;
+
+    const auto verdict = driven.participant->OnObject(net::InvType::Checkpoint, late.Id(),
+                                                      late.ToContainer(), opened + deadline * 3);
+    if (!verdict.accepted()) {
+        RNET_FAIL("a late checkpoint was refused after the round reopened: {}", verdict.reason);
+    }
+    RNET_CHECK_EQ(driven.participant->outer_step(), uint64_t{1});
+}
+
+// The finding this whole change came from, made permanent.
+//
+// The optimizer used to step only inside ProduceCheckpoint, so a node that was not
+// the elected producer never advanced its momentum. Election rotates. A follower
+// therefore arrived at its own turn with momentum nobody else had and computed a
+// different update from identical contributions — measured at the time: 56 against
+// 33 from the same aggregate, a seventy per cent gap on the first step, compounding
+// after that because Nesterov feeds momentum through the lookahead point rather
+// than adding it.
+//
+// Nothing detected it. The checkpoint committed to which contributions were used
+// and to the resulting weights hash, but nothing said what state produced them, so
+// the update was accepted on the producer's word and every test stayed green while
+// the only product of the protocol diverged on every node.
+RNET_TEST(Round, EveryNodeAdvancesTheOptimizerNotOnlyTheProducer) {
+    DrivenParticipant first(1);
+    DrivenParticipant second(2);
+    const uint64_t opened = 100'000;
+    for (auto* driven : {&first, &second}) {
+        driven->Contribute(1, opened);
+        driven->Contribute(2, opened);
+    }
+    auto& producer = first.participant->IsProducerForThisStep() ? first : second;
+    auto& follower = first.participant->IsProducerForThisStep() ? second : first;
+
+    const uint64_t closed = opened + P().policy.round_deadline_ms + 1;
+    RNET_CHECK_OK(producer.participant->Tick(closed));
+    RNET_CHECK_OK(follower.participant->Tick(closed));
+
+    // Both stepped, from the same contributions, so both reached the same state.
+    // Before the fix the follower's optimizer had never run at all.
+    RNET_CHECK(!(producer.participant->optimizer_state() == crypto::Hash256{}));
+    if (!(producer.participant->optimizer_state() == follower.participant->optimizer_state())) {
+        RNET_FAIL("producer reached {} and follower reached {} from identical contributions",
+                  util::ToHex(producer.participant->optimizer_state()).substr(0, 16),
+                  util::ToHex(follower.participant->optimizer_state()).substr(0, 16));
+    }
+    // And neither considers itself unable to produce next time.
+    RNET_CHECK(!producer.participant->optimizer_desynced());
+    RNET_CHECK(!follower.participant->optimizer_desynced());
+}
+
+// A checkpoint whose optimizer state disagrees is refused, and scored: the two
+// nodes computed different updates from the same inputs, and every step after it
+// would widen the gap.
+RNET_TEST(Round, ACheckpointWithForeignOptimizerStateIsRefused) {
+    DrivenParticipant driven(1);
+    const uint64_t opened = 100'000;
+    driven.Contribute(1, opened);
+    driven.Contribute(2, opened);
+    RNET_CHECK_OK(driven.participant->Tick(opened + P().policy.round_deadline_ms + 1));
+    RNET_CHECK(!(driven.participant->optimizer_state() == crypto::Hash256{}));
+
+    canon::CheckpointHeader forged;
+    forged.parent = GenesisCheckpoint().Id();
+    forged.round_id = P().round.round_id;
+    forged.outer_step = 1;
+    forged.weights_hash = crypto::Sha3_256(std::string_view("plausible weights"));
+    forged.n_params = P().round.model.ParameterCount();
+    forged.contributor_count = 2;
+    forged.evidence_hash = crypto::Sha3_256(std::string_view("evidence"));
+    // Momentum this node did not reach. Everything else about the checkpoint is
+    // well-formed, which is exactly why nothing else would catch it.
+    forged.optimizer_state_hash = crypto::Sha3_256(std::string_view("someone else's momentum"));
+    forged.weight_dtype = 1;
+
+    const auto verdict = driven.participant->OnObject(net::InvType::Checkpoint, forged.Id(),
+                                                      forged.ToContainer(), opened);
+    RNET_CHECK_EQ(static_cast<int>(verdict.admission), static_cast<int>(Admission::Rejected));
+    RNET_CHECK(verdict.misbehaviour >= 50);
+    if (verdict.reason.find("optimizer state") == std::string::npos) {
+        RNET_FAIL("the refusal should name what disagreed, got '{}'", verdict.reason);
+    }
+    RNET_CHECK_EQ(driven.participant->chain().Height(), uint64_t{0});
+}
+
+// A checkpoint is a claim about a step this node could not reproduce — it joined
+// late, or its payloads never came. It may follow the chain, but it must know it
+// cannot produce, and say so.
+RNET_TEST(Round, ANodeThatCannotReproduceTheStateFollowsButRefusesToProduce) {
+    DrivenParticipant driven(1);
+    const uint64_t opened = 100'000;
+
+    // Never contributed, never aggregated, never stepped.
+    canon::CheckpointHeader arrived;
+    arrived.parent = GenesisCheckpoint().Id();
+    arrived.round_id = P().round.round_id;
+    arrived.outer_step = 1;
+    arrived.weights_hash = crypto::Sha3_256(std::string_view("weights from elsewhere"));
+    arrived.n_params = P().round.model.ParameterCount();
+    arrived.contributor_count = 2;
+    arrived.evidence_hash = crypto::Sha3_256(std::string_view("evidence from elsewhere"));
+    arrived.optimizer_state_hash = crypto::Sha3_256(std::string_view("momentum from elsewhere"));
+    arrived.weight_dtype = 1;
+
+    const auto verdict = driven.participant->OnObject(net::InvType::Checkpoint, arrived.Id(),
+                                                      arrived.ToContainer(), opened);
+    // Followed: the chain advanced.
+    RNET_CHECK(verdict.accepted());
+    RNET_CHECK_EQ(driven.participant->outer_step(), uint64_t{1});
+    // But this node knows what it cannot do.
+    RNET_CHECK(driven.participant->optimizer_desynced());
+    RNET_CHECK(!driven.participant->IsProducerForThisStep());
 }

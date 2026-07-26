@@ -14,7 +14,11 @@ import struct
 from dataclasses import dataclass, field
 
 MAGIC = b"RNET"
-PROTOCOL_VERSION = 0x0001_0000  # 1.0
+# 1.1 — CheckpointHeader gained optimizer_state_hash. Must track the C++ constant
+# in src/canon/canon.h exactly: a mirror that lags is a worker that cannot read
+# what the network writes, and it fails at the first container rather than
+# somewhere subtle, which is the one mercy here.
+PROTOCOL_VERSION = 0x0001_0001  # 1.1
 
 OBJ_ROUND_DESCRIPTOR = 1
 OBJ_DATASET_MANIFEST = 2

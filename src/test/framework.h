@@ -47,10 +47,21 @@ int RunAll(const std::string& filter);
         if (!(cond)) RNET_FAIL("check failed: {}", #cond);        \
     } while (0)
 
+// Copies rather than binds a reference, and that is not a style choice.
+//
+// `const auto& lhs_ = f().value()` binds into a temporary Result that dies at the
+// end of the declaration — lifetime extension does not reach through a function
+// returning a reference. The comparison on the next line then reads freed stack.
+// AddressSanitizer found this in util_tests.cpp; it affected every check of the
+// form RNET_CHECK_EQ(f().value(), x), which is most of the suite, so the results
+// of those comparisons were undefined rather than merely lucky.
+//
+// The values compared here are ints, hashes, sizes and strings. Copying them costs
+// nothing and removes the whole class.
 #define RNET_CHECK_EQ(a, b)                                                             \
     do {                                                                                \
-        const auto& lhs_ = (a);                                                         \
-        const auto& rhs_ = (b);                                                         \
+        auto lhs_ = (a);                                                                \
+        auto rhs_ = (b);                                                                \
         if (!(lhs_ == rhs_)) RNET_FAIL("{} != {}", #a, #b);                             \
     } while (0)
 
