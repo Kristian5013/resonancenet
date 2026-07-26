@@ -24,7 +24,7 @@ GENESIS_HASH = {
 }
 
 POLICY_HASH = {
-    "main": "58a9be54ab2943ddae9f5cc929d570e38ef8b47ebf3862cd65b1a27ab05f5bf2",
+    "main": "8a3426b6eee6c16c4c9d13aa12dae5bfc66ada1353aa0625243faebcc26a4e74",
     "test": "42b2726ab6163d8d1dc29b1ee532c36c13be4f3553e21482da7ff4bbed1e5546",
     "regtest": "3ef13240e05e7346ad9c173b050a16711239d9a58c21a0b2cb777293994d34ac",
 }

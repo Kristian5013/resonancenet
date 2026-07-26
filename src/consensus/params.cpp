@@ -161,10 +161,21 @@ NetworkParams MakeMain() {
                           // the one this was measured on.
                           /*inner_steps=*/200, /*micro_batch=*/1, /*min_contributors=*/2,
                           /*checkpoint_interval=*/4, /*chunk_tokens=*/1u << 20,
-                          // Ten minutes: long enough for a consumer GPU to finish
-                          // 250 inner steps and upload ~1 GB, short enough that one
-                          // absent worker does not hold the network.
-                          /*round_deadline_ms=*/600'000,
+                          // Twenty minutes, and the number is a measurement rather
+                          // than a round figure.
+                          //
+                          // An inner step of this model at seq_len 16384 takes 4.09
+                          // seconds on an RTX 5090 — measured on the real thing, not
+                          // on a bare transformer block, which predicted 1.86 and
+                          // omitted the output projection over 32000, the loss and
+                          // the optimizer. So 200 steps is 818 seconds there, and a
+                          // card a third slower needs 1060.
+                          //
+                          // This deadline and inner_steps together decide what
+                          // hardware may participate. Ten minutes would have meant a
+                          // network only for cards as fast as the one it was
+                          // measured on, which is not the network this is for.
+                          /*round_deadline_ms=*/1'200'000,
                           /*challenge_percent=*/10, /*challenge_deadline=*/3,
                           /*retained=*/5, /*slash_quorum=*/3);
     // Where a node with no peers looks first. Not part of any hashed artifact —
@@ -184,7 +195,7 @@ NetworkParams MakeMain() {
     p.genesis_weights_hash_hex =
         "db92552dc1a8115ebec224c0c8b8fae459d30b47a4606dfdd932366d659c76d7";
     p.genesis_hash_hex = "93e932f33d0d86eadb5c16fef2d20784c45bb819f5c167440009979915e69d25";
-    p.policy_hash_hex = "58a9be54ab2943ddae9f5cc929d570e38ef8b47ebf3862cd65b1a27ab05f5bf2";
+    p.policy_hash_hex = "8a3426b6eee6c16c4c9d13aa12dae5bfc66ada1353aa0625243faebcc26a4e74";
     return p;
 }
 
