@@ -37,6 +37,29 @@ struct ChainEntry {
     uint64_t height{0};   // 0 = genesis
 };
 
+// Which of two checkpoints competing for the same height the network keeps.
+//
+// Two can exist without anybody cheating. The producer for a step is derived from a
+// wall-clock slot, so two nodes whose clocks straddle a slot boundary elect
+// different producers, and both publish something valid. Before this rule existed
+// the chain took whichever arrived first and refused the other, so two honest nodes
+// that received them in opposite orders held different tips and never converged —
+// and, because the refusal was scored, banned each other while they were at it.
+//
+// "Longest chain" cannot separate the branches here: there is no proof of work, and
+// heights advance in lockstep at one checkpoint per outer step, so competing
+// branches are always the same length. The tie-break IS the fork-choice rule.
+//
+// Lower id wins. It is a total order every node computes from bytes it already
+// holds, with nothing to agree on beforehand, and it is self-certifying: an id is
+// the SHA3-256 of the header itself, so no one can claim a lower one without
+// actually producing a header that hashes there and passes every other check. A
+// producer could grind its aggregate for a lower id, but only in the rare step
+// where a second producer was elected at all, and any header it grinds is still one
+// a follower holding the same evidence set can refute.
+//   proven by: protocol_tests.cpp SiblingCheckpointsConvergeRatherThanSplittingTheNetwork
+bool PreferredOverIncumbent(const crypto::Hash256& candidate, const crypto::Hash256& incumbent);
+
 class CheckpointChain {
 public:
     explicit CheckpointChain(uint32_t retained_full = kDefaultRetainedCheckpoints);
@@ -54,6 +77,11 @@ public:
     Result<ChainEntry> Get(const crypto::Hash256& id) const;
     Result<ChainEntry> Tip() const;
     uint64_t Height() const;
+
+    // Whatever currently occupies `height`, so a competing checkpoint for a height
+    // the chain has already filled can be compared against the incumbent rather
+    // than refused for arriving second.
+    Result<ChainEntry> AtHeight(uint64_t height) const;
 
     // Walks parent links from `id` back to genesis. This is the audit path: it
     // needs only headers, never weights.

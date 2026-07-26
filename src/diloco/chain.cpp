@@ -95,6 +95,21 @@ bool CheckpointChain::DescendsFromGenesis(const crypto::Hash256& id) const {
     return !path.value().empty() && entries_.at(path.value().front()).header.IsGenesis();
 }
 
+bool PreferredOverIncumbent(const crypto::Hash256& candidate, const crypto::Hash256& incumbent) {
+    // Bytewise, most significant first — the same order the hex spelling reads in,
+    // so a log line saying which won is checkable by eye.
+    return std::lexicographical_compare(candidate.begin(), candidate.end(), incumbent.begin(),
+                                        incumbent.end());
+}
+
+Result<ChainEntry> CheckpointChain::AtHeight(uint64_t height) const {
+    if (height >= order_.size()) {
+        return Err(std::format("chain: no checkpoint at height {} (tip is {})", height,
+                               order_.empty() ? 0 : order_.size() - 1));
+    }
+    return entries_.at(order_[static_cast<size_t>(height)]);
+}
+
 Status CheckpointChain::RollbackTo(const crypto::Hash256& id) {
     const auto it = entries_.find(id);
     if (it == entries_.end()) return Err("chain: cannot roll back to unknown checkpoint");

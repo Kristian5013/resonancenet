@@ -210,11 +210,65 @@ ObjectVerdict Participant::OnCheckpoint(const crypto::Hash256& id,
     if (!chain_.Has(header.value().parent)) {
         return NotForUs("checkpoint extends a parent this node does not hold yet");
     }
+
+    // A checkpoint whose parent is on the chain but is not the tip is competing for
+    // a height already filled. That is not misbehaviour and not a duplicate: the
+    // producer is derived from a wall-clock slot, so two nodes whose clocks straddle
+    // a boundary both elect themselves and both publish something valid.
+    //
+    // Before this, the chain kept whichever arrived first and refused the other at
+    // twenty points — so the two halves of an honest network held different tips
+    // forever AND banned each other, which put the split in the transport layer too
+    // and made it unhealable.
+    //   proven by: protocol_tests.cpp
+    //   SiblingCheckpointsConvergeRatherThanSplittingTheNetwork
+    const auto parent_entry = chain_.Get(header.value().parent);
+    if (!parent_entry) return NotForUs(parent_entry.error());
+    const uint64_t candidate_height = parent_entry.value().height + 1;
+    if (candidate_height <= chain_.Height()) {
+        const auto incumbent = chain_.AtHeight(candidate_height);
+        if (!incumbent) return NotForUs(incumbent.error());
+        if (!diloco::PreferredOverIncumbent(id, incumbent.value().id)) {
+            return NotForUs(std::format("a competing checkpoint for height {}; the fork rule keeps {}",
+                                        candidate_height,
+                                        util::ToHex(incumbent.value().id).substr(0, 16)));
+        }
+        if (auto st = chain_.RollbackTo(header.value().parent); !st) {
+            // Past the retention window the weights to roll back to are gone, so
+            // the switch cannot be carried out. Said rather than pretended.
+            return NotForUs(st.error());
+        }
+        RNET_LOG_WARN("participant: reorganising to {} at height {}, replacing {}",
+                      util::ToHex(id).substr(0, 16), candidate_height,
+                      util::ToHex(incumbent.value().id).substr(0, 16));
+        AbandonWorkOnTheOldBranch(parent_entry.value());
+    }
     // The producer's momentum, checked against this node's own rather than taken on
     // its word. This is the whole point of committing it: a checkpoint whose
     // optimizer state disagrees means the two nodes computed different updates from
     // the same contributions, and everything after it would compound the gap.
-    if (optimizer_stepped_through_ > header.value().outer_step - 1 && !optimizer_desynced_) {
+    //
+    // "From the same contributions" is a precondition, not a description, and it
+    // was not checked. The network is asynchronous — that is the stated reason one
+    // node produces and the rest check — so two honest nodes routinely close a
+    // round holding different sets. Their optimizer states then differ for the most
+    // ordinary reason there is, and this compared them anyway and charged the
+    // producer fifty points for the difference. Two rounds of normal asynchrony
+    // banned the node doing the work.
+    //   proven by: protocol_tests.cpp
+    //   AFollowerWithAnExtraContributionDoesNotCallTheProducerAForger
+    //
+    // So the comparison is gated on the evidence hashes agreeing, which is exactly
+    // the statement that both sides aggregated the same inputs.
+    //
+    // What this does NOT do is verify a checkpoint built from a set this node does
+    // not hold, and it cannot: evidence_hash is a hash, so a follower can confirm a
+    // set it already has and cannot enumerate one it does not. Verifying every
+    // checkpoint needs the checkpoint to NAME its inputs rather than hash them —
+    // a format change, deliberately not smuggled in here.
+    const bool same_inputs = optimizer_evidence_ == header.value().evidence_hash;
+    if (optimizer_stepped_through_ > header.value().outer_step - 1 && !optimizer_desynced_ &&
+        same_inputs) {
         if (header.value().optimizer_state_hash != optimizer_state_) {
             return Reject(
                 std::format("checkpoint claims optimizer state {} but this node reached {} from "
@@ -229,9 +283,11 @@ ObjectVerdict Participant::OnCheckpoint(const crypto::Hash256& id,
         // node knows it cannot produce until it catches up, and says so.
         optimizer_desynced_ = true;
         RNET_LOG_WARN(
-            "participant: accepting checkpoint at step {} without verifying its optimizer state; "
-            "this node cannot produce until it reproduces one",
-            header.value().outer_step);
+            "participant: accepting checkpoint at step {} without verifying its optimizer state "
+            "({}); this node cannot produce until it reproduces one",
+            header.value().outer_step,
+            same_inputs ? "never reproduced the aggregate for that step"
+                        : "it aggregated a different set of contributions than this node did");
     }
 
     if (auto st = chain_.Append(header.value()); !st) {
@@ -413,6 +469,29 @@ Status Participant::SubmitOwn(const canon::ContributionHeader& header, uint64_t 
     // Our own payload is on disk already; nothing to fetch.
     payloads_held_.insert(header.payload_hash);
     return Status::Ok();
+}
+
+void Participant::AbandonWorkOnTheOldBranch(const diloco::ChainEntry& new_parent) {
+    // Everything below was computed against checkpoints this node is about to stop
+    // believing in. None of it is wrong arithmetic; it is arithmetic about a branch
+    // that lost, and keeping any of it would carry the losing branch forward under
+    // the new tip's name.
+    pending_.reset();
+    pending_update_.clear();
+    pending_contributors_ = 0;
+    accepted_.clear();
+    payloads_held_.clear();
+    round_.reset();
+    producer_pool_.clear();
+
+    // The optimizer is the one piece that cannot simply be dropped: its momentum
+    // accumulated across every step of the branch being abandoned, and there is no
+    // way to unwind it. So the node states plainly that it can no longer claim to
+    // have reproduced the chain's state, which is what stops it producing a
+    // checkpoint from momentum belonging to a branch nobody else took.
+    optimizer_desynced_ = true;
+    optimizer_stepped_through_ = new_parent.header.outer_step;
+    optimizer_evidence_ = crypto::Hash256{};
 }
 
 uint64_t Participant::ProducerSlotAt(uint64_t now_ms) const {
@@ -640,6 +719,7 @@ Status Participant::AdvanceOptimizer() {
     pending_evidence_ = diloco::EvidenceHashOf(contributions);
     pending_contributors_ = static_cast<uint32_t>(contributions.size());
     optimizer_state_ = optimizer_->StateHash();
+    optimizer_evidence_ = pending_evidence_;
     optimizer_stepped_through_ = outer_step_ + 1;
     optimizer_desynced_ = false;
     return Status::Ok();

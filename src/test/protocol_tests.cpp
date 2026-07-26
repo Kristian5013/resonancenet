@@ -137,6 +137,133 @@ RNET_TEST(Participant, RefusesAContributionThatDidTheWrongAmountOfWork) {
     }
 }
 
+// Two valid checkpoints for the same parent and step must not split the network
+// permanently, and today they do.
+//
+// The producer election is a function of the wall clock, so two nodes whose clocks
+// straddle a slot boundary elect different producers and both publish. Neither is
+// dishonest and both are well-formed. What decides which one the network keeps is,
+// at present, nothing but arrival order: the chain accepts only a checkpoint whose
+// parent is the current tip, so whichever came second is refused — and refused as
+// misbehaviour, at twenty points, so the two halves of the network also ban each
+// other while they are at it.
+//
+// This test states the requirement. It is expected to fail until there is a
+// fork-choice rule; the failure is the point, and the commit that added the slot
+// claimed a resolution that does not exist.
+RNET_TEST(Participant, SiblingCheckpointsConvergeRatherThanSplittingTheNetwork) {
+    const auto genesis_id = GenesisCheckpoint().Id();
+
+    const auto sibling = [&](std::string_view tag) {
+        canon::CheckpointHeader h;
+        h.parent = genesis_id;
+        h.round_id = P().round.round_id;
+        h.outer_step = 1;
+        h.weights_hash = crypto::Sha3_256(tag);
+        h.n_params = P().round.model.ParameterCount();
+        h.contributor_count = 2;
+        h.evidence_hash = crypto::Sha3_256(tag);
+        h.optimizer_state_hash = crypto::Sha3_256(tag);
+        h.weight_dtype = 1;
+        return h;
+    };
+    const auto a = sibling("produced by the node whose clock was a second early");
+    const auto b = sibling("produced by the node whose clock was a second late");
+    RNET_CHECK(a.Id() != b.Id());
+
+    // One node hears them in one order, the other in the opposite order. Nothing
+    // about either node is faulty; the network merely delivered two messages.
+    Participant first(Config(1), GenesisCheckpoint());
+    Participant second(Config(2), GenesisCheckpoint());
+
+    RNET_CHECK(Offer(first, net::InvType::Checkpoint, a.ToContainer(), a.Id()).accepted());
+    const auto b_at_first = Offer(first, net::InvType::Checkpoint, b.ToContainer(), b.Id());
+
+    RNET_CHECK(Offer(second, net::InvType::Checkpoint, b.ToContainer(), b.Id()).accepted());
+    const auto a_at_second = Offer(second, net::InvType::Checkpoint, a.ToContainer(), a.Id());
+
+    // Whatever the rule turns out to be, both nodes must apply it and arrive at the
+    // same tip. Which of the two they keep is a decision; disagreeing is not.
+    auto tip_of = [](Participant& p) {
+        auto tip = p.chain().Tip();
+        RNET_CHECK_OK(tip);
+        return tip.value().header.Id();
+    };
+    if (tip_of(first) != tip_of(second)) {
+        RNET_FAIL(
+            "the two nodes hold different tips after seeing the same two checkpoints in "
+            "different orders: {} against {}",
+            util::ToHex(tip_of(first)).substr(0, 16), util::ToHex(tip_of(second)).substr(0, 16));
+    }
+
+    // And the peer that relayed the sibling did nothing wrong.
+    RNET_CHECK_EQ(b_at_first.misbehaviour, 0);
+    RNET_CHECK_EQ(a_at_second.misbehaviour, 0);
+}
+
+// Convergence must survive a fork that is already a step deep.
+//
+// The two halves do not stop working while they are split: each builds its next
+// checkpoint on its own tip. So by the time the losing branch's sibling reaches a
+// node, that node may have built on top of the winner it is about to abandon, and
+// switching means unwinding real work rather than just relabelling a tip.
+RNET_TEST(Participant, AReorgUnwindsTheStepBuiltOnTheBranchItAbandons) {
+    const auto genesis_id = GenesisCheckpoint().Id();
+
+    const auto at = [&](const crypto::Hash256& parent, uint64_t step, std::string_view tag) {
+        canon::CheckpointHeader h;
+        h.parent = parent;
+        h.round_id = P().round.round_id;
+        h.outer_step = step;
+        h.weights_hash = crypto::Sha3_256(tag);
+        h.n_params = P().round.model.ParameterCount();
+        h.contributor_count = 2;
+        h.evidence_hash = crypto::Sha3_256(tag);
+        h.optimizer_state_hash = crypto::Sha3_256(tag);
+        h.weight_dtype = 1;
+        return h;
+    };
+
+    // Two step-1 siblings; whichever the fork rule prefers is the one the network
+    // must end on, so the test derives it rather than assuming it.
+    const auto x = at(genesis_id, 1, "branch x at step 1");
+    const auto y = at(genesis_id, 1, "branch y at step 1");
+    const bool x_wins = diloco::PreferredOverIncumbent(x.Id(), y.Id());
+    const auto& loser = x_wins ? y : x;
+    const auto& winner = x_wins ? x : y;
+
+    // The node follows the losing branch first and builds a second step on it.
+    Participant node(Config(1), GenesisCheckpoint());
+    RNET_CHECK(
+        Offer(node, net::InvType::Checkpoint, loser.ToContainer(), loser.Id()).accepted());
+    const auto loser_step2 = at(loser.Id(), 2, "the step built on the losing branch");
+    RNET_CHECK(Offer(node, net::InvType::Checkpoint, loser_step2.ToContainer(), loser_step2.Id())
+                   .accepted());
+    RNET_CHECK_EQ(node.chain().Height(), uint64_t{2});
+
+    // Then the winning sibling arrives, one height below the tip.
+    const auto verdict =
+        Offer(node, net::InvType::Checkpoint, winner.ToContainer(), winner.Id());
+    if (!verdict.accepted()) {
+        RNET_FAIL("the node refused the branch the fork rule prefers: {}", verdict.reason);
+    }
+    RNET_CHECK_EQ(verdict.misbehaviour, 0);
+
+    auto tip = node.chain().Tip();
+    RNET_CHECK_OK(tip);
+    RNET_CHECK(tip.value().header.Id() == winner.Id());
+    RNET_CHECK_EQ(node.chain().Height(), uint64_t{1});
+    RNET_CHECK_EQ(node.outer_step(), uint64_t{1});
+
+    // The step it had built on the abandoned branch is gone, not merely hidden.
+    RNET_CHECK(!node.chain().Has(loser_step2.Id()));
+    RNET_CHECK(!node.chain().Has(loser.Id()));
+
+    // And it knows it can no longer claim to have reproduced the chain's state: the
+    // optimizer's momentum accumulated on a branch nobody else took.
+    RNET_CHECK(node.optimizer_desynced());
+}
+
 // A contribution against weights this node has never seen cannot be placed. It is
 // refused, but as an unknown base rather than as a forgery: the sender may simply
 // be ahead — and if this node is the one behind, every honest contribution on the
@@ -1100,6 +1227,63 @@ RNET_TEST(Round, ClosingProducesACheckpointThatNamesItsInputs) {
     RNET_CHECK(announced);
 }
 
+// A follower that saw one more contribution than the producer must not treat the
+// producer's checkpoint as a forgery.
+//
+// The network is asynchronous — that is stated in the design as the reason one node
+// produces and the rest check. So two honest nodes routinely hold different
+// contribution sets when the round closes. The optimizer state committed in a
+// checkpoint is a function of the set that produced it, and the follower compares
+// it against the state IT reached from ITS OWN set. Those differ whenever the sets
+// differ, which is the normal case, not the exceptional one.
+//
+// The follower then rejects a correct checkpoint and charges the producer fifty
+// points, so two rounds of ordinary asynchrony ban the node doing the work. The
+// check is right to exist; comparing against the wrong aggregate is what is wrong.
+// Checking is supposed to be recomputation from the evidence set the checkpoint
+// names, not comparison against a state nobody else was asked to reach.
+RNET_TEST(Round, AFollowerWithAnExtraContributionDoesNotCallTheProducerAForger) {
+    const uint64_t opened = 100'000;
+    const uint64_t deadline = P().policy.round_deadline_ms;
+    const uint64_t closed = opened + deadline + 1;
+
+    // The producer sees two contributions and publishes.
+    DrivenParticipant producer(ProducerAtGenesis(closed, {1, 2}));
+    producer.Contribute(1, opened);
+    producer.Contribute(2, opened);
+    RNET_CHECK_OK(producer.participant->Tick(closed));
+    RNET_CHECK_OK(producer.ApplyPendingAsWorkerWould(closed));
+
+    std::vector<uint8_t> published;
+    crypto::Hash256 published_id{};
+    for (const auto& out : producer.participant->TakeOutgoing()) {
+        if (out.type != net::InvType::Checkpoint) continue;
+        published = out.container;
+        published_id = out.hash;
+    }
+    RNET_CHECK(!published.empty());
+
+    // The follower saw a third contribution that reached it and not the producer.
+    // Nothing about that is misbehaviour by anyone: it is what an asynchronous
+    // network does.
+    DrivenParticipant follower(9);
+    follower.Contribute(1, opened);
+    follower.Contribute(2, opened);
+    follower.Contribute(3, opened);
+    RNET_CHECK_OK(follower.participant->Tick(closed));
+
+    const auto verdict = follower.participant->OnObject(net::InvType::Checkpoint, published_id,
+                                                        published, closed);
+    if (verdict.misbehaviour > 0) {
+        RNET_FAIL("the follower charged the honest producer {} points: {}", verdict.misbehaviour,
+                  verdict.reason);
+    }
+    if (!verdict.accepted()) {
+        RNET_FAIL("the follower refused a correct checkpoint because it had aggregated one more "
+                  "contribution: {}", verdict.reason);
+    }
+}
+
 // A node that is not the producer must not publish. If every node aggregated its
 // own view, every node would produce a different checkpoint for the same step.
 RNET_TEST(Round, OnlyTheElectedProducerPublishes) {
@@ -1508,8 +1692,8 @@ RNET_TEST(Round, EveryNodeAdvancesTheOptimizerNotOnlyTheProducer) {
 RNET_TEST(Round, ACheckpointWithForeignOptimizerStateIsRefused) {
     DrivenParticipant driven(1);
     const uint64_t opened = 100'000;
-    driven.Contribute(1, opened);
-    driven.Contribute(2, opened);
+    const auto a = driven.Contribute(1, opened);
+    const auto b = driven.Contribute(2, opened);
     RNET_CHECK_OK(driven.participant->Tick(opened + P().policy.round_deadline_ms + 1));
     RNET_CHECK(!(driven.participant->optimizer_state() == crypto::Hash256{}));
 
@@ -1520,7 +1704,12 @@ RNET_TEST(Round, ACheckpointWithForeignOptimizerStateIsRefused) {
     forged.weights_hash = crypto::Sha3_256(std::string_view("plausible weights"));
     forged.n_params = P().round.model.ParameterCount();
     forged.contributor_count = 2;
-    forged.evidence_hash = crypto::Sha3_256(std::string_view("evidence"));
+    // The SAME inputs this node aggregated. That is what makes the disagreement
+    // meaningful: two nodes that fed different contributions into the optimizer are
+    // expected to reach different states, and only a claim about the same set is
+    // evidence of anything. An earlier version of this test named a set nobody
+    // held, so it proved the check fired — not that it fired for a reason.
+    forged.evidence_hash = diloco::EvidenceHashOf(std::vector<canon::ContributionHeader>{a, b});
     // Momentum this node did not reach. Everything else about the checkpoint is
     // well-formed, which is exactly why nothing else would catch it.
     forged.optimizer_state_hash = crypto::Sha3_256(std::string_view("someone else's momentum"));

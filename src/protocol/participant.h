@@ -200,6 +200,10 @@ public:
     //   proven by: protocol_tests.cpp TwoNodesWhoseRoundsOpenedApartStillAgree
     uint64_t ProducerSlotAt(uint64_t now_ms) const;
 
+    // Discards everything this node computed on a branch it is leaving. Called
+    // before adopting a competing checkpoint for a height already filled.
+    void AbandonWorkOnTheOldBranch(const diloco::ChainEntry& new_parent);
+
     // --- state ---
     const diloco::CheckpointChain& chain() const { return chain_; }
     const verification::EvidenceLedger& ledger() const { return ledger_; }
@@ -261,6 +265,10 @@ private:
     // this whole change exists to remove, arriving by a different door.
     uint64_t optimizer_stepped_through_{0};
     crypto::Hash256 optimizer_state_{};
+    // WHICH contributions optimizer_state_ was reached from. Without it the state
+    // is a number with no stated inputs, and comparing it against a checkpoint's is
+    // comparing two answers to two different questions.
+    crypto::Hash256 optimizer_evidence_{};
     bool optimizer_desynced_{false};
     // The slot the last election used. Stored so IsProducerForThisStep(), which has
     // no clock, answers the same question Tick() asked.
