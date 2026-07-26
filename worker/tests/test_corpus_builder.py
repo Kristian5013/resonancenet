@@ -326,6 +326,47 @@ def test_a_transient_download_error_is_retried() -> None:
           all(v == 3 for v in attempts.values()), f"{dict(attempts)}")
 
 
+def test_consumed_shards_free_their_disk_space() -> None:
+    """A shard that has been consumed must stop occupying the disk.
+
+    The Hub's downloader returns a path under snapshots/ that is a SYMLINK into
+    blobs/, where the bytes are. Removing what it handed back therefore frees
+    nothing, and the cache grows to the size of the whole raw dataset — which
+    filled a 3.4 TB disk at shard 1595 of 2410 and was reported by the transfer
+    client as an internal writer error, naming neither the disk nor the space.
+
+    Modelled here with the same shape: a blob, and a symlink to it standing in for
+    what a download returns.
+    """
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        shards = write_shards(tmp, n_shards=2, docs_per_shard=200)
+
+        blobs = tmp / "blobs"; blobs.mkdir()
+        links = tmp / "snapshots"; links.mkdir()
+        for i, name in enumerate(shards):
+            blob = blobs / f"blob{i}"
+            blob.write_bytes((tmp / f"{i:03d}.parquet").read_bytes())
+            (links / name.split("/")[-1]).symlink_to(blob)
+
+        class SymlinkFetcher:
+            def __init__(self, source, shard_list, cache_dir, skip):
+                self.pending = [s for s in shard_list if s not in skip]
+            def __iter__(self):
+                for s in self.pending:
+                    yield s, str(links / s.split("/")[-1])
+
+        before = sum(f.stat().st_size for f in blobs.iterdir())
+        build_corpus.build(make_config(tmp), tmp / "freed.bin", tmp, keep_raw=False,
+                           list_shards=lambda source: list(shards),
+                           fetcher_factory=SymlinkFetcher)
+        after = sum(f.stat().st_size for f in blobs.iterdir())
+
+        check("consuming a shard frees the bytes, not just the symlink", after == 0,
+              f"{before/1e6:.1f} MB of blobs before, {after/1e6:.1f} MB after — "
+              f"the cache would grow to the size of the whole raw dataset")
+
+
 def main() -> int:
     if not TOKENIZER.exists():
         print(f"missing {TOKENIZER}; run rnet-tool genesis-emit first")
@@ -335,6 +376,7 @@ def main() -> int:
     test_resume_after_a_crash_mid_shard()
     test_parallel_downloads_preserve_order()
     test_a_transient_download_error_is_retried()
+    test_consumed_shards_free_their_disk_space()
     print()
     if failures:
         print(f"{len(failures)} failed: {', '.join(failures)}")

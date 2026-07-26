@@ -413,13 +413,24 @@ def build(config_path: Path, out_path: Path, cache_dir: Path, keep_raw: bool,
                 state.source_tokens[source.repo] = written_here
                 state.completed_shards.append(shard)
 
-                # Deleted as consumed, so peak disk is the output plus one shard
-                # rather than the whole raw dataset.
+                # Deleted as consumed, so peak disk is the output plus the
+                # prefetch window rather than the whole raw dataset.
+                #
+                # BOTH the symlink and the blob it points at. hf_hub_download
+                # returns a path under snapshots/ that is a symlink into blobs/,
+                # where the bytes actually are, so removing what it handed back
+                # frees nothing at all. This filled a 3.4 TB disk at shard 1595 of
+                # 2410 and surfaced as "Internal Writer Error: receiver dropped"
+                # from the transfer client — five hours lost to a message that
+                # named neither the disk nor the space.
+                #   proven by: test_corpus_builder.py
+                #   test_consumed_shards_free_their_disk_space
                 if not keep_raw:
-                    try:
-                        os.remove(local)
-                    except OSError:
-                        pass
+                    for path in {local, os.path.realpath(local)}:
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
 
                 # Flushed and on the platter BEFORE the state claims it. The other
                 # order records bytes that a power loss would take away, and the
