@@ -96,6 +96,18 @@ else
   echo "==> cross-language agreement (skipped: no python3)"
 fi
 
+# The corpus builder produces dataset_root, which is a consensus value, so it is
+# checked like one: two runs must agree byte for byte, a run interrupted mid-shard
+# must resume to the same bytes, and the file must be exactly four bytes per token.
+# Needs pyarrow and tokenizers; skipped rather than failed where they are absent,
+# because they are not needed to build or run a node.
+if python3 -c "import pyarrow, tokenizers, numpy" 2> /dev/null; then
+  echo "==> corpus builder"
+  python3 worker/tests/test_corpus_builder.py
+else
+  echo "==> corpus builder (skipped: pyarrow/tokenizers not installed)"
+fi
+
 # The local channel, against the real daemon binary rather than a reimplementation
 # — the same reason the other cross-language checks drive rnet-tool.
 if command -v python3 > /dev/null; then

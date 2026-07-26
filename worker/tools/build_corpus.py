@@ -46,13 +46,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import collections
 import hashlib
 import json
 import os
-import queue
 import sys
-import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
@@ -68,12 +68,23 @@ EOS_TOKEN = 0
 # pays off, small enough that a batch of long documents does not spike memory.
 BATCH_DOCUMENTS = 1000
 
-# Shards fetched ahead of the one being tokenized. Measured on a c7i.2xlarge:
-# a shard downloads in 8 seconds and tokenizes in about five minutes, so without
-# this the network sits at zero for the whole run — observed directly, 0 MB/s
-# while a core count of eight was pinned at 545%. One shard ahead is enough to
-# hide the download completely and costs 1.5 GB of disk.
-PREFETCH_DEPTH = 2
+# Downloads in flight at once.
+#
+# One at a time was enough on a c7i.2xlarge, where eight cores took about five
+# minutes to tokenize a shard that downloaded in eight seconds. It is not enough
+# on a machine with sixty-four cores and a hundred-gigabit link: tokenizing gets
+# eight times faster while a single HTTP stream does not, so the cores go back to
+# waiting. Sixteen streams is what saturates the link without the ordering below
+# becoming the bottleneck instead.
+DOWNLOAD_WORKERS = 16
+
+# Shards allowed on disk ahead of the one being tokenized. Bounds peak disk to
+# this many shards — about a gigabyte each for FineWeb-Edu — on top of the output.
+PREFETCH_SHARDS = 24
+
+# A transient 5xx on one shard out of eight hundred must not end a run that has
+# been going for an hour.
+DOWNLOAD_ATTEMPTS = 5
 
 
 @dataclass
@@ -96,6 +107,14 @@ class BuildState:
     """Everything needed to continue an interrupted run."""
 
     tokens_written: int = 0
+    # How many bytes of the output file this state accounts for.
+    #
+    # Without it, "resume" means "append after whatever is there", and whatever is
+    # there may include a half-written shard that no state records — so the shard
+    # is tokenized again and the corpus contains a partial duplicate. That is
+    # invisible in every number the build prints, and it changes dataset_root.
+    #   proven by: test_corpus_builder.py test_resume_after_a_crash_mid_shard
+    bytes_written: int = 0
     source_index: int = 0
     completed_shards: list[str] = None
     source_tokens: dict = None
@@ -124,7 +143,9 @@ def load_tokenizer(path: Path, expected_hash: str | None) -> Tokenizer:
             f"Building with this would produce a corpus whose token ids mean "
             f"different strings than the network agreed on."
         )
-    print(f"tokenizer {actual[:16]}… vocab {json.loads(raw)['model']['vocab_size'] if 'vocab_size' in raw[:200].decode('utf-8', 'ignore') else len(json.loads(raw)['model']['vocab'])}")
+    model = json.loads(raw)["model"]
+    vocab = model.get("vocab_size") or len(model["vocab"])
+    print(f"tokenizer {actual[:16]}… vocab {vocab}")
     return Tokenizer.from_file(str(path))
 
 
@@ -144,45 +165,59 @@ def shard_list(source: SourceSpec) -> list[str]:
 
 
 class ShardFetcher:
-    """Downloads shards one step ahead of the loop that consumes them.
+    """Downloads shards ahead of the loop that consumes them, in parallel.
 
-    Downloading and tokenizing are both slow and use different resources — one
-    the network, the other every core — so doing them in sequence leaves each
-    idle while the other works. A thread and a queue of depth two is the whole
-    mechanism; nothing here reorders anything, because the queue preserves the
-    order shards were requested in and order is part of the output.
+    Downloading and tokenizing are both slow and use different resources — one the
+    network, the other every core — so doing them in sequence leaves each idle
+    while the other works.
+
+    ORDER IS PART OF THE OUTPUT, so although downloads finish in whatever order the
+    network delivers them, they are handed to the consumer strictly in shard-list
+    order: futures go into a deque when submitted and are read from its front. A
+    shard that arrives early waits its turn.
+      proven by: test_corpus_builder.py test_parallel_downloads_preserve_order
     """
 
     def __init__(self, source: SourceSpec, shards: list[str], cache_dir: Path, skip: set[str]):
         self.source = source
         self.cache_dir = cache_dir
         self.pending = [s for s in shards if s not in skip]
-        self.queue: queue.Queue = queue.Queue(maxsize=PREFETCH_DEPTH)
-        self.error: Exception | None = None
-        self.thread = threading.Thread(target=self._run, daemon=True)
-        self.thread.start()
 
-    def _run(self):
-        for shard in self.pending:
+    def _download(self, shard: str) -> str:
+        last: Exception | None = None
+        for attempt in range(DOWNLOAD_ATTEMPTS):
             try:
-                local = hf_hub_download(
+                return hf_hub_download(
                     self.source.repo, shard, repo_type="dataset",
                     revision=self.source.revision, cache_dir=str(self.cache_dir),
                 )
-                self.queue.put((shard, local))
-            except Exception as exc:            # noqa: BLE001 - reported to the caller
-                self.error = exc
-                break
-        self.queue.put(None)                    # end of stream
+            except Exception as exc:            # noqa: BLE001 - retried, then reported
+                last = exc
+                if attempt + 1 < DOWNLOAD_ATTEMPTS:
+                    delay = min(2 ** attempt, 30)
+                    print(f"  {shard}: {type(exc).__name__}, retrying in {delay}s "
+                          f"({attempt + 1}/{DOWNLOAD_ATTEMPTS})", file=sys.stderr)
+                    time.sleep(delay)
+        raise RuntimeError(f"{shard}: failed after {DOWNLOAD_ATTEMPTS} attempts") from last
 
     def __iter__(self):
-        while True:
-            item = self.queue.get()
-            if item is None:
-                if self.error:
-                    raise self.error
-                return
-            yield item
+        with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as pool:
+            remaining = iter(self.pending)
+            inflight: collections.deque = collections.deque()
+
+            def fill():
+                while len(inflight) < PREFETCH_SHARDS:
+                    shard = next(remaining, None)
+                    if shard is None:
+                        return
+                    inflight.append((shard, pool.submit(self._download, shard)))
+
+            fill()
+            while inflight:
+                shard, future = inflight.popleft()
+                local = future.result()     # re-raises a permanent failure here
+                fill()
+                yield shard, local
 
 
 def documents_in(table, source: SourceSpec):
@@ -235,12 +270,34 @@ def append_tokens(out, tokenizer: Tokenizer, documents: list[str]) -> tuple[int,
 os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
 
 
+def write_state(path: Path, state: "BuildState") -> None:
+    """Replaces the state file atomically.
+
+    write_text truncates and then writes, so a process dying in between leaves an
+    empty or half-written file — and the resume that follows cannot parse it, which
+    turns a recoverable interruption into a corpus rebuilt from zero.
+    """
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(asdict(state)))
+    os.replace(tmp, path)
+
+
 def free_bytes(path: Path) -> int:
     stat = os.statvfs(path)
     return stat.f_bavail * stat.f_frsize
 
 
-def build(config_path: Path, out_path: Path, cache_dir: Path, keep_raw: bool) -> None:
+def build(config_path: Path, out_path: Path, cache_dir: Path, keep_raw: bool,
+          list_shards=shard_list, fetcher_factory=None) -> None:
+    """Builds the token file.
+
+    `list_shards` and `fetcher_factory` exist so the tokenizing half can be driven
+    from local files. Without a seam here the only way to exercise the code that
+    produces a consensus value is to download a terabyte first, which means it was
+    never exercised at all.
+    """
+    if fetcher_factory is None:
+        fetcher_factory = ShardFetcher
     config = json.loads(config_path.read_text())
     sources = [SourceSpec(**s) for s in config["sources"]]
 
@@ -256,6 +313,22 @@ def build(config_path: Path, out_path: Path, cache_dir: Path, keep_raw: bool) ->
     # Append, so a resumed run continues the same file rather than starting a
     # second one. Truncating here would silently discard days of work.
     mode = "ab" if state.tokens_written else "wb"
+
+    # Cut back to the last byte the state accounts for. Anything past it belongs
+    # to a shard that was interrupted partway and is about to be redone, so
+    # keeping it would duplicate a fragment of it.
+    if state.bytes_written and out_path.exists():
+        actual = out_path.stat().st_size
+        if actual > state.bytes_written:
+            print(f"discarding {actual - state.bytes_written:,} unaccounted bytes from an "
+                  f"interrupted shard")
+            os.truncate(out_path, state.bytes_written)
+        elif actual < state.bytes_written:
+            raise SystemExit(
+                f"the output file is {actual:,} bytes but the state records "
+                f"{state.bytes_written:,}. Something truncated it. Refusing to append to a "
+                f"corpus that is already shorter than its own record."
+            )
     started = time.time()
 
     with open(out_path, mode) as out:
@@ -265,12 +338,12 @@ def build(config_path: Path, out_path: Path, cache_dir: Path, keep_raw: bool) ->
             state.source_index = source_index
             written_here = state.source_tokens.get(source.repo, 0)
 
-            shards = shard_list(source)
+            shards = list_shards(source)
             print(f"\n{source.repo} @ {source.revision[:12]}: {len(shards)} shards, "
                   f"target {source.max_tokens:,} tokens")
 
             done = set(state.completed_shards)
-            fetcher = ShardFetcher(source, shards, cache_dir, done)
+            fetcher = fetcher_factory(source, shards, cache_dir, done)
 
             for shard, local in fetcher:
                 if written_here >= source.max_tokens:
@@ -306,8 +379,13 @@ def build(config_path: Path, out_path: Path, cache_dir: Path, keep_raw: bool) ->
                     except OSError:
                         pass
 
+                # Flushed and on the platter BEFORE the state claims it. The other
+                # order records bytes that a power loss would take away, and the
+                # resume would then trust a length the file does not have.
                 out.flush()
-                state_path.write_text(json.dumps(asdict(state)))
+                os.fsync(out.fileno())
+                state.bytes_written = out.tell()
+                write_state(state_path, state)
 
                 # Stopped cleanly rather than dying mid-write. A corpus is worth
                 # days of compute and the state file is only consistent between
@@ -327,6 +405,14 @@ def build(config_path: Path, out_path: Path, cache_dir: Path, keep_raw: bool) ->
 
     ratio = state.raw_bytes_read / max(state.tokens_written, 1)
     size = out_path.stat().st_size
+    # The file is four bytes per token or it is not the file the count describes.
+    # Cheap, and the only check that catches a duplicated or truncated fragment
+    # before its root is pinned.
+    if size != state.tokens_written * 4:
+        raise SystemExit(
+            f"the corpus is {size:,} bytes but claims {state.tokens_written:,} tokens "
+            f"({state.tokens_written * 4:,} bytes). Do not pin a root from this file."
+        )
     print(f"\n{state.tokens_written:,} tokens, {size / 1e9:.1f} GB on disk")
     print(f"{ratio:.3f} raw bytes per token with THIS tokenizer")
     # The number that sizes a disk. Published token counts use other tokenizers,
