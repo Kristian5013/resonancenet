@@ -1,6 +1,9 @@
 #include "dataset/index.h"
 
 #include <algorithm>
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <cstdio>
 #include <thread>
 #include <cstring>
@@ -78,9 +81,25 @@ Result<DatasetIndex> DatasetIndex::Build(const std::filesystem::path& corpus_fil
     uint64_t window_start = 0;
     uint64_t chunk_start = 0;
 
+    // Read through the page cache, but tell the kernel what is coming.
+    //
+    // Without this the reads went out one at a time — 256 KB requests at 1.43 ms
+    // each, queue depth 1.38, which is 247 MB/s on a volume that gives dd 1.2 GB/s
+    // with direct I/O. The disk was 72% idle and the process sat in
+    // folio_wait_bit_common. Asking for the next window before hashing the current
+    // one puts several requests in flight and overlaps the wait with the work.
+    const int fd = ::fileno(f);
+    ::posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+
     while (true) {
         const size_t want = std::min<uint64_t>(buf.size() - filled, n_bytes - (window_start + filled));
         if (want > 0) {
+            const uint64_t ahead = window_start + filled + want;
+            if (ahead < n_bytes) {
+                ::posix_fadvise(fd, static_cast<off_t>(ahead),
+                                static_cast<off_t>(std::min<uint64_t>(buf.size(), n_bytes - ahead)),
+                                POSIX_FADV_WILLNEED);
+            }
             const size_t got = std::fread(buf.data() + filled, 1, want, f);
             if (got != want) {
                 std::fclose(f);
@@ -118,6 +137,11 @@ Result<DatasetIndex> DatasetIndex::Build(const std::filesystem::path& corpus_fil
             idx.offsets_.push_back(boundary);
             cursor = boundary;
         }
+
+        // The window just consumed will not be read again; letting it go keeps the
+        // cache for what is coming rather than for 7 TB of history.
+        ::posix_fadvise(fd, static_cast<off_t>(window_start), static_cast<off_t>(filled),
+                        POSIX_FADV_DONTNEED);
 
         // Hash the batch across the cores. Leaves are written by index, so the
         // order is the chunk order however the threads interleave.
