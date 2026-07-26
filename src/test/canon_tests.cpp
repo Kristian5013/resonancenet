@@ -148,17 +148,25 @@ RNET_TEST(Objects, InvalidModelIsRejectedOnDecode) {
 
 RNET_TEST(Objects, ContainerTypeIsEnforced) {
     DatasetManifest m;
-    m.n_tokens = 4096;
-    m.chunk_tokens = 1024;
+    m.n_bytes = 4096;
+    m.target_chunk_bytes = 1024;
     m.n_chunks = 4;
     RNET_CHECK_ERR(RoundDescriptor::FromContainer(m.ToContainer()));
 }
 
-RNET_TEST(Objects, DatasetManifestRejectsInconsistentChunkCount) {
+// Chunks end at the first document separator at or after the target, so each is
+// at least the target long except the last. More chunks than that allows means
+// the boundaries were not derived by the stated rule — and since a node
+// recomputes them by scanning, a manifest claiming otherwise describes a corpus
+// nobody can reproduce.
+RNET_TEST(Objects, DatasetManifestRejectsMoreChunksThanTheRuleAllows) {
     DatasetManifest m;
-    m.n_tokens = 4096;
-    m.chunk_tokens = 1024;
-    m.n_chunks = 3;            // should be 4
+    m.n_bytes = 4096;
+    m.target_chunk_bytes = 1024;
+    m.n_chunks = 4;
+    RNET_CHECK_OK(DatasetManifest::FromContainer(m.ToContainer()));
+
+    m.n_chunks = 6;            // 4096 / 1024 = 4 full chunks, plus at most one short
     RNET_CHECK_ERR(DatasetManifest::FromContainer(m.ToContainer()));
 }
 

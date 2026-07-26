@@ -160,18 +160,25 @@ crypto::Hash256 RoundDescriptor::Id() const { return ContainerId(ToContainer());
 // DatasetManifest
 // ---------------------------------------------------------------------------
 Status DatasetManifest::Validate() const {
-    if (n_tokens == 0) return Err("dataset: empty corpus");
-    if (chunk_tokens == 0) return Err("dataset: chunk_tokens must be non-zero");
+    if (n_bytes == 0) return Err("dataset: empty corpus");
+    if (target_chunk_bytes == 0) return Err("dataset: target_chunk_bytes must be non-zero");
     if (n_chunks == 0) return Err("dataset: n_chunks must be non-zero");
-    if (!IsKnownTokenDtype(dtype)) return Err("dataset: unknown token dtype");
-    // n_chunks must be exactly ceil(n_tokens / chunk_tokens): anything else means
-    // the manifest and the file disagree about the tree shape, and therefore about
-    // the root.
-    const uint64_t expected = (n_tokens + chunk_tokens - 1) / chunk_tokens;
-    if (expected != n_chunks) {
-        return Err(std::format("dataset: n_chunks {} != ceil(n_tokens/chunk_tokens) {}", n_chunks,
-                               expected));
+
+    // Chunks end at the first document separator at or after target_chunk_bytes,
+    // so each is at least that long except the last, which holds the remainder.
+    // That gives bounds rather than an equality: fewer chunks than the floor means
+    // some chunk is short and the boundaries were not derived by the stated rule;
+    // more than the count of non-empty chunks means one is empty, and an empty
+    // Merkle leaf is a chunk nobody can train on.
+    const uint64_t floor_chunks = n_bytes / target_chunk_bytes;
+    const uint64_t most = floor_chunks + 1;
+    if (n_chunks > most) {
+        return Err(std::format(
+            "dataset: {} chunks over {} bytes at a target of {} — at least one is shorter than "
+            "the target, so the boundaries do not follow the rule",
+            n_chunks, n_bytes, target_chunk_bytes));
     }
+    if (n_chunks > n_bytes) return Err("dataset: more chunks than bytes");
     return Status::Ok();
 }
 
@@ -179,10 +186,9 @@ std::vector<uint8_t> DatasetManifest::Serialize() const {
     Writer w;
     w.Hash(dataset_root);
     w.Hash(tokenizer_hash);
-    w.U64(n_tokens);
-    w.U32(chunk_tokens);
+    w.U64(n_bytes);
+    w.U32(target_chunk_bytes);
     w.U32(n_chunks);
-    w.U8(static_cast<uint8_t>(dtype));
     return w.take();
 }
 
@@ -198,21 +204,17 @@ Result<DatasetManifest> DatasetManifest::Deserialize(std::span<const uint8_t> co
     if (!tok) return Err(tok.error());
     m.tokenizer_hash = tok.value();
 
-    auto n_tokens = r.U64();
-    if (!n_tokens) return Err(n_tokens.error());
-    m.n_tokens = n_tokens.value();
+    auto n_bytes = r.U64();
+    if (!n_bytes) return Err(n_bytes.error());
+    m.n_bytes = n_bytes.value();
 
-    auto chunk = r.U32();
-    if (!chunk) return Err(chunk.error());
-    m.chunk_tokens = chunk.value();
+    auto target = r.U32();
+    if (!target) return Err(target.error());
+    m.target_chunk_bytes = target.value();
 
     auto n_chunks = r.U32();
     if (!n_chunks) return Err(n_chunks.error());
     m.n_chunks = n_chunks.value();
-
-    auto dtype = r.U8();
-    if (!dtype) return Err(dtype.error());
-    m.dtype = static_cast<TokenDtype>(dtype.value());
 
     if (auto st = r.ExpectExhausted(); !st) return Err(st.error());
     if (auto st = m.Validate(); !st) return Err(st.error());

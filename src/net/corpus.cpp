@@ -40,11 +40,11 @@ Result<size_t> ReadAt(const std::filesystem::path& path, uint64_t offset,
 
 }  // namespace
 
-Result<CorpusSource> CorpusSource::Open(const std::filesystem::path& token_file,
+Result<CorpusSource> CorpusSource::Open(const std::filesystem::path& corpus_file,
                                         const canon::DatasetManifest& manifest) {
     if (auto st = manifest.Validate(); !st) return Err(st.error());
 
-    auto index = dataset::DatasetIndex::Build(token_file, manifest.chunk_tokens, manifest.dtype);
+    auto index = dataset::DatasetIndex::Build(corpus_file, manifest.target_chunk_bytes);
     if (!index) return Err(index.error());
 
     // Checked here rather than left for the first worker to discover. A node
@@ -53,45 +53,39 @@ Result<CorpusSource> CorpusSource::Open(const std::filesystem::path& token_file,
     if (index.value().root() != manifest.dataset_root) {
         return Err(std::format(
             "corpus: {} has root {}, the manifest pins {} — this is not that corpus",
-            token_file.string(), util::ToHex(index.value().root()),
+            corpus_file.string(), util::ToHex(index.value().root()),
             util::ToHex(manifest.dataset_root)));
     }
-    if (index.value().n_tokens() != manifest.n_tokens) {
+    if (index.value().n_bytes() != manifest.n_bytes) {
         return Err(std::format("corpus: file holds {} tokens, the manifest says {}",
-                               index.value().n_tokens(), manifest.n_tokens));
+                               index.value().n_bytes(), manifest.n_bytes));
     }
 
     CorpusSource source;
-    source.token_file_ = token_file;
+    source.token_file_ = corpus_file;
     source.manifest_ = manifest;
     source.index_ = std::move(index.value());
     return source;
 }
 
 Result<uint64_t> CorpusSource::ChunkBytes(uint64_t chunk_index) const {
-    if (chunk_index >= manifest_.n_chunks) {
-        return Err(std::format("corpus: chunk {} of {}", chunk_index, manifest_.n_chunks));
-    }
-    const uint64_t width = WidthOf(manifest_.dtype);
-    const uint64_t first_token = chunk_index * manifest_.chunk_tokens;
-    // The last chunk is short whenever the corpus does not divide evenly, which is
-    // the normal case rather than an edge case.
-    const uint64_t tokens =
-        std::min<uint64_t>(manifest_.chunk_tokens, manifest_.n_tokens - first_token);
-    return tokens * width;
+    // From the index, not from arithmetic. Chunks end at document boundaries, so
+    // their sizes are a property of the corpus rather than a formula, and the
+    // index is where those boundaries were derived.
+    auto extent = index_.ChunkExtent(chunk_index);
+    if (!extent) return Err(extent.error());
+    return extent.value().second - extent.value().first;
 }
 
 Result<size_t> CorpusSource::ReadChunkRange(uint64_t chunk_index, uint64_t offset,
                                             std::span<uint8_t> out) const {
-    auto size = ChunkBytes(chunk_index);
-    if (!size) return Err(size.error());
-    if (offset >= size.value()) return size_t{0};
+    auto extent = index_.ChunkExtent(chunk_index);
+    if (!extent) return Err(extent.error());
+    const uint64_t size = extent.value().second - extent.value().first;
+    if (offset >= size) return size_t{0};
 
-    const uint64_t width = WidthOf(manifest_.dtype);
-    const uint64_t chunk_start = chunk_index * manifest_.chunk_tokens * width;
-    const size_t length =
-        static_cast<size_t>(std::min<uint64_t>(out.size(), size.value() - offset));
-    return ReadAt(token_file_, chunk_start + offset, out.subspan(0, length));
+    const size_t length = static_cast<size_t>(std::min<uint64_t>(out.size(), size - offset));
+    return ReadAt(token_file_, extent.value().first + offset, out.subspan(0, length));
 }
 
 Result<crypto::MerkleProof> CorpusSource::ProofForChunk(uint64_t chunk_index) const {

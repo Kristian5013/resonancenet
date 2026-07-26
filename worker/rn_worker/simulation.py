@@ -78,6 +78,12 @@ class LocalNetwork:
         self.round = genesis.load_network(network, genesis_dir)
         self.policy = genesis.load_policy_for_network(network, genesis_dir)
         self.tokens = tokens
+        # The inner loop takes a corpus, not a token array: with the corpus
+        # addressed in chunks of text, "which tokens" is a question only something
+        # that holds the corpus can answer. ArrayCorpus presents that surface over
+        # an array so the simulation exercises the same path a real worker does.
+        from .corpus import ArrayCorpus
+        self.corpus = ArrayCorpus(tokens)
         self.workers = workers
         self.device = device if torch.cuda.is_available() else "cpu"
         self.lr = lr
@@ -166,7 +172,7 @@ class LocalNetwork:
         self._restore(base)
         result = inner_loop.run_inner_loop(
             self.model,
-            self.round.model, self._optimizer_factory, self.tokens, self.dataset_root,
+            self.round.model, self._optimizer_factory, self.corpus, self.dataset_root,
             self.round.round_id, spec.worker_id, self.outer_step,
             self.policy.inner_steps, self.policy.micro_batch, self.round.model.seq_len,
             self.lr, self.device, poison=poison,

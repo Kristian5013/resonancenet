@@ -39,10 +39,31 @@ inline constexpr uint8_t kMagic[4] = {'R', 'N', 'E', 'T'};
 // point. Every test stayed green while the only product of the protocol diverged
 // on every node.
 //
+// 1.2 — the corpus is text, and the model is shaped for the hardware.
+//
+// A DatasetManifest used to describe a flat file of token ids: n_tokens,
+// chunk_tokens, dtype. It now describes raw UTF-8: n_bytes, target_chunk_bytes,
+// and nothing about widths, because there are no tokens in it. A worker is
+// assigned a CHUNK, fetches it, and tokenizes it itself with the artifact
+// tokenizer_hash pins.
+//
+// The reason is cost. Publishing a corpus used to mean tokenizing it first — 23
+// CPU-hours and a 1.28 TB second copy for 810 GB of input — and that was paid
+// again on every corpus change, in a project whose premise is training on fresh
+// data. Chunk boundaries are now derived by scanning for document separators, so
+// publishing is chunking and hashing, and the manifest stays three numbers rather
+// than an offset table.
+//
+// The model moved with it, for reasons measured rather than assumed:
+// 400M at seq_len 16384 with a 32k vocabulary, because flash attention turned out
+// to be bit-exact under deterministic algorithms and lifted the context ceiling
+// from 8192 to 131072, while throughput measurements showed a longer training
+// window costs data faster than it gains context.
+//
 // Bumping this re-pins all three networks' anchors. That is free before launch and
 // a hard fork after it, which is why every format-breaking change was gathered
 // into this one version.
-inline constexpr uint32_t kProtocolVersion = 0x0001'0001;  // 1.1
+inline constexpr uint32_t kProtocolVersion = 0x0001'0002;  // 1.2
 
 enum class ObjectType : uint16_t {
     RoundDescriptor = 1,

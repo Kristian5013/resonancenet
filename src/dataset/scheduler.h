@@ -3,7 +3,9 @@
 // A worker does not choose what it trains on. Its training windows are a pure
 // function of protocol state:
 //
-//   offset_i = SHA3-256(canon(BatchSeed{dataset_root, round, worker, step, i})) mod W
+//   seed_i   = SHA3-256(canon(BatchSeed{dataset_root, round, worker, step, i}))
+//   chunk_i  = seed_i mod n_chunks
+//   start_i  = SHA3-256("rnet/window-offset" ‖ seed_i) mod (tokens_in_chunk - seq_len)
 //
 // Two consequences, both load-bearing:
 //
@@ -29,24 +31,31 @@
 
 namespace rnet::dataset {
 
-// Number of valid window start positions in a corpus: a window needs seq_len
-// inputs plus one shifted target token.
-Result<uint64_t> WindowCount(uint64_t n_tokens, uint32_t seq_len);
+// The seed a window is drawn from: a pure function of protocol state, so a
+// verifier reconstructs it from the contribution header alone.
+crypto::Hash256 WindowSeed(const crypto::Hash256& dataset_root, uint64_t round_id,
+                           uint64_t worker_id, uint64_t step, uint32_t index);
 
-// Start offset (in tokens) of a single training window.
+// Which chunk of the corpus this window comes from.
 //
-// Modulo bias note: the hash is reduced from a uniform 64-bit value, so for any
-// realistic corpus (< 2^40 windows) the bias is below 2^-24 and irrelevant to
-// training. It is deliberately NOT rejection-sampled, because a rejection loop
-// would make the derivation's cost data-dependent and harder to reimplement
-// identically in another language.
-Result<uint64_t> WindowOffset(const crypto::Hash256& dataset_root, uint64_t round_id,
-                              uint64_t worker_id, uint64_t step, uint32_t index,
-                              uint64_t n_tokens, uint32_t seq_len);
+// The quantity a worker cannot influence is now the chunk count rather than a
+// token count: it does not know how many tokens the corpus holds, and neither
+// does the node, because nothing has been tokenized.
+Result<uint64_t> ChunkForWindow(const crypto::Hash256& seed, uint64_t n_chunks);
 
-// All offsets for one training step (micro_batch windows).
-Result<std::vector<uint64_t>> BatchOffsets(const crypto::Hash256& dataset_root, uint64_t round_id,
-                                           uint64_t worker_id, uint64_t step, uint32_t micro_batch,
-                                           uint64_t n_tokens, uint32_t seq_len);
+// Where inside that chunk's tokenization the window starts.
+//
+// Drawn from a SEPARATE hash of the same seed rather than from the same value
+// used twice, so the chunk and the position within it are independent. Takes the
+// chunk's token count, which only whoever tokenized the chunk knows — the node
+// never calls this, the worker and the verifier both do, and they agree because
+// they tokenized the same bytes with the same pinned artifact.
+Result<uint64_t> OffsetInChunk(const crypto::Hash256& seed, uint64_t tokens_in_chunk,
+                               uint32_t seq_len);
+
+// Every chunk index for one inner step's micro-batch.
+Result<std::vector<uint64_t>> BatchChunks(const crypto::Hash256& dataset_root, uint64_t round_id,
+                                          uint64_t worker_id, uint64_t step, uint32_t micro_batch,
+                                          uint64_t n_chunks);
 
 }  // namespace rnet::dataset

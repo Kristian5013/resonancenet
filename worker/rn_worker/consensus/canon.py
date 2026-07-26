@@ -18,7 +18,7 @@ MAGIC = b"RNET"
 # in src/canon/canon.h exactly: a mirror that lags is a worker that cannot read
 # what the network writes, and it fails at the first container rather than
 # somewhere subtle, which is the one mercy here.
-PROTOCOL_VERSION = 0x0001_0001  # 1.1
+PROTOCOL_VERSION = 0x0001_0002  # 1.2
 
 OBJ_ROUND_DESCRIPTOR = 1
 OBJ_DATASET_MANIFEST = 2
@@ -72,6 +72,13 @@ class Writer:
 
     def u64(self, v: int) -> "Writer":
         self._buf += struct.pack(">Q", v)
+        return self
+
+    def string(self, s: str) -> "Writer":
+        """u32 length prefix then UTF-8, mirroring canon::Writer::String."""
+        encoded = s.encode("utf-8")
+        self.u32(len(encoded))
+        self._buf += encoded
         return self
 
     def raw(self, data: bytes) -> "Writer":
@@ -277,16 +284,19 @@ def parse_round_descriptor(content: bytes) -> RoundDescriptor:
 
 @dataclass
 class DatasetManifest:
+    """What a corpus is: raw UTF-8 text, addressed in document-aligned chunks.
+
+    No token count and no dtype, because nothing is tokenized in advance — the
+    worker tokenizes the chunk it is assigned. Chunk boundaries are derived by
+    scanning for document separators rather than stored, so the manifest stays
+    three numbers instead of an offset table.
+    """
+
     dataset_root: bytes
     tokenizer_hash: bytes
-    n_tokens: int
-    chunk_tokens: int
+    n_bytes: int
+    target_chunk_bytes: int
     n_chunks: int
-    dtype: int
-
-    @property
-    def numpy_dtype(self) -> str:
-        return "uint16" if self.dtype == DTYPE_UINT16 else "uint32"
 
 
 def parse_dataset_manifest(content: bytes) -> DatasetManifest:
@@ -294,15 +304,27 @@ def parse_dataset_manifest(content: bytes) -> DatasetManifest:
     m = DatasetManifest(
         dataset_root=r.hash(),
         tokenizer_hash=r.hash(),
-        n_tokens=r.u64(),
-        chunk_tokens=r.u32(),
+        n_bytes=r.u64(),
+        target_chunk_bytes=r.u32(),
         n_chunks=r.u32(),
-        dtype=r.u8(),
     )
     r.expect_exhausted()
-    expected = (m.n_tokens + m.chunk_tokens - 1) // m.chunk_tokens
-    if expected != m.n_chunks:
-        raise CanonError(f"dataset: n_chunks {m.n_chunks} != ceil(n_tokens/chunk_tokens) {expected}")
+    if m.n_bytes == 0:
+        raise CanonError("dataset: empty corpus")
+    if m.target_chunk_bytes == 0:
+        raise CanonError("dataset: target_chunk_bytes must be non-zero")
+    if m.n_chunks == 0:
+        raise CanonError("dataset: n_chunks must be non-zero")
+    # Chunks end at the first separator at or after the target, so each is at
+    # least that long except the last. More than that allows means the boundaries
+    # do not follow the rule, and a node that scans the corpus would disagree.
+    if m.n_chunks > m.n_bytes // m.target_chunk_bytes + 1:
+        raise CanonError(
+            f"dataset: {m.n_chunks} chunks over {m.n_bytes} bytes at a target of "
+            f"{m.target_chunk_bytes} — at least one is shorter than the target"
+        )
+    if m.n_chunks > m.n_bytes:
+        raise CanonError("dataset: more chunks than bytes")
     return m
 
 

@@ -1779,21 +1779,26 @@ struct TestCorpus {
     canon::DatasetManifest manifest;
 };
 
-Result<TestCorpus> MakeCorpus(std::string_view name, uint32_t chunk_tokens, uint64_t n_tokens,
+// A corpus of text documents, since that is what a corpus is now. `n_docs`
+// documents of varying length, separated by a blank line, so chunk boundaries
+// fall where the builder would put them.
+Result<TestCorpus> MakeCorpus(std::string_view name, uint32_t target_chunk_bytes, uint64_t n_docs,
                               uint32_t salt = 0) {
     TestCorpus corpus;
-    corpus.path = std::filesystem::temp_directory_path() / std::format("rnet-corpus-{}.bin", name);
-    std::vector<uint8_t> bytes(n_tokens * 4);
-    for (uint64_t i = 0; i < n_tokens; ++i) {
-        const uint32_t token = static_cast<uint32_t>((i * 2654435761u + salt) % 128000u);
-        bytes[i * 4 + 0] = static_cast<uint8_t>(token >> 24);
-        bytes[i * 4 + 1] = static_cast<uint8_t>(token >> 16);
-        bytes[i * 4 + 2] = static_cast<uint8_t>(token >> 8);
-        bytes[i * 4 + 3] = static_cast<uint8_t>(token);
+    corpus.path = std::filesystem::temp_directory_path() / std::format("rnet-corpus-{}.txt", name);
+    std::string text;
+    for (uint64_t i = 0; i < n_docs; ++i) {
+        const size_t len = 300 + static_cast<size_t>((i * 137 + salt) % 900);
+        text.append("Document ").append(std::to_string(i + salt)).append(". ");
+        for (size_t j = 0; j < len; ++j) {
+            text.push_back(static_cast<char>('a' + ((i * 31 + j * 7 + salt) % 26)));
+            if (j % 9 == 8) text.push_back(' ');
+        }
+        text.append("\n\n");
     }
-    if (auto st = util::WriteFileAtomic(corpus.path, bytes); !st) return Err(st.error());
+    if (auto st = util::WriteTextFileAtomic(corpus.path, text); !st) return Err(st.error());
 
-    auto index = dataset::DatasetIndex::Build(corpus.path, chunk_tokens, canon::TokenDtype::Uint32);
+    auto index = dataset::DatasetIndex::Build(corpus.path, target_chunk_bytes);
     if (!index) return Err(index.error());
     corpus.manifest = index.value().ToManifest(crypto::Sha3_256(std::string_view("tok")));
     return corpus;
@@ -1872,16 +1877,23 @@ RNET_TEST(Corpus, AnAlteredChunkFailsItsProof) {
 // The last chunk is short whenever the corpus does not divide evenly, which is
 // the normal case.
 RNET_TEST(Corpus, TheFinalChunkIsShortAndStillVerifies) {
-    // 500 tokens in chunks of 64: seven full and one of 52.
-    auto corpus = MakeCorpus("tail", 64, 500);
+    auto corpus = MakeCorpus("tail", 4096, 40);
     RNET_CHECK_OK(corpus);
     auto source = CorpusSource::Open(corpus.value().path, corpus.value().manifest);
     RNET_CHECK_OK(source);
+    RNET_CHECK(source.value().n_chunks() > 1);
 
+    // Chunks end at the first document separator past the target, so every chunk
+    // but the last is at least the target long and the last one is whatever
+    // remains. Asserted as a property rather than as arithmetic: the exact size
+    // depends on where the documents fall, which is the point of cutting there.
     const uint64_t last = source.value().n_chunks() - 1;
     auto size = source.value().ChunkBytes(last);
     RNET_CHECK_OK(size);
-    RNET_CHECK_EQ(size.value(), uint64_t{(500 - 7 * 64) * 4});
+    RNET_CHECK(size.value() > 0);
+    auto first = source.value().ChunkBytes(0);
+    RNET_CHECK_OK(first);
+    RNET_CHECK(first.value() >= 4096);
 
     std::vector<uint8_t> bytes(static_cast<size_t>(size.value()));
     RNET_CHECK_OK(source.value().ReadChunkRange(last, 0, bytes));

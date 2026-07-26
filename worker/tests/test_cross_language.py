@@ -104,15 +104,19 @@ def test_schedule_agrees() -> None:
     print("[schedule]")
     import tempfile
 
-    tokens = 2_000_000
     with tempfile.TemporaryDirectory() as tmp:
-        corpus = os.path.join(tmp, "corpus.bin")
-        with open(corpus, "wb") as f:
-            f.write(bytes(tokens * 4))          # content is irrelevant to the schedule
+        corpus = os.path.join(tmp, "corpus.txt")
+        # Text, because that is what a corpus is: documents separated by a blank
+        # line, of varying length so chunk boundaries do not land at regular
+        # intervals and hide a disagreement about where they go.
+        with open(corpus, "w", encoding="utf-8") as f:
+            for i in range(4000):
+                body = "".join(chr(ord("a") + ((i * 31 + j * 7) % 26)) for j in range(200 + i % 700))
+                f.write(f"Document {i}. {body}\n\n")
 
         prefix = os.path.join(tmp, "corpus")
         run_tool("dataset-build", "--file", corpus, "--out", prefix,
-                 "--chunk-tokens", "65536", "--network", "regtest")
+                 "--chunk-bytes", "65536", "--network", "regtest")
 
         manifest_container = canon.load_container_file(prefix + ".rnds", canon.OBJ_DATASET_MANIFEST)
         manifest = canon.parse_dataset_manifest(manifest_container.content)
@@ -135,18 +139,31 @@ def test_schedule_agrees() -> None:
                 out = run_tool("schedule-show", "--manifest", prefix + ".rnds",
                                "--network", "regtest", "--worker", str(worker_id),
                                "--step", str(step))
-                cpp_offsets = [
-                    int(line.split("offset=")[1]) for line in out.splitlines() if "offset=" in line
+                cpp_chunks = [
+                    int(line.split("chunk=")[1]) for line in out.splitlines() if "chunk=" in line
                 ]
-                py_offsets = scheduler.batch_offsets(
+                py_chunks = scheduler.batch_chunks(
                     manifest.dataset_root, round_id, worker_id, step, micro_batch,
-                    manifest.n_tokens, seq_len,
+                    manifest.n_chunks,
                 )
                 check(
-                    f"worker={worker_id} step={step}: offsets identical",
-                    cpp_offsets == py_offsets,
-                    f"C++ {cpp_offsets} != python {py_offsets}",
+                    f"worker={worker_id} step={step}: chunks identical",
+                    cpp_chunks == py_chunks,
+                    f"C++ {cpp_chunks} != python {py_chunks}",
                 )
+
+        # The offset within a chunk is the other half of the derivation, and the
+        # node never computes it — only the worker and the verifier do, from the
+        # token count of a chunk they each tokenized. Checked here against fixed
+        # counts so a divergence in the domain separation shows up.
+        for tokens_in_chunk in (seq_len + 1, seq_len + 1000, 200_000):
+            seed = scheduler.window_seed(manifest.dataset_root, round_id, 7, 3, 0)
+            off = scheduler.offset_in_chunk(seed, tokens_in_chunk, seq_len)
+            check(
+                f"offset in a chunk of {tokens_in_chunk} tokens stays in bounds",
+                0 <= off <= tokens_in_chunk - seq_len - 1,
+                f"offset {off} for {tokens_in_chunk} tokens, seq_len {seq_len}",
+            )
 
 
 def test_policy_agrees() -> None:

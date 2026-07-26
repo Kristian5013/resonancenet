@@ -1,5 +1,6 @@
 #include "dataset/index.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <format>
 
@@ -16,43 +17,103 @@ size_t TokenWidth(canon::TokenDtype dtype) {
     return 4u;
 }
 
-Result<DatasetIndex> DatasetIndex::Build(const std::filesystem::path& token_file,
-                                         uint32_t chunk_tokens, canon::TokenDtype dtype) {
-    if (chunk_tokens == 0) return Err("index: chunk_tokens must be non-zero");
-    if (!canon::IsKnownTokenDtype(dtype)) return Err("index: unknown token dtype");
+// Where chunk boundaries fall, given the corpus bytes.
+//
+// A chunk ends at the first document separator at or after `target_chunk_bytes`
+// from its start; if none remains, it runs to the end of the corpus. Stated as a
+// scan rather than a stored table so that every node holding the corpus derives
+// the same boundaries from the same bytes, and the manifest stays small.
+//
+// The separator belongs to the chunk that precedes it. That is arbitrary but it
+// has to be decided: a separator split across two chunks would make one of them
+// begin with a blank line and the other end mid-separator, and two
+// implementations would each pick a side.
+Result<std::vector<uint64_t>> ChunkOffsets(const std::filesystem::path& corpus_file,
+                                           uint32_t target_chunk_bytes, uint64_t n_bytes) {
+    if (target_chunk_bytes == 0) return Err("index: target_chunk_bytes must be non-zero");
+    if (n_bytes == 0) return Err("index: empty corpus");
 
-    auto size = util::FileSize(token_file);
-    if (!size) return Err(size.error());
+    std::FILE* f = std::fopen(corpus_file.c_str(), "rb");
+    if (!f) return Err("index: cannot open " + corpus_file.string());
 
-    const size_t width = TokenWidth(dtype);
-    if (size.value() % width != 0) {
-        return Err(std::format("index: {} is not a whole number of {}-byte tokens",
-                               token_file.string(), width));
+    std::vector<uint64_t> offsets{0};
+    // Read in windows that start where the search does, so a separator straddling
+    // a read boundary is still found: the window always extends past the target.
+    constexpr size_t kScan = 1u << 16;
+    std::vector<uint8_t> buf(kScan);
+
+    uint64_t cursor = 0;
+    while (true) {
+        const uint64_t search_from = cursor + target_chunk_bytes;
+        if (search_from >= n_bytes) break;      // the remainder is the last chunk
+
+        uint64_t at = search_from;
+        uint64_t found = 0;
+        while (at < n_bytes) {
+            if (std::fseek(f, static_cast<long>(at), SEEK_SET) != 0) {
+                std::fclose(f);
+                return Err("index: seek failed while finding a chunk boundary");
+            }
+            const size_t want = static_cast<size_t>(std::min<uint64_t>(kScan, n_bytes - at));
+            const size_t got = std::fread(buf.data(), 1, want, f);
+            if (got != want) {
+                std::fclose(f);
+                return Err("index: short read while finding a chunk boundary");
+            }
+            // The separator is two bytes, so a match may span the window edge; the
+            // next window starts one byte back to cover that.
+            for (size_t i = 0; i + 1 < got; ++i) {
+                if (buf[i] == '\n' && buf[i + 1] == '\n') {
+                    found = at + i + 2;         // the separator ends the chunk
+                    break;
+                }
+            }
+            if (found != 0) break;
+            if (at + got >= n_bytes) break;
+            at += got - 1;
+        }
+
+        if (found == 0 || found >= n_bytes) break;   // no separator left: one final chunk
+        offsets.push_back(found);
+        cursor = found;
     }
-    const uint64_t n_tokens = size.value() / width;
-    if (n_tokens == 0) return Err("index: empty corpus");
+    std::fclose(f);
+    offsets.push_back(n_bytes);
+    return offsets;
+}
 
-    std::FILE* f = std::fopen(token_file.c_str(), "rb");
-    if (!f) return Err("index: cannot open " + token_file.string());
+Result<DatasetIndex> DatasetIndex::Build(const std::filesystem::path& corpus_file,
+                                         uint32_t target_chunk_bytes) {
+    auto size = util::FileSize(corpus_file);
+    if (!size) return Err(size.error());
+    if (size.value() == 0) return Err("index: empty corpus");
+
+    auto offsets = ChunkOffsets(corpus_file, target_chunk_bytes, size.value());
+    if (!offsets) return Err(offsets.error());
+
+    std::FILE* f = std::fopen(corpus_file.c_str(), "rb");
+    if (!f) return Err("index: cannot open " + corpus_file.string());
 
     DatasetIndex idx;
-    idx.n_tokens_ = n_tokens;
-    idx.chunk_tokens_ = chunk_tokens;
-    idx.dtype_ = dtype;
+    idx.n_bytes_ = size.value();
+    idx.target_chunk_bytes_ = target_chunk_bytes;
+    idx.offsets_ = std::move(offsets.value());
 
-    const size_t chunk_bytes = static_cast<size_t>(chunk_tokens) * width;
-    std::vector<uint8_t> buffer(chunk_bytes);
-    uint64_t remaining = size.value();
-
-    while (remaining > 0) {
-        const size_t want = static_cast<size_t>(std::min<uint64_t>(remaining, chunk_bytes));
-        const size_t got = std::fread(buffer.data(), 1, want, f);
-        if (got != want) {
+    std::vector<uint8_t> buffer;
+    for (size_t i = 0; i + 1 < idx.offsets_.size(); ++i) {
+        const uint64_t from = idx.offsets_[i];
+        const uint64_t to = idx.offsets_[i + 1];
+        if (to <= from) {
             std::fclose(f);
-            return Err(std::format("index: short read at {} bytes remaining", remaining));
+            return Err(std::format("index: chunk {} is empty ({}..{})", i, from, to));
         }
-        idx.leaves_.push_back(crypto::MerkleLeaf(std::span<const uint8_t>(buffer.data(), want)));
-        remaining -= want;
+        buffer.resize(static_cast<size_t>(to - from));
+        if (std::fseek(f, static_cast<long>(from), SEEK_SET) != 0 ||
+            std::fread(buffer.data(), 1, buffer.size(), f) != buffer.size()) {
+            std::fclose(f);
+            return Err(std::format("index: short read for chunk {}", i));
+        }
+        idx.leaves_.push_back(crypto::MerkleLeaf(buffer));
     }
     std::fclose(f);
 
@@ -60,14 +121,21 @@ Result<DatasetIndex> DatasetIndex::Build(const std::filesystem::path& token_file
     return idx;
 }
 
+Result<std::pair<uint64_t, uint64_t>> DatasetIndex::ChunkExtent(uint64_t chunk_index) const {
+    if (chunk_index + 1 >= offsets_.size()) {
+        return Err(std::format("index: chunk {} past the end ({} chunks)", chunk_index,
+                               n_chunks()));
+    }
+    return std::pair<uint64_t, uint64_t>{offsets_[chunk_index], offsets_[chunk_index + 1]};
+}
+
 canon::DatasetManifest DatasetIndex::ToManifest(const crypto::Hash256& tokenizer_hash) const {
     canon::DatasetManifest m;
     m.dataset_root = root_;
     m.tokenizer_hash = tokenizer_hash;
-    m.n_tokens = n_tokens_;
-    m.chunk_tokens = chunk_tokens_;
+    m.n_bytes = n_bytes_;
+    m.target_chunk_bytes = target_chunk_bytes_;
     m.n_chunks = n_chunks();
-    m.dtype = dtype_;
     return m;
 }
 
@@ -75,10 +143,6 @@ Result<crypto::MerkleProof> DatasetIndex::ProofForChunk(uint64_t chunk_index) co
     return crypto::BuildMerkleProof(leaves_, chunk_index);
 }
 
-Result<uint64_t> DatasetIndex::ChunkForToken(uint64_t token_offset) const {
-    if (token_offset >= n_tokens_) return Err("index: token offset past end of corpus");
-    return token_offset / chunk_tokens_;
-}
 
 bool VerifyChunk(std::span<const uint8_t> chunk_bytes, const crypto::MerkleProof& proof,
                  const crypto::Hash256& dataset_root) {

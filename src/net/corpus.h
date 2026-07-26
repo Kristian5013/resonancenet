@@ -52,17 +52,17 @@ public:
     // Opens a token file and checks it against the manifest it claims to be. A
     // corpus whose root does not match is refused here rather than discovered by
     // the first worker that verifies a proof against it.
-    static Result<CorpusSource> Open(const std::filesystem::path& token_file,
+    static Result<CorpusSource> Open(const std::filesystem::path& corpus_file,
                                      const canon::DatasetManifest& manifest);
 
     const crypto::Hash256& root() const { return manifest_.dataset_root; }
     uint32_t n_chunks() const { return manifest_.n_chunks; }
-    uint32_t chunk_tokens() const { return manifest_.chunk_tokens; }
-    uint64_t n_tokens() const { return manifest_.n_tokens; }
+    uint32_t target_chunk_bytes() const { return manifest_.target_chunk_bytes; }
+    uint64_t n_bytes() const { return manifest_.n_bytes; }
     const canon::DatasetManifest& manifest() const { return manifest_; }
 
-    // Bytes in a given chunk. The last one is short whenever the corpus does not
-    // divide evenly, which is the normal case.
+    // Bytes in a given chunk. Chunks end at document boundaries, so they vary in
+    // size by construction rather than only at the end of the corpus.
     Result<uint64_t> ChunkBytes(uint64_t chunk_index) const;
 
     // Reads a slice of one chunk. This is what the serving loop calls, so a

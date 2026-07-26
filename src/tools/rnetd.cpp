@@ -251,8 +251,8 @@ int main(int argc, char** argv) {
         }
         corpus = std::make_unique<net::CorpusSource>(std::move(opened.value()));
         node.SetCorpus(corpus.get());
-        RNET_LOG_INFO("serving the corpus: {} tokens in {} chunks, root {}",
-                      corpus->n_tokens(), corpus->n_chunks(),
+        RNET_LOG_INFO("serving the corpus: {} bytes of text in {} chunks, root {}",
+                      corpus->n_bytes(), corpus->n_chunks(),
                       util::ToHex(corpus->root()).substr(0, 16));
     }
     std::unique_ptr<protocol::WorkerService> worker_service;

@@ -158,8 +158,8 @@ int CmdDatasetBuild(const util::ArgParser& args) {
     const auto& params = consensus::Params(net.value());
 
     uint32_t chunk = params.policy.dataset_chunk_tokens;
-    if (args.Has("chunk-tokens")) {
-        auto v = args.GetUInt("chunk-tokens");
+    if (args.Has("chunk-bytes")) {
+        auto v = args.GetUInt("chunk-bytes");
         if (!v) return Fail(v.error());
         chunk = static_cast<uint32_t>(v.value());
     }
@@ -171,11 +171,10 @@ int CmdDatasetBuild(const util::ArgParser& args) {
         tokenizer = h.value();
     }
 
-    const auto dtype = args.GetString("dtype", "uint32") == "uint16" ? canon::TokenDtype::Uint16
-                                                                    : canon::TokenDtype::Uint32;
 
-    RNET_LOG_INFO("indexing {} (chunk_tokens={})", file, chunk);
-    auto manifest = dataset::BuildAndWriteManifest(file, out, chunk, dtype, tokenizer);
+
+    RNET_LOG_INFO("indexing {} (target_chunk_bytes={})", file, chunk);
+    auto manifest = dataset::BuildAndWriteManifest(file, out, chunk, tokenizer);
     if (!manifest) return Fail(manifest.error());
 
     std::printf("%s\n", dataset::ManifestToJson(manifest.value()).Dump(2).c_str());
@@ -194,8 +193,8 @@ int CmdDatasetCheck(const util::ArgParser& args) {
     if (!manifest) return Fail(manifest.error());
     if (auto st = dataset::VerifyCorpus(file, manifest.value()); !st) return Fail(st.error());
 
-    std::printf("OK  %llu tokens, %u chunks, root %s\n",
-                static_cast<unsigned long long>(manifest.value().n_tokens),
+    std::printf("OK  %llu bytes, %u chunks, root %s\n",
+                static_cast<unsigned long long>(manifest.value().n_bytes),
                 manifest.value().n_chunks, util::ToHex(manifest.value().dataset_root).c_str());
     return 0;
 }
@@ -214,17 +213,20 @@ int CmdScheduleShow(const util::ArgParser& args) {
     const uint64_t worker = args.Has("worker") ? args.GetUInt("worker").value_or(0) : 0;
     const uint64_t step = args.Has("step") ? args.GetUInt("step").value_or(0) : 0;
 
-    auto offsets = dataset::BatchOffsets(manifest.value().dataset_root, params.round.round_id,
-                                         worker, step, params.policy.micro_batch, manifest.value().n_tokens,
-                                         params.round.model.seq_len);
-    if (!offsets) return Fail(offsets.error());
+    auto chunks = dataset::BatchChunks(manifest.value().dataset_root, params.round.round_id,
+                                       worker, step, params.policy.micro_batch,
+                                       manifest.value().n_chunks);
+    if (!chunks) return Fail(chunks.error());
 
-    std::printf("worker=%llu step=%llu seq_len=%u micro_batch=%u\n",
+    std::printf("worker=%llu step=%llu seq_len=%u micro_batch=%u  (%u chunks in corpus)\n",
                 static_cast<unsigned long long>(worker), static_cast<unsigned long long>(step),
-                params.round.model.seq_len, params.policy.micro_batch);
-    for (size_t i = 0; i < offsets.value().size(); ++i) {
-        std::printf("  window[%zu] offset=%llu\n", i,
-                    static_cast<unsigned long long>(offsets.value()[i]));
+                params.round.model.seq_len, params.policy.micro_batch,
+                manifest.value().n_chunks);
+    // The chunk, not the token offset: where inside it the window starts depends
+    // on how many tokens that chunk holds, and nothing here can tokenize.
+    for (size_t i = 0; i < chunks.value().size(); ++i) {
+        std::printf("  window[%zu] chunk=%llu\n", i,
+                    static_cast<unsigned long long>(chunks.value()[i]));
     }
     return 0;
 }
@@ -242,8 +244,7 @@ int main(int argc, char** argv) {
     args.AddOption("hash", "expected hash (hex)");
     args.AddOption("manifest", "dataset manifest (.rnds)");
     args.AddOption("tokenizer-hash", "tokenizer artifact hash (hex)");
-    args.AddOption("chunk-tokens", "tokens per Merkle leaf");
-    args.AddOption("dtype", "uint16 | uint32", true, "uint32");
+    args.AddOption("chunk-bytes", "target bytes per chunk; a chunk ends at the first document separator past it");
     args.AddOption("worker", "worker id");
     args.AddOption("step", "training step");
     args.AddOption("log", "error|warn|info|debug|trace", true, "info");

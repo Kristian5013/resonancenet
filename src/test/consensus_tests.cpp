@@ -61,13 +61,15 @@ RNET_TEST(Genesis, ArtifactDoesNotCrossNetworks) {
     RNET_CHECK_ERR(LoadGenesis(main_raw, GenesisHash(Network::Regtest)));
 }
 
-RNET_TEST(Params, MainnetIsRn1b) {
+RNET_TEST(Params, MainnetIsRn400m) {
     const auto& m = Params(Network::Main).round.model;
-    RNET_CHECK_EQ(m.d_model, 2048u);
-    RNET_CHECK_EQ(m.n_layers, 16u);
-    RNET_CHECK_EQ(m.vocab_size, 128000u);   // our own tokenizer, chosen by experiment
-    RNET_CHECK_EQ(m.seq_len, 8192u);        // fits 24 GB in deterministic mode
+    RNET_CHECK_EQ(m.d_model, 1024u);
+    RNET_CHECK_EQ(m.n_layers, 24u);         // the shape GPT-2 medium and Pythia-410M use
+    RNET_CHECK_EQ(m.vocab_size, 32000u);    // 8% of the budget, against 33% at 128k
+    RNET_CHECK_EQ(m.seq_len, 16384u);       // measured: 1.86 s per inner step on 24 GB
+    RNET_CHECK_EQ(m.n_heads, 8u);           // head_dim 128, which flash kernels want
     RNET_CHECK_EQ(m.n_heads / m.n_kv_heads, 4u);
+    RNET_CHECK_EQ(m.ParameterCount(), uint64_t{397'728'768});
 }
 
 RNET_TEST(Params, RegtestTokenizerIsByteLevel) {
@@ -80,7 +82,7 @@ RNET_TEST(Params, MainnetPinsOurSovereignTokenizer) {
     const auto& round = Params(Network::Main).round;
     RNET_CHECK(round.tokenizer_hash != crypto::Hash256{});
     RNET_CHECK_STREQ(util::ToHex(round.tokenizer_hash),
-                     "11878ae15ef43a42a92e5d02231b780731b39c0067868d66c29f12042919febc");
+                     "1f8d0c4bc23d000c4f602654e615a53fc61f0fb3f56afdce492b640ad54b9d93");
 }
 
 // The pinned anchors must equal what the code actually produces. If this fails,

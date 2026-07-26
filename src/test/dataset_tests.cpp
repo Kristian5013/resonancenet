@@ -1,6 +1,6 @@
 #include <cstdio>
 #include <filesystem>
-#include <random>
+#include <string>
 
 #include "dataset/index.h"
 #include "dataset/manifest.h"
@@ -14,109 +14,192 @@ using namespace rnet::dataset;
 
 namespace {
 
-// A scratch corpus of `n` little-endian uint32 tokens, deterministic in content.
-std::filesystem::path WriteCorpus(const std::string& name, uint64_t n) {
-    const auto path = std::filesystem::temp_directory_path() / ("rnet_test_" + name + ".bin");
-    std::vector<uint8_t> bytes(static_cast<size_t>(n) * 4);
-    std::mt19937 rng(1234);
-    for (uint64_t i = 0; i < n; ++i) {
-        const uint32_t tok = rng() % 128000u;
-        bytes[i * 4 + 0] = static_cast<uint8_t>(tok);
-        bytes[i * 4 + 1] = static_cast<uint8_t>(tok >> 8);
-        bytes[i * 4 + 2] = static_cast<uint8_t>(tok >> 16);
-        bytes[i * 4 + 3] = static_cast<uint8_t>(tok >> 24);
+// A scratch corpus of UTF-8 text: `n_docs` documents separated by a blank line,
+// which is how the corpus builder writes one.
+//
+// Document lengths vary on purpose. Equal-length documents put chunk boundaries
+// at regular intervals, which is exactly the case that would hide a bug in
+// deriving them.
+std::filesystem::path WriteCorpus(const std::string& name, size_t n_docs, size_t base = 400) {
+    const auto path = std::filesystem::temp_directory_path() / ("rnet_test_" + name + ".txt");
+    std::string text;
+    for (size_t i = 0; i < n_docs; ++i) {
+        const size_t len = base + (i * 137) % (base * 3);
+        text.append("Document ").append(std::to_string(i)).append(". ");
+        for (size_t j = 0; j < len; ++j) {
+            text.push_back(static_cast<char>('a' + ((i * 31 + j * 7) % 26)));
+            if (j % 9 == 8) text.push_back(' ');
+        }
+        text.append("\n\n");
     }
-    (void)util::WriteFileAtomic(path, bytes);
+    (void)util::WriteTextFileAtomic(path, text);
     return path;
 }
 
 const crypto::Hash256 kRoot = crypto::Sha3_256(std::string_view("test-dataset-root"));
+
+crypto::Hash256 Seed(uint64_t worker, uint64_t step, uint32_t index) {
+    return WindowSeed(kRoot, 0, worker, step, index);
+}
 
 }  // namespace
 
 // ---------------------------------------------------------------------------
 // Deterministic batch derivation — the property that closes data poisoning.
 // ---------------------------------------------------------------------------
-RNET_TEST(Schedule, OffsetsAreDeterministic) {
-    auto a = BatchOffsets(kRoot, 0, 7, 42, 4, 1'000'000, 8192);
-    auto b = BatchOffsets(kRoot, 0, 7, 42, 4, 1'000'000, 8192);
+
+RNET_TEST(Schedule, ChunksAreDeterministic) {
+    auto a = BatchChunks(kRoot, 0, 7, 42, 4, 1'000);
+    auto b = BatchChunks(kRoot, 0, 7, 42, 4, 1'000);
     RNET_CHECK_OK(a);
     RNET_CHECK_OK(b);
     RNET_CHECK_EQ(a.value(), b.value());
 }
 
 RNET_TEST(Schedule, DifferentWorkersGetDifferentData) {
-    auto w1 = BatchOffsets(kRoot, 0, 1, 5, 8, 1'000'000, 1024);
-    auto w2 = BatchOffsets(kRoot, 0, 2, 5, 8, 1'000'000, 1024);
+    auto w1 = BatchChunks(kRoot, 0, 1, 5, 8, 100'000);
+    auto w2 = BatchChunks(kRoot, 0, 2, 5, 8, 100'000);
     RNET_CHECK_OK(w1);
     RNET_CHECK_OK(w2);
     RNET_CHECK(w1.value() != w2.value());
 }
 
-RNET_TEST(Schedule, EveryInputAffectsTheOffset) {
-    const uint64_t n = 10'000'000;
-    const uint32_t seq = 1024;
-    auto base = WindowOffset(kRoot, 3, 9, 100, 0, n, seq);
-    RNET_CHECK_OK(base);
-
-    crypto::Hash256 other_root = kRoot;
-    other_root[0] ^= 0x01;
-    for (auto v : {WindowOffset(other_root, 3, 9, 100, 0, n, seq),
-                   WindowOffset(kRoot, 4, 9, 100, 0, n, seq),
-                   WindowOffset(kRoot, 3, 10, 100, 0, n, seq),
-                   WindowOffset(kRoot, 3, 9, 101, 0, n, seq),
-                   WindowOffset(kRoot, 3, 9, 100, 1, n, seq)}) {
-        RNET_CHECK_OK(v);
-        RNET_CHECK(v.value() != base.value());
+// Every input must move the result. An input that does not is an input a worker
+// could vary freely to fish for data it likes.
+RNET_TEST(Schedule, EveryInputAffectsTheSeed) {
+    const auto base = WindowSeed(kRoot, 3, 9, 100, 0);
+    const auto other_root = crypto::Sha3_256(std::string_view("another corpus"));
+    for (const auto& v : {WindowSeed(other_root, 3, 9, 100, 0),
+                          WindowSeed(kRoot, 4, 9, 100, 0),
+                          WindowSeed(kRoot, 3, 10, 100, 0),
+                          WindowSeed(kRoot, 3, 9, 101, 0),
+                          WindowSeed(kRoot, 3, 9, 100, 1)}) {
+        RNET_CHECK(v != base);
     }
 }
 
-RNET_TEST(Schedule, OffsetsStayInBounds) {
-    const uint64_t n = 50'000;
-    const uint32_t seq = 512;
-    auto windows = WindowCount(n, seq);
-    RNET_CHECK_OK(windows);
-    for (uint64_t step = 0; step < 200; ++step) {
-        auto offs = BatchOffsets(kRoot, 0, 1, step, 8, n, seq);
-        RNET_CHECK_OK(offs);
-        for (uint64_t off : offs.value()) {
-            RNET_CHECK(off < windows.value());
-            RNET_CHECK(off + seq + 1 <= n);   // window always fits
+RNET_TEST(Schedule, ChunksStayInBounds) {
+    for (uint64_t n_chunks : {uint64_t{1}, uint64_t{2}, uint64_t{97}, uint64_t{1'000'000}}) {
+        for (uint32_t i = 0; i < 64; ++i) {
+            auto c = ChunkForWindow(Seed(i, i * 3, i), n_chunks);
+            RNET_CHECK_OK(c);
+            if (c.value() >= n_chunks) {
+                RNET_FAIL("chunk {} is outside a corpus of {}", c.value(), n_chunks);
+            }
         }
     }
 }
 
-RNET_TEST(Schedule, CorpusTooSmallIsAnError) {
-    RNET_CHECK_ERR(WindowCount(100, 8192));
-    RNET_CHECK_ERR(WindowCount(8193, 8192));
-    RNET_CHECK_ERR(BatchOffsets(kRoot, 0, 0, 0, 1, 100, 8192));
-    RNET_CHECK_ERR(BatchOffsets(kRoot, 0, 0, 0, 0, 100'000, 512));   // micro_batch = 0
+// The offset within a chunk comes from a different hash than the chunk index, so
+// knowing one tells a worker nothing about the other.
+RNET_TEST(Schedule, TheOffsetIsNotTheChunkDrawReused) {
+    const auto seed = Seed(11, 22, 3);
+    auto chunk = ChunkForWindow(seed, 1'000'000);
+    auto offset = OffsetInChunk(seed, 1'000'064, 64);
+    RNET_CHECK_OK(chunk);
+    RNET_CHECK_OK(offset);
+    RNET_CHECK(chunk.value() != offset.value());
 }
 
-// Cross-language anchor: these exact offsets must also be produced by the Python
-// worker. If this vector changes, every node must be upgraded in lockstep.
+RNET_TEST(Schedule, OffsetsStayInBounds) {
+    const uint32_t seq = 64;
+    for (uint64_t tokens : {uint64_t{65}, uint64_t{100}, uint64_t{200'000}}) {
+        for (uint32_t i = 0; i < 64; ++i) {
+            auto off = OffsetInChunk(Seed(i, i, i), tokens, seq);
+            RNET_CHECK_OK(off);
+            // seq_len inputs plus one shifted target.
+            if (off.value() + seq + 1 > tokens) {
+                RNET_FAIL("offset {} + {} exceeds a chunk of {} tokens", off.value(), seq + 1,
+                          tokens);
+            }
+        }
+    }
+}
+
+// A chunk too small for one window is refused rather than clamped. The manifest
+// is meant to make this impossible when the corpus is built, so arriving here
+// means something upstream is wrong, and saying so beats quietly training on a
+// short window.
+RNET_TEST(Schedule, AChunkTooSmallForAWindowIsAnError) {
+    RNET_CHECK_ERR(OffsetInChunk(Seed(1, 1, 1), 64, 64));
+    RNET_CHECK_OK(OffsetInChunk(Seed(1, 1, 1), 65, 64));
+    RNET_CHECK_ERR(ChunkForWindow(Seed(1, 1, 1), 0));
+}
+
+// The values the Python mirror is asserted against by
+// worker/tests/test_cross_language.py, which drives the real rnet-tool binary.
+// Printed rather than compared to a literal here: this file agreeing with itself
+// proves nothing about the other implementation.
 RNET_TEST(Schedule, GoldenVector) {
-    const crypto::Hash256 root = crypto::Sha3_256(std::string_view("resonancenet-golden"));
-    auto offs = BatchOffsets(root, 1, 2, 3, 4, 1'000'000, 512);
-    RNET_CHECK_OK(offs);
-    RNET_CHECK_EQ(offs.value().size(), size_t{4});
-    // Recorded from this implementation; the Python mirror is asserted against it.
-    std::printf("        [golden offsets] %llu %llu %llu %llu\n",
-                static_cast<unsigned long long>(offs.value()[0]),
-                static_cast<unsigned long long>(offs.value()[1]),
-                static_cast<unsigned long long>(offs.value()[2]),
-                static_cast<unsigned long long>(offs.value()[3]));
+    const auto seed = WindowSeed(kRoot, 1, 2, 3, 0);
+    auto chunk = ChunkForWindow(seed, 100'000);
+    auto offset = OffsetInChunk(seed, 200'000, 8192);
+    RNET_CHECK_OK(chunk);
+    RNET_CHECK_OK(offset);
+    std::printf("        [golden] seed %s chunk %llu offset %llu\n",
+                util::ToHex(seed).substr(0, 16).c_str(),
+                static_cast<unsigned long long>(chunk.value()),
+                static_cast<unsigned long long>(offset.value()));
+    RNET_CHECK(chunk.value() < 100'000);
+    RNET_CHECK(offset.value() + 8193 <= 200'000);
 }
 
 // ---------------------------------------------------------------------------
-// Corpus integrity
+// Chunking: derived from the bytes, aligned to documents.
 // ---------------------------------------------------------------------------
-RNET_TEST(Index, BuildsAndVerifies) {
-    const auto path = WriteCorpus("index", 40'000);
-    auto index = DatasetIndex::Build(path, 4096, canon::TokenDtype::Uint32);
+
+RNET_TEST(Index, ChunksEndAtDocumentBoundaries) {
+    const auto path = WriteCorpus("aligned", 200);
+    auto raw = util::ReadFile(path);
+    RNET_CHECK_OK(raw);
+    const auto& bytes = raw.value();
+
+    auto index = DatasetIndex::Build(path, 4096);
     RNET_CHECK_OK(index);
-    RNET_CHECK_EQ(index.value().n_tokens(), 40'000ull);
-    RNET_CHECK_EQ(index.value().n_chunks(), 10u);   // ceil(40000/4096) = 10
+    const auto& offsets = index.value().offsets();
+
+    RNET_CHECK_EQ(offsets.front(), uint64_t{0});
+    RNET_CHECK_EQ(offsets.back(), index.value().n_bytes());
+    RNET_CHECK(offsets.size() > 2);
+
+    for (size_t i = 1; i + 1 < offsets.size(); ++i) {
+        const uint64_t at = offsets[i];
+        // Every interior boundary sits just past a blank line, so the two bytes
+        // before it are the separator. A boundary anywhere else cuts a document,
+        // and could cut a UTF-8 character with it.
+        if (at < 2 || bytes[at - 1] != '\n' || bytes[at - 2] != '\n') {
+            RNET_FAIL("boundary {} at byte {} does not follow a blank line", i, at);
+        }
+        if (at - offsets[i - 1] < 4096) {
+            RNET_FAIL("chunk {} is {} bytes, shorter than the 4096-byte target", i - 1,
+                      at - offsets[i - 1]);
+        }
+    }
+    std::filesystem::remove(path);
+}
+
+RNET_TEST(Index, BoundariesAreTheSameOnEveryNode) {
+    const auto path = WriteCorpus("stable", 150);
+    auto first = DatasetIndex::Build(path, 4096);
+    auto second = DatasetIndex::Build(path, 4096);
+    RNET_CHECK_OK(first);
+    RNET_CHECK_OK(second);
+    RNET_CHECK_EQ(first.value().offsets(), second.value().offsets());
+    RNET_CHECK_EQ(first.value().root(), second.value().root());
+
+    // A different target is a different corpus as far as the root is concerned,
+    // which is why target_chunk_bytes is in the manifest and not a local setting.
+    auto coarser = DatasetIndex::Build(path, 16384);
+    RNET_CHECK_OK(coarser);
+    RNET_CHECK(coarser.value().root() != first.value().root());
+    std::filesystem::remove(path);
+}
+
+RNET_TEST(Index, BuildsAndVerifies) {
+    const auto path = WriteCorpus("verify", 120);
+    auto index = DatasetIndex::Build(path, 4096);
+    RNET_CHECK_OK(index);
+    RNET_CHECK(index.value().n_chunks() > 1);
 
     const auto manifest = index.value().ToManifest(crypto::Hash256{});
     RNET_CHECK_OK(manifest.Validate());
@@ -125,141 +208,138 @@ RNET_TEST(Index, BuildsAndVerifies) {
 }
 
 RNET_TEST(Index, AlteredCorpusFailsVerification) {
-    const auto path = WriteCorpus("altered", 20'000);
-    auto index = DatasetIndex::Build(path, 4096, canon::TokenDtype::Uint32);
+    const auto path = WriteCorpus("altered", 120);
+    auto index = DatasetIndex::Build(path, 4096);
     RNET_CHECK_OK(index);
     const auto manifest = index.value().ToManifest(crypto::Hash256{});
 
-    auto bytes = util::ReadFile(path);
-    RNET_CHECK_OK(bytes);
-    auto data = bytes.value();
-    data[12345] ^= 0x01;                       // flip one bit deep inside the corpus
-    RNET_CHECK_OK(util::WriteFileAtomic(path, data));
+    auto raw = util::ReadFile(path);
+    RNET_CHECK_OK(raw);
+    auto tampered = raw.value();
+    tampered[tampered.size() / 2] ^= 0x01;      // one bit, in the middle
+    RNET_CHECK_OK(util::WriteFileAtomic(path, tampered));
 
-    // A seed node that serves altered data must be caught by the root.
-    auto st = VerifyCorpus(path, manifest);
-    RNET_CHECK(!st);
+    RNET_CHECK_ERR(VerifyCorpus(path, manifest));
     std::filesystem::remove(path);
 }
 
 RNET_TEST(Index, ChunkProofsVerifyAgainstRoot) {
-    const auto path = WriteCorpus("proofs", 30'000);
-    auto index = DatasetIndex::Build(path, 4096, canon::TokenDtype::Uint32);
+    const auto path = WriteCorpus("proofs", 160);
+    auto index = DatasetIndex::Build(path, 4096);
     RNET_CHECK_OK(index);
-    const auto& idx = index.value();
+    auto raw = util::ReadFile(path);
+    RNET_CHECK_OK(raw);
 
-    for (uint64_t chunk = 0; chunk < idx.n_chunks(); ++chunk) {
-        auto proof = idx.ProofForChunk(chunk);
+    for (uint64_t i = 0; i < index.value().n_chunks(); ++i) {
+        auto extent = index.value().ChunkExtent(i);
+        RNET_CHECK_OK(extent);
+        const uint64_t from = extent.value().first;
+        const uint64_t to = extent.value().second;
+        std::span<const uint8_t> chunk(raw.value().data() + from, static_cast<size_t>(to - from));
+
+        auto proof = index.value().ProofForChunk(i);
         RNET_CHECK_OK(proof);
-
-        const uint64_t offset_bytes = chunk * idx.chunk_tokens() * 4ull;
-        const uint64_t remaining_tokens = idx.n_tokens() - chunk * idx.chunk_tokens();
-        const size_t want = static_cast<size_t>(
-            std::min<uint64_t>(remaining_tokens, idx.chunk_tokens()) * 4ull);
-        auto chunk_bytes = util::ReadFileRange(path, offset_bytes, want);
-        RNET_CHECK_OK(chunk_bytes);
-
-        if (!VerifyChunk(chunk_bytes.value(), proof.value(), idx.root())) {
-            RNET_FAIL("chunk {} failed to verify against dataset root", chunk);
+        if (!VerifyChunk(chunk, proof.value(), index.value().root())) {
+            RNET_FAIL("chunk {} of {} failed its own proof", i, index.value().n_chunks());
         }
     }
+
+    // And bytes that are not that chunk must fail the same proof.
+    auto extent = index.value().ChunkExtent(0);
+    RNET_CHECK_OK(extent);
+    std::vector<uint8_t> forged(
+        raw.value().begin(),
+        raw.value().begin() + static_cast<std::ptrdiff_t>(extent.value().second));
+    forged[0] ^= 0xFF;
+    auto proof = index.value().ProofForChunk(0);
+    RNET_CHECK_OK(proof);
+    RNET_CHECK(!VerifyChunk(forged, proof.value(), index.value().root()));
     std::filesystem::remove(path);
 }
 
-RNET_TEST(Index, RejectsTruncatedTokenFile) {
-    const auto path = std::filesystem::temp_directory_path() / "rnet_test_ragged.bin";
-    const std::vector<uint8_t> ragged(4 * 10 + 2, 0x01);   // not a whole number of uint32
-    RNET_CHECK_OK(util::WriteFileAtomic(path, ragged));
-    RNET_CHECK_ERR(DatasetIndex::Build(path, 4096, canon::TokenDtype::Uint32));
+RNET_TEST(Index, RejectsAnEmptyCorpus) {
+    const auto path = std::filesystem::temp_directory_path() / "rnet_test_empty.txt";
+    RNET_CHECK_OK(util::WriteFileAtomic(path, std::vector<uint8_t>{}));
+    RNET_CHECK_ERR(DatasetIndex::Build(path, 4096));
     std::filesystem::remove(path);
 }
+
+// ---------------------------------------------------------------------------
+// The manifest, and reading a chunk back.
+// ---------------------------------------------------------------------------
 
 RNET_TEST(Manifest, PersistsAndReloads) {
-    const auto path = WriteCorpus("manifest", 12'000);
+    const auto path = WriteCorpus("persist", 120);
     const auto prefix = std::filesystem::temp_directory_path() / "rnet_test_manifest";
-    const crypto::Hash256 tok = crypto::Sha3_256(std::string_view("tokenizer"));
+    const auto tokenizer = crypto::Sha3_256(std::string_view("a tokenizer"));
 
-    auto built = BuildAndWriteManifest(path, prefix, 4096, canon::TokenDtype::Uint32, tok);
+    auto built = BuildAndWriteManifest(path, prefix, 4096, tokenizer);
     RNET_CHECK_OK(built);
 
     auto loaded = LoadManifestFile(prefix.string() + ".rnds");
     RNET_CHECK_OK(loaded);
-    RNET_CHECK_EQ(loaded.value().dataset_root, built.value().dataset_root);
-    RNET_CHECK_EQ(loaded.value().tokenizer_hash, tok);
-    RNET_CHECK_EQ(loaded.value().n_tokens, 12'000ull);
+    RNET_CHECK_EQ(loaded.value().Id(), built.value().Id());
+    RNET_CHECK_EQ(loaded.value().tokenizer_hash, tokenizer);
+    RNET_CHECK_EQ(loaded.value().n_bytes, built.value().n_bytes);
 
     std::filesystem::remove(path);
     std::filesystem::remove(prefix.string() + ".rnds");
     std::filesystem::remove(prefix.string() + ".json");
 }
 
-RNET_TEST(Manifest, ReadWindowReturnsExactTokens) {
-    const auto path = WriteCorpus("window", 5'000);
-    auto index = DatasetIndex::Build(path, 1024, canon::TokenDtype::Uint32);
+// The bytes a worker is handed must be exactly the chunk: it is those bytes it
+// tokenizes and those bytes the root covers. One byte either way and the
+// verifier reproduces something else.
+RNET_TEST(Manifest, ReadChunkReturnsExactlyTheChunk) {
+    const auto path = WriteCorpus("readchunk", 140);
+    auto index = DatasetIndex::Build(path, 4096);
     RNET_CHECK_OK(index);
     const auto manifest = index.value().ToManifest(crypto::Hash256{});
 
-    auto window = ReadWindow(path, manifest, 100, 256);
-    RNET_CHECK_OK(window);
-    RNET_CHECK_EQ(window.value().size(), size_t{257});   // seq_len + shifted target
+    auto raw = util::ReadFile(path);
+    RNET_CHECK_OK(raw);
 
-    // Reading past the end must fail rather than return short or zero-padded data.
-    RNET_CHECK_ERR(ReadWindow(path, manifest, 4'900, 256));
-    std::filesystem::remove(path);
-}
+    for (uint64_t i = 0; i < manifest.n_chunks; ++i) {
+        auto extent = index.value().ChunkExtent(i);
+        RNET_CHECK_OK(extent);
+        const uint64_t from = extent.value().first;
+        const uint64_t to = extent.value().second;
 
-// A byte-level corpus IS the text: one byte per token, no tokenization step, and
-// nothing stored twice. The width has to be one everywhere the offset arithmetic
-// touches it — a corpus read four bytes to the token would return every fourth
-// character and still produce a plausible-looking window.
-RNET_TEST(Manifest, ByteLevelCorpusReadsOneBytePerToken) {
-    const auto path = std::filesystem::temp_directory_path() / "rnet_test_bytes.bin";
-    // Deliberately not random: the value at position i is i mod 251, so a window
-    // read at the wrong stride is obvious rather than merely different.
-    std::vector<uint8_t> text(4096);
-    for (size_t i = 0; i < text.size(); ++i) text[i] = static_cast<uint8_t>(i % 251);
-    RNET_CHECK_OK(util::WriteFileAtomic(path, text));
-
-    RNET_CHECK_EQ(TokenWidth(canon::TokenDtype::Uint8), size_t{1});
-
-    auto index = DatasetIndex::Build(path, 512, canon::TokenDtype::Uint8);
-    RNET_CHECK_OK(index);
-    const auto manifest = index.value().ToManifest(crypto::Hash256{});
-    // One token per byte, so the corpus is as long in tokens as it is in bytes.
-    RNET_CHECK_EQ(manifest.n_tokens, uint64_t{4096});
-    RNET_CHECK_EQ(manifest.n_chunks, uint64_t{8});
-
-    auto window = ReadWindow(path, manifest, 1000, 64);
-    RNET_CHECK_OK(window);
-    RNET_CHECK_EQ(window.value().size(), size_t{65});
-    for (size_t i = 0; i < window.value().size(); ++i) {
-        const uint32_t expected = static_cast<uint32_t>((1000 + i) % 251);
-        if (window.value()[i] != expected) {
-            RNET_FAIL("byte {} of the window is {}, expected {}", i, window.value()[i], expected);
+        auto got = ReadChunk(path, manifest, i);
+        RNET_CHECK_OK(got);
+        RNET_CHECK_EQ(got.value().size(), static_cast<size_t>(to - from));
+        for (size_t j = 0; j < got.value().size(); ++j) {
+            if (got.value()[j] != raw.value()[from + j]) {
+                RNET_FAIL("chunk {} differs at byte {}", i, j);
+            }
         }
     }
 
-    // The end of the corpus is still the end of the corpus.
-    RNET_CHECK_ERR(ReadWindow(path, manifest, 4090, 64));
+    RNET_CHECK_ERR(ReadChunk(path, manifest, manifest.n_chunks));
     std::filesystem::remove(path);
 }
 
-RNET_TEST(Manifest, ScheduledWindowsAreAlwaysReadable) {
-    const auto path = WriteCorpus("scheduled", 20'000);
-    auto index = DatasetIndex::Build(path, 4096, canon::TokenDtype::Uint32);
+// Every chunk the schedule can name must be readable, for every worker and every
+// step. A schedule that can point at a chunk nobody can fetch is a worker that
+// cannot train and cannot say why.
+RNET_TEST(Manifest, ScheduledChunksAreAlwaysReadable) {
+    const auto path = WriteCorpus("scheduled", 200);
+    auto index = DatasetIndex::Build(path, 4096);
     RNET_CHECK_OK(index);
     const auto manifest = index.value().ToManifest(crypto::Hash256{});
-    const uint32_t seq = 512;
 
-    // End to end: the schedule picks offsets, and every one of them is a valid,
-    // fully-readable window — no worker choice anywhere in the path.
-    for (uint64_t step = 0; step < 50; ++step) {
-        auto offs = BatchOffsets(manifest.dataset_root, 0, 3, step, 2, manifest.n_tokens, seq);
-        RNET_CHECK_OK(offs);
-        for (uint64_t off : offs.value()) {
-            auto w = ReadWindow(path, manifest, off, seq);
-            RNET_CHECK_OK(w);
-            RNET_CHECK_EQ(w.value().size(), static_cast<size_t>(seq) + 1);
+    for (uint64_t worker = 1; worker <= 4; ++worker) {
+        for (uint64_t step = 0; step < 8; ++step) {
+            auto chunks = BatchChunks(manifest.dataset_root, 0, worker, step, 4, manifest.n_chunks);
+            RNET_CHECK_OK(chunks);
+            for (uint64_t c : chunks.value()) {
+                auto got = ReadChunk(path, manifest, c);
+                if (!got) {
+                    RNET_FAIL("worker {} step {} was sent to chunk {}: {}", worker, step, c,
+                              got.error());
+                }
+                RNET_CHECK(!got.value().empty());
+            }
         }
     }
     std::filesystem::remove(path);

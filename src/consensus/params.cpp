@@ -15,19 +15,20 @@ using canon::NormId;
 using canon::OptimizerId;
 using canon::RoundDescriptor;
 
-// SHA3-256 of share/genesis/tokenizer_round0.json — our own 128k byte-level BPE.
-// The vocabulary size was chosen by experiment (matched-parameter bpb sweep:
-// spending budget on vocabulary beat spending it on depth, monotonically up to
-// 128k), not copied from another model.
+// SHA3-256 of share/genesis/tokenizer_round0.json — a 32k byte-level BPE, trained
+// by worker/tools/train_tokenizer.py on 3 GB of FineWeb-Edu.
 //
-// A byte vocabulary was measured against it and rejected. It removes the corpus
-// pipeline entirely, which is attractive, but it costs five times the positions
-// for the same text — 5.06 characters per token on FineWeb-Edu — and that penalty
-// lands directly on context length, which is where this model has to be good. The
-// pipeline cost is being removed a different way: by addressing the corpus in
-// chunks of text rather than in token offsets, so nothing is tokenized in advance.
+// 32k rather than the 128k this replaces, because the model is 400M rather than
+// 1B: a 128000-entry embedding at d_model 1024 would be a third of the parameter
+// budget spent on a lookup table. Measured on the same text, the two compress
+// almost identically — 4.77 characters per token against 5.05 — so the hundred
+// million parameters move into layers for a 5.5%% penalty in window content.
+//
+// A byte vocabulary was measured against both and rejected: it removes the corpus
+// pipeline entirely, which is attractive, but needs five times the positions for
+// the same text, and that lands on context length.
 constexpr std::string_view kTokenizerRound0 =
-    "11878ae15ef43a42a92e5d02231b780731b39c0067868d66c29f12042919febc";
+    "1f8d0c4bc23d000c4f602654e615a53fc61f0fb3f56afdce492b640ad54b9d93";
 
 // Packs the 4-byte wire magic into the u32 the round descriptor is bound to.
 uint32_t MagicWord(const std::array<uint8_t, 4>& magic) {
@@ -75,15 +76,43 @@ crypto::Hash256 HashFromHex(std::string_view hex) {
 // Sizing is measured, not guessed: in deterministic mode (which verification
 // requires) this fits a 24 GB card at seq_len 8192 with room to spare, while the
 // next size up does not. See doc/design/architecture.md.
-ModelSpec Rn1bModel() {
+// RN-400M: the round-0 model.
+//
+// Shaped by measurement on a 24 GB consumer card, which is the hardware this
+// network is for. Three candidates at 400M parameters were timed at seq_len
+// 16384 with deterministic flash attention, forward and backward, 24 cores:
+//
+//   d1024 L16 H8  ff6656   1.44 s/step   11403 tok/s   3.42 GiB
+//   d1024 L24 H8  ff4096   1.86 s/step    8819 tok/s   3.20 GiB   <- this
+//   d1280 L20 H10 ff3584   1.86 s/step    8829 tok/s   3.32 GiB
+//
+// The first is 28% faster and was not chosen: an FFN 6.5x the model width is off
+// the beaten path, while 24 layers of 1024 is the shape GPT-2 medium, OPT-350M
+// and Pythia-410M all use, so its hyperparameters are known rather than guessed.
+// For a first round that is worth more than 28%.
+ModelSpec Rn400mModel() {
     ModelSpec m;
-    m.d_model = 2048;
-    m.n_layers = 16;
-    m.n_heads = 16;
-    m.n_kv_heads = 4;          // GQA 4:1
-    m.d_ff = 5632;
-    m.vocab_size = 128000;
-    m.seq_len = 8192;
+    m.d_model = 1024;
+    m.n_layers = 24;
+    m.n_heads = 8;             // head_dim 128, which is what flash kernels want
+    m.n_kv_heads = 2;          // GQA 4:1
+    m.d_ff = 4096;
+    // 32k, not 128k.
+    //
+    // A 128000-entry embedding at d_model 1024 is 131 million parameters — a
+    // third of a 400M model spent on a lookup table. The sweep that chose 128k
+    // was run at 1B, where it is 27%; at this size the balance is different and
+    // the 100 million parameters go into layers instead.
+    m.vocab_size = 32000;
+    // 16384, not 8192.
+    //
+    // Measured: throughput falls faster than the window grows — 19234 tok/s at
+    // 8192 against 2501 at 131072 — so a long training context is paid for in
+    // data seen, and data is what a 400M model is short of. 16384 doubles the
+    // window for 31% of the throughput, and 8x NTK scaling takes it to 131072 at
+    // inference for almost nothing. Training at 131072 would have cost 8x the
+    // data for a length that can be added afterwards.
+    m.seq_len = 16384;
     m.rope_theta = 500000;
     m.tie_embeddings = 1;
     m.qk_norm = 1;             // stabilises high-LR continuous training
@@ -118,13 +147,19 @@ NetworkParams MakeMain() {
     p.default_port = 9444;
     p.round.network_magic = MagicWord(p.message_magic);
     p.round.round_id = 0;
-    p.round.model = Rn1bModel();
+    p.round.model = Rn400mModel();
     p.round.determinism_class = DeterminismClass::Pending;
     p.round.optimizer = OptimizerId::Adafactor;
     p.round.tokenizer_hash = HashFromHex(kTokenizerRound0);
     p.round.dataset_root = crypto::Hash256{};     // pinned when the corpus is published
     p.policy = MakePolicy(MagicWord(p.message_magic),
-                          /*inner_steps=*/250, /*micro_batch=*/1, /*min_contributors=*/2,
+                          // Two hundred, not two hundred and fifty. Measured on a
+                          // 24 GB card at seq_len 16384: 1.86 s per inner step, so
+                          // 250 of them is 7.7 minutes, and a 398 MB pseudo-gradient
+                          // still has to be uploaded inside the same deadline. 200
+                          // is 6.2 minutes and leaves room for a worker slower than
+                          // the one this was measured on.
+                          /*inner_steps=*/200, /*micro_batch=*/1, /*min_contributors=*/2,
                           /*checkpoint_interval=*/4, /*chunk_tokens=*/1u << 20,
                           // Ten minutes: long enough for a consumer GPU to finish
                           // 250 inner steps and upload ~1 GB, short enough that one
@@ -147,9 +182,9 @@ NetworkParams MakeMain() {
     // this very descriptor (see consensus/init.h) and pinned here, so a node can
     // reproduce the starting weights offline and check that it did.
     p.genesis_weights_hash_hex =
-        "57ecba31c9a2242b62299364040cf3c4bb0dbf9339ead4b4b58bbdbd4a694e2e";
-    p.genesis_hash_hex = "888a43d234425ca6efb9b802b9faf369beddfea55f3de82513471811b75f75c4";
-    p.policy_hash_hex = "58d7f7b520ea639c891ed6552c40d8a5809931c9b4a0642d666f67157229dc5c";
+        "db92552dc1a8115ebec224c0c8b8fae459d30b47a4606dfdd932366d659c76d7";
+    p.genesis_hash_hex = "93e932f33d0d86eadb5c16fef2d20784c45bb819f5c167440009979915e69d25";
+    p.policy_hash_hex = "58a9be54ab2943ddae9f5cc929d570e38ef8b47ebf3862cd65b1a27ab05f5bf2";
     return p;
 }
 
@@ -173,9 +208,9 @@ NetworkParams MakeTest() {
     // Differs from main despite the identical architecture: the network magic is
     // part of the descriptor, so the seed derived from it differs too.
     p.genesis_weights_hash_hex =
-        "10d8b97fdcd522382dc3bd5578c37a267ecd8308203468e20b495f497a248df3";
-    p.genesis_hash_hex = "b05405fba484144102881b44497a3311283c5b95847a4d3520d2dbd4d348b84f";
-    p.policy_hash_hex = "9a85901e93c71de37c6120fea8aac54e71c345407e574025a4c7367b353db56b";
+        "cc3edecb0dcd5dae9d5c6736c449c7fddc78654acbc84e67c3323299ca1b5df0";
+    p.genesis_hash_hex = "9c8db75ddaaebd51e9e609eba8fb667d84a6cd210b6c89a14103fcf019525f92";
+    p.policy_hash_hex = "42b2726ab6163d8d1dc29b1ee532c36c13be4f3553e21482da7ff4bbed1e5546";
     return p;
 }
 
@@ -202,9 +237,9 @@ NetworkParams MakeRegtest() {
                           /*challenge_percent=*/100,   // verify everything in tests
                           /*challenge_deadline=*/2, /*retained=*/4, /*slash_quorum=*/1);
     p.genesis_weights_hash_hex =
-        "f9da0b51a6dda8325d525a1365c053fe33ba456de428d290e901c68a2649e110";
-    p.genesis_hash_hex = "48babab7e69b3433a96563af65913423571af5b7be9caf78910c667215d22e51";
-    p.policy_hash_hex = "d6783edd2b5f1996a677995219f888335bf8f91d40cd3485a87f1fb5822db8d2";
+        "55341a2c5c05ce2bab43e24e09bf153ccb9be7c2f5158fbd89980c6ef2cbd7d4";
+    p.genesis_hash_hex = "29c86631c8a991646dac442788a6fdc88b6056434a0b9fbd5eaa8f2ff5c5ca3d";
+    p.policy_hash_hex = "3ef13240e05e7346ad9c173b050a16711239d9a58c21a0b2cb777293994d34ac";
     return p;
 }
 

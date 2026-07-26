@@ -1,12 +1,23 @@
-// Corpus integrity: a Merkle tree over fixed-size chunks of the token file.
+// Corpus integrity: a Merkle tree over document-aligned chunks of the text.
 //
 // The root is a consensus value (it is pinned in the round descriptor), so a seed
 // node cannot serve altered data without detection: any consumer verifies the
 // chunk it received against the root using an inclusion proof.
 //
-// Chunking is by TOKEN COUNT, not bytes, so the tree shape is independent of the
-// token width — a corpus re-encoded from uint16 to uint32 keeps the same chunk
-// boundaries and therefore the same logical structure.
+// The corpus is RAW UTF-8, not tokens, and a chunk ends at the first document
+// separator at or after `target_chunk_bytes`. Two consequences the tree depends
+// on:
+//
+//   * BOUNDARIES ARE DERIVED, NOT STORED. Any node holding the corpus recomputes
+//     them by scanning, so the manifest carries three numbers rather than an
+//     offset table that would be megabytes for a large corpus.
+//
+//   * EVERY CHUNK IS VALID UTF-8 AND WHOLE DOCUMENTS. A chunk cut at a fixed byte
+//     boundary could begin mid-character, and then "what does this chunk say"
+//     would have a different answer in C++ (bytes) and Python (str), on a path
+//     nobody exercises. Cutting on separators removes the question.
+//
+// see: docs/corpus-addressing.md
 #pragma once
 
 #include <cstdint>
@@ -22,33 +33,39 @@ namespace rnet::dataset {
 
 size_t TokenWidth(canon::TokenDtype dtype);
 
+// What ends a chunk: a blank line, which is how the corpus builder separates
+// documents. Text rather than a reserved token id, because the corpus is not
+// tokenized when it is written and there is no id to reserve.
+inline constexpr std::string_view kDocumentSeparator = "\n\n";
+
 class DatasetIndex {
 public:
     // Builds the tree by streaming the file; memory use is one chunk plus the leaf
     // hashes, so a multi-terabyte corpus indexes on a normal machine.
-    static Result<DatasetIndex> Build(const std::filesystem::path& token_file,
-                                      uint32_t chunk_tokens, canon::TokenDtype dtype);
+    static Result<DatasetIndex> Build(const std::filesystem::path& corpus_file,
+                                      uint32_t target_chunk_bytes);
 
     const crypto::Hash256& root() const { return root_; }
-    uint64_t n_tokens() const { return n_tokens_; }
-    uint32_t chunk_tokens() const { return chunk_tokens_; }
+    uint64_t n_bytes() const { return n_bytes_; }
+    uint32_t target_chunk_bytes() const { return target_chunk_bytes_; }
     uint32_t n_chunks() const { return static_cast<uint32_t>(leaves_.size()); }
-    canon::TokenDtype dtype() const { return dtype_; }
     const std::vector<crypto::Hash256>& leaves() const { return leaves_; }
+
+    // Where chunk `i` starts and ends. offsets_[n_chunks] is n_bytes, so a chunk's
+    // extent is always offsets_[i+1] - offsets_[i].
+    const std::vector<uint64_t>& offsets() const { return offsets_; }
+    Result<std::pair<uint64_t, uint64_t>> ChunkExtent(uint64_t chunk_index) const;
 
     canon::DatasetManifest ToManifest(const crypto::Hash256& tokenizer_hash) const;
 
     Result<crypto::MerkleProof> ProofForChunk(uint64_t chunk_index) const;
 
-    // Which chunk holds a given token offset.
-    Result<uint64_t> ChunkForToken(uint64_t token_offset) const;
-
 private:
     crypto::Hash256 root_{};
     std::vector<crypto::Hash256> leaves_;
-    uint64_t n_tokens_{0};
-    uint32_t chunk_tokens_{0};
-    canon::TokenDtype dtype_{canon::TokenDtype::Uint32};
+    std::vector<uint64_t> offsets_;      // n_chunks + 1 entries, ascending
+    uint64_t n_bytes_{0};
+    uint32_t target_chunk_bytes_{0};
 };
 
 // Verifies a served chunk against a manifest root without holding the tree.

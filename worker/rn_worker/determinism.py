@@ -23,7 +23,7 @@ def enable_determinism(seed: int = 0):
 
 
 @contextmanager
-def deterministic_attention():
+def deterministic_attention(dtype: torch.dtype = torch.bfloat16):
     """Force the FLASH SDPA backend, which is bit-exact once determinism is on.
 
     This used to force MATH, on the grounds that flash and mem-efficient backends
@@ -49,11 +49,22 @@ def deterministic_attention():
     24 GB card; FLASH is linear and reaches 128K there. Same arithmetic, same
     bytes, twenty-four times less memory at the length we already train at.
 
-    ONE BACKEND, NOT A PREFERENCE LIST. Flash and math are each internally
-    reproducible but are not bit-identical to each other, so a list would let two
-    workers on different hardware silently compute different updates and each
-    believe the other was cheating. A GPU that cannot run this backend must fail
-    where it is obvious, not fall back.
+    ONE BACKEND PER DTYPE, NOT A PREFERENCE LIST. Flash and math are each
+    internally reproducible and are not bit-identical to each other, so choosing
+    between them by what happens to be available would let two workers compute
+    different updates and each conclude the other was cheating.
+
+    The choice is made by dtype, which is a property of the round rather than of
+    the machine: flash kernels exist only for 16-bit inputs, and a real round runs
+    bf16 — that is what makes a billion parameters fit a consumer card. fp32 is a
+    test and simulation convenience, never a consensus configuration, so sending
+    it to MATH cannot split a network. A 16-bit run that cannot reach flash raises
+    rather than falling back, because that is a machine whose arithmetic would not
+    match anyone else's.
     """
-    with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
-        yield
+    if dtype in (torch.bfloat16, torch.float16):
+        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+            yield
+    else:
+        with sdpa_kernel(SDPBackend.MATH):
+            yield

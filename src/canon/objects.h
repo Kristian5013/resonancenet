@@ -83,13 +83,32 @@ struct RoundDescriptor {
 
 // Describes a tokenized corpus: its Merkle root, how it is chunked, and which
 // tokenizer produced it.
+// What a corpus is, and how it is addressed.
+//
+// The corpus is RAW UTF-8 TEXT, not tokens. It used to be a flat file of token
+// ids, which meant every corpus had to be tokenized before it could be published
+// — 23 CPU-hours and a 1.28 TB second copy for 810 GB of input, paid again on
+// every corpus change, in a project whose premise is training on fresh data.
+//
+// So a worker is assigned a CHUNK, fetches it, and tokenizes it itself with the
+// artifact tokenizer_hash pins. A verifier fetches the same chunk and reproduces
+// the same tokens, because tokenizing the same bytes with the same artifact is
+// deterministic — which is the one thing a pinned BPE gives for free.
+//
+// Chunk boundaries are DERIVED, not stored. A chunk ends at the first document
+// separator at or after target_chunk_bytes, so any node holding the corpus
+// computes the same boundaries by scanning it, and the manifest stays a small
+// gossipable object instead of carrying a megabytes-long offset table. Cutting on
+// document boundaries also means every chunk is valid UTF-8 and a whole number of
+// documents, which removes the question of what a chunk beginning mid-character
+// means in two languages that disagree about it.
+//   see: docs/corpus-addressing.md
 struct DatasetManifest {
     crypto::Hash256 dataset_root{};
     crypto::Hash256 tokenizer_hash{};
-    uint64_t n_tokens{};
-    uint32_t chunk_tokens{};            // tokens per Merkle leaf
+    uint64_t n_bytes{};                 // corpus size in bytes of UTF-8
+    uint32_t target_chunk_bytes{};      // a chunk ends at the first separator past this
     uint32_t n_chunks{};
-    TokenDtype dtype{TokenDtype::Uint32};
 
     Status Validate() const;
     std::vector<uint8_t> Serialize() const;

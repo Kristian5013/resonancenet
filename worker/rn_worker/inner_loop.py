@@ -64,29 +64,40 @@ def pseudo_gradient(before: list[torch.Tensor], after: list[torch.Tensor]) -> np
     return torch.cat(deltas).numpy().astype(np.float32)
 
 
-def load_windows(tokens: np.ndarray, offsets: list[int], seq_len: int, device) -> tuple:
-    """Assembles a batch from offsets the PROTOCOL chose. The worker never selects
-    its own data — that is what closes data poisoning by construction."""
+def load_windows(corpus, dataset_root: bytes, round_id: int, worker_id: int, step: int,
+                 micro_batch: int, seq_len: int, device) -> tuple:
+    """Assembles a batch the PROTOCOL chose. The worker never selects its own data
+    — that is what closes data poisoning by construction.
+
+    Two draws per window, from one seed: which chunk of the corpus, and where
+    inside its tokenization the window starts. The second needs the chunk's token
+    count, which is why it happens here and not in the node: only whoever
+    tokenized the chunk knows it, and the worker and its verifier both did, with
+    the artifact tokenizer_hash pins.
+    """
     xs, ys = [], []
-    for offset in offsets:
-        window = np.asarray(tokens[offset : offset + seq_len + 1], dtype=np.int64)
+    for i in range(micro_batch):
+        seed = scheduler.window_seed(dataset_root, round_id, worker_id, step, i)
+        chunk_index = scheduler.chunk_for_window(seed, corpus.n_chunks)
+        tokens = corpus.tokens_for_chunk(chunk_index)
+        start = scheduler.offset_in_chunk(seed, len(tokens), seq_len)
+        window = np.asarray(tokens[start : start + seq_len + 1], dtype=np.int64)
         xs.append(window[:-1])
         ys.append(window[1:])
     return (torch.from_numpy(np.stack(xs)).to(device),
             torch.from_numpy(np.stack(ys)).to(device))
 
 
-def run_inner_loop(model, model_spec, optimizer_factory, tokens: np.ndarray,
+def run_inner_loop(model, model_spec, optimizer_factory, corpus,
                    dataset_root: bytes, round_id: int, worker_id: int, outer_step: int,
                    inner_steps: int, micro_batch: int, seq_len: int, lr: float, device,
-                   n_tokens: int | None = None,
                    poison: "PoisonPolicy | None" = None) -> dict:
     """Runs one worker's local training and returns its quantised contribution.
 
     `poison` exists so the simulation can inject a dishonest worker and verify
     that recomputation catches it. An honest run passes None.
     """
-    from torch.nn.attention import SDPBackend, sdpa_kernel
+    from .determinism import deterministic_attention
 
     before = snapshot(model, model_spec)
     model.train()
@@ -94,13 +105,16 @@ def run_inner_loop(model, model_spec, optimizer_factory, tokens: np.ndarray,
 
     try:
         for step in range(inner_steps):
-            offsets = scheduler.batch_offsets(dataset_root, round_id, worker_id,
-                                              outer_step * inner_steps + step, micro_batch,
-                                              len(tokens), seq_len)
-            x, y = load_windows(tokens, offsets, seq_len, device)
+            x, y = load_windows(corpus, dataset_root, round_id, worker_id,
+                                outer_step * inner_steps + step, micro_batch, seq_len, device)
             if poison is not None:
                 x, y = poison.corrupt_batch(x, y, step)
-            with sdpa_kernel(SDPBackend.MATH):      # deterministic attention path
+            # From determinism.py, not hardcoded here. This used to force MATH with
+            # its own import, which meant the module that decides the attention
+            # backend had no caller and changing it changed nothing — the flash
+            # measurement was real, the claim that the simulation verified it was
+            # not, because the simulation was still running MATH.
+            with deterministic_attention(next(model.parameters()).dtype):
                 _, loss = model(x, y)
                 loss.backward()
     finally:
