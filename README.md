@@ -36,15 +36,22 @@ machine, alone or against nodes you start yourself.
 <summary><strong>What is implemented and tested</strong></summary>
 
 Canonical serialization; the genesis trust anchor; initial weights derived from
-that anchor rather than distributed; corpus integrity (Merkle root over token
-chunks); deterministic batch derivation; quantised pseudo-gradients and integer
-aggregation; the producer election and its fork rule; the peer-to-peer transport;
-and the local channel between a node and a training worker.
+that anchor rather than distributed; corpus integrity (Merkle root over
+document-aligned chunks of text); deterministic batch derivation; quantised
+pseudo-gradients and integer aggregation; the producer election and its fork rule;
+the peer-to-peer transport; and the local channel between a node and a training
+worker.
 
 A full cycle runs end to end on one machine: contribute, close the round, elect a
 producer, aggregate, publish a checkpoint, and let a second worker catch up from
-it. 313 tests, plus a cross-language suite that drives the real `rnet-tool`
-binary from Python so the two implementations cannot drift apart silently.
+it — including catching a worker that trained on data it chose itself. 317 tests,
+plus a cross-language suite that drives the real `rnet-tool` binary from Python so
+the two implementations cannot drift apart silently.
+
+**Round 0** is 397,728,768 parameters: `d_model` 1024, 24 layers, 8 heads, a
+32,000-entry byte-level BPE, and a 16,384-token context. Every number in that
+sentence was chosen by measurement on a 24 GB consumer card, not by analogy —
+see [docs/training.md](docs/training.md).
 </details>
 
 <details open>
@@ -177,6 +184,9 @@ part in consensus and opens no worker socket.
 
 There is no `rnet-train` command yet. The worker is a Python library, and the two
 ways to drive it today are both real end-to-end runs:
+
+Detailed, with what each assertion means and what to do when it breaks:
+**[docs/training.md](docs/training.md)**.
 
 **1. The whole protocol on one machine, no transport involved.** Genesis to a
 verified checkpoint, including a dishonest worker being caught by recomputation:

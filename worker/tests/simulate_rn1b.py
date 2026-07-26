@@ -34,13 +34,28 @@ CORPUS = os.path.join(ROOT, "worker", "data", "rn1b_tokens.bin")
 
 
 def load_corpus(vocab_size: int, n_tokens_cap: int) -> np.ndarray:
-    """Memory-maps the real tokenized corpus if present; otherwise synthesises one
-    so the run is still possible on a machine without it."""
+    """Memory-maps the tokenized corpus if it fits the round's vocabulary.
+
+    A corpus tokenized with a different vocabulary is refused rather than used or
+    quietly replaced. Using it indexes past the end of the embedding table and
+    dies as a CUDA device-side assert, which names neither the corpus nor the
+    vocabulary — that is how a 128k-vocabulary file survived the move to 32k and
+    turned a simulation into an unexplained crash. Replacing it silently would be
+    worse: the run would train on random numbers and report a loss.
+    """
     if os.path.exists(CORPUS):
         tokens = np.memmap(CORPUS, dtype=np.uint32, mode="r")
-        print(f"corpus: {CORPUS} ({len(tokens)/1e6:.0f}M tokens)")
+        sample = tokens[: min(len(tokens), 10_000_000)]
+        highest = int(sample.max())
+        if highest >= vocab_size:
+            raise SystemExit(
+                f"{CORPUS} holds token id {highest}, and this round's vocabulary is "
+                f"{vocab_size}. That file was tokenized for a different round. Delete it, or "
+                f"rebuild it with worker/tools/build_corpus.py against the current tokenizer."
+            )
+        print(f"corpus: {CORPUS} ({len(tokens)/1e6:.0f}M tokens, max id {highest})")
         return tokens[: min(len(tokens), n_tokens_cap)]
-    print("corpus: synthetic (real token.bin not found)")
+    print(f"corpus: synthetic, {vocab_size}-token vocabulary (no {os.path.basename(CORPUS)})")
     rng = np.random.default_rng(1234)
     return rng.integers(0, vocab_size, size=n_tokens_cap, dtype=np.uint32)
 
