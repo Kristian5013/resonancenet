@@ -171,6 +171,10 @@ if(BUILD_TESTS)
       src/test/protocol_tests.cpp
       src/test/ipc_tests.cpp)
     target_link_libraries(rnet_tests PRIVATE rnet_protocol)
+    # So the binary can say which half of itself it is. A green count from a build
+    # that omits the transport suites is indistinguishable from a green count from
+    # one that has them, unless it says.
+    target_compile_definitions(rnet_tests PRIVATE RNET_TESTS_TRANSPORT=1)
   endif()
   add_test(NAME unit COMMAND rnet_tests)
   # The instrumented build is roughly ten times slower, and the tests that dominate

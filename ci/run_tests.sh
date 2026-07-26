@@ -24,6 +24,26 @@ cmake -B "$BUILD_DIR" -S . "${CMAKE_ARGS[@]}"
 echo "==> build"
 cmake --build "$BUILD_DIR" -j"$(nproc 2>/dev/null || echo 4)"
 
+# A test that disappears takes its proof with it and leaves the fix looking just
+# as covered as before. That happened here: three tests vanished when a whole file
+# was restored over them, and it was caught only because someone noticed the count
+# drop by three. A count says something died; the list says which.
+echo "==> registered tests"
+"$BUILD_DIR/rnet_tests" --list > "$BUILD_DIR/registered_tests.txt"
+if ! diff -u test/registered_tests.txt "$BUILD_DIR/registered_tests.txt"; then
+  cat >&2 <<'MSG'
+
+The set of registered tests does not match test/registered_tests.txt.
+
+  Lines marked - are tests that exist in the file and NOT in the binary. Those
+  were deleted or renamed. If that was not deliberate, restore them.
+
+  Lines marked + are new tests. Record them:
+      ./build/rnet_tests --list > test/registered_tests.txt
+MSG
+  exit 1
+fi
+
 echo "==> unit tests"
 ctest --test-dir "$BUILD_DIR" --output-on-failure
 

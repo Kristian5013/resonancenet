@@ -134,8 +134,21 @@ written in the meantime. The fix those tests covered stayed in the code; the pro
 of it vanished, and it was noticed only because the test count dropped by three.
 
 An agent with write access to the tests can accidentally prove anything, including
-something false. The test count is a useful canary, but a canary is detection, not
-prevention.
+something false.
+
+The count was the canary that caught it, and a count is a poor one: it says
+something died without saying what, and only if someone happens to be comparing.
+So the set of registered tests is checked in.
+
+```
+./build/rnet_tests --list > test/registered_tests.txt
+```
+
+`ci/run_tests.sh` diffs it and fails on any difference, naming the tests that
+vanished. Adding a test means regenerating the file in the same commit — the same
+discipline as re-pinning an anchor, and for the same reason.
+
+A canary is still detection, not prevention. Merge by hand.
 
 ---
 
