@@ -64,7 +64,9 @@ util::Json ManifestToJson(const canon::DatasetManifest& m) {
     j.Set("n_tokens", m.n_tokens);
     j.Set("chunk_tokens", static_cast<int64_t>(m.chunk_tokens));
     j.Set("n_chunks", static_cast<int64_t>(m.n_chunks));
-    j.Set("dtype", m.dtype == canon::TokenDtype::Uint16 ? "uint16" : "uint32");
+    j.Set("dtype", m.dtype == canon::TokenDtype::Uint8    ? "uint8"
+                   : m.dtype == canon::TokenDtype::Uint16 ? "uint16"
+                                                          : "uint32");
     j.Set("manifest_id", util::ToHex(m.Id()));
     return j;
 }
@@ -86,7 +88,10 @@ Result<std::vector<uint32_t>> ReadWindow(const std::filesystem::path& token_file
     // Token payloads are little-endian on disk: they are produced by the worker's
     // numpy pipeline, and this is the one place the protocol adopts LE rather than
     // the big-endian convention used for metadata.
-    if (manifest.dtype == canon::TokenDtype::Uint16) {
+    if (manifest.dtype == canon::TokenDtype::Uint8) {
+        // The corpus is the text. One byte in, one id out.
+        for (size_t i = 0; i < tokens.size(); ++i) tokens[i] = static_cast<uint32_t>(b[i]);
+    } else if (manifest.dtype == canon::TokenDtype::Uint16) {
         for (size_t i = 0; i < tokens.size(); ++i) {
             tokens[i] = static_cast<uint32_t>(b[2 * i]) | (static_cast<uint32_t>(b[2 * i + 1]) << 8);
         }

@@ -8,15 +8,18 @@
 namespace rnet::dataset {
 
 size_t TokenWidth(canon::TokenDtype dtype) {
-    return dtype == canon::TokenDtype::Uint16 ? 2u : 4u;
+    switch (dtype) {
+        case canon::TokenDtype::Uint8:  return 1u;
+        case canon::TokenDtype::Uint16: return 2u;
+        case canon::TokenDtype::Uint32: return 4u;
+    }
+    return 4u;
 }
 
 Result<DatasetIndex> DatasetIndex::Build(const std::filesystem::path& token_file,
                                          uint32_t chunk_tokens, canon::TokenDtype dtype) {
     if (chunk_tokens == 0) return Err("index: chunk_tokens must be non-zero");
-    if (dtype != canon::TokenDtype::Uint16 && dtype != canon::TokenDtype::Uint32) {
-        return Err("index: unknown token dtype");
-    }
+    if (!canon::IsKnownTokenDtype(dtype)) return Err("index: unknown token dtype");
 
     auto size = util::FileSize(token_file);
     if (!size) return Err(size.error());

@@ -19,6 +19,13 @@ using canon::RoundDescriptor;
 // The vocabulary size was chosen by experiment (matched-parameter bpb sweep:
 // spending budget on vocabulary beat spending it on depth, monotonically up to
 // 128k), not copied from another model.
+//
+// A byte vocabulary was measured against it and rejected. It removes the corpus
+// pipeline entirely, which is attractive, but it costs five times the positions
+// for the same text — 5.06 characters per token on FineWeb-Edu — and that penalty
+// lands directly on context length, which is where this model has to be good. The
+// pipeline cost is being removed a different way: by addressing the corpus in
+// chunks of text rather than in token offsets, so nothing is tokenized in advance.
 constexpr std::string_view kTokenizerRound0 =
     "11878ae15ef43a42a92e5d02231b780731b39c0067868d66c29f12042919febc";
 

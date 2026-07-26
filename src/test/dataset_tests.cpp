@@ -208,6 +208,42 @@ RNET_TEST(Manifest, ReadWindowReturnsExactTokens) {
     std::filesystem::remove(path);
 }
 
+// A byte-level corpus IS the text: one byte per token, no tokenization step, and
+// nothing stored twice. The width has to be one everywhere the offset arithmetic
+// touches it — a corpus read four bytes to the token would return every fourth
+// character and still produce a plausible-looking window.
+RNET_TEST(Manifest, ByteLevelCorpusReadsOneBytePerToken) {
+    const auto path = std::filesystem::temp_directory_path() / "rnet_test_bytes.bin";
+    // Deliberately not random: the value at position i is i mod 251, so a window
+    // read at the wrong stride is obvious rather than merely different.
+    std::vector<uint8_t> text(4096);
+    for (size_t i = 0; i < text.size(); ++i) text[i] = static_cast<uint8_t>(i % 251);
+    RNET_CHECK_OK(util::WriteFileAtomic(path, text));
+
+    RNET_CHECK_EQ(TokenWidth(canon::TokenDtype::Uint8), size_t{1});
+
+    auto index = DatasetIndex::Build(path, 512, canon::TokenDtype::Uint8);
+    RNET_CHECK_OK(index);
+    const auto manifest = index.value().ToManifest(crypto::Hash256{});
+    // One token per byte, so the corpus is as long in tokens as it is in bytes.
+    RNET_CHECK_EQ(manifest.n_tokens, uint64_t{4096});
+    RNET_CHECK_EQ(manifest.n_chunks, uint64_t{8});
+
+    auto window = ReadWindow(path, manifest, 1000, 64);
+    RNET_CHECK_OK(window);
+    RNET_CHECK_EQ(window.value().size(), size_t{65});
+    for (size_t i = 0; i < window.value().size(); ++i) {
+        const uint32_t expected = static_cast<uint32_t>((1000 + i) % 251);
+        if (window.value()[i] != expected) {
+            RNET_FAIL("byte {} of the window is {}, expected {}", i, window.value()[i], expected);
+        }
+    }
+
+    // The end of the corpus is still the end of the corpus.
+    RNET_CHECK_ERR(ReadWindow(path, manifest, 4090, 64));
+    std::filesystem::remove(path);
+}
+
 RNET_TEST(Manifest, ScheduledWindowsAreAlwaysReadable) {
     const auto path = WriteCorpus("scheduled", 20'000);
     auto index = DatasetIndex::Build(path, 4096, canon::TokenDtype::Uint32);

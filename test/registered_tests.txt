@@ -127,6 +127,7 @@ Json.LargeIntegersKeepPrecision
 Json.RejectsMalformedInput
 Json.WritesAndParses
 Json.WrongTypeIsAnError
+Manifest.ByteLevelCorpusReadsOneBytePerToken
 Manifest.PersistsAndReloads
 Manifest.ReadWindowReturnsExactTokens
 Manifest.ScheduledWindowsAreAlwaysReadable

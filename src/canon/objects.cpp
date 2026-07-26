@@ -163,9 +163,7 @@ Status DatasetManifest::Validate() const {
     if (n_tokens == 0) return Err("dataset: empty corpus");
     if (chunk_tokens == 0) return Err("dataset: chunk_tokens must be non-zero");
     if (n_chunks == 0) return Err("dataset: n_chunks must be non-zero");
-    if (dtype != TokenDtype::Uint16 && dtype != TokenDtype::Uint32) {
-        return Err("dataset: unknown token dtype");
-    }
+    if (!IsKnownTokenDtype(dtype)) return Err("dataset: unknown token dtype");
     // n_chunks must be exactly ceil(n_tokens / chunk_tokens): anything else means
     // the manifest and the file disagree about the tree shape, and therefore about
     // the root.

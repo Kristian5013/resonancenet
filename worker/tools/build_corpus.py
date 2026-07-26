@@ -61,8 +61,16 @@ import pyarrow.parquet as pq
 from huggingface_hub import hf_hub_download, list_repo_files
 from tokenizers import Tokenizer
 
-# Token 0 in this vocabulary. Appended after every document and nowhere else.
+# Token 0 in a BPE vocabulary. Appended after every document and nowhere else.
 EOS_TOKEN = 0
+
+# What separates documents in a BYTE-LEVEL corpus.
+#
+# A byte vocabulary has no spare id: all 256 values are real bytes of real text,
+# so there is nothing to reserve as a separator. A blank line is the separator the
+# text itself already uses, it costs two bytes, and it needs no agreement beyond
+# this constant — a worker reading the corpus sees exactly what was written.
+BYTE_SEPARATOR = b"\n\n"
 
 # Documents encoded per call. Large enough that the Rust tokenizer's parallelism
 # pays off, small enough that a batch of long documents does not spike memory.
@@ -128,11 +136,20 @@ class BuildState:
 
 
 def load_tokenizer(path: Path, expected_hash: str | None) -> Tokenizer:
+    """Loads the pinned tokenizer, or returns None for a byte-level corpus.
+
+    `None` is not a fallback: it is the byte-level mode, which the round descriptor
+    spells the same way — an all-zero tokenizer_hash means there is no artifact
+    because the corpus is the text.
+    """
     """Loads the tokenizer and refuses one that is not the pinned one.
 
     A corpus built with a different tokenizer is a different corpus wearing the
     right name: the token ids mean other strings, and nothing downstream can tell.
     """
+    if path is None:
+        print("byte-level corpus: no tokenizer, the file IS the text")
+        return None
     raw = path.read_bytes()
     actual = hashlib.sha3_256(raw).hexdigest()
     if expected_hash and actual != expected_hash:
@@ -241,6 +258,18 @@ def documents_in(table, source: SourceSpec):
                 yield text
 
 
+def append_text(out, documents: list[str]) -> tuple[int, int]:
+    """Writes documents as UTF-8, separated by a blank line. Returns (bytes, bytes).
+
+    Both halves of the pair are the same number here, and deliberately so: in a
+    byte-level corpus a token IS a byte, so the token count and the byte count
+    cannot disagree. Nothing is encoded, counted twice, or converted.
+    """
+    blob = BYTE_SEPARATOR.join(d.encode("utf-8") for d in documents) + BYTE_SEPARATOR
+    out.write(blob)
+    return len(blob), len(blob)
+
+
 def append_tokens(out, tokenizer: Tokenizer, documents: list[str]) -> tuple[int, int]:
     """Encodes a batch and appends it. Returns (tokens written, raw bytes read).
 
@@ -301,7 +330,9 @@ def build(config_path: Path, out_path: Path, cache_dir: Path, keep_raw: bool,
     config = json.loads(config_path.read_text())
     sources = [SourceSpec(**s) for s in config["sources"]]
 
-    tokenizer = load_tokenizer(Path(config["tokenizer"]), config.get("tokenizer_hash"))
+    tokenizer_path = config.get("tokenizer")
+    tokenizer = load_tokenizer(Path(tokenizer_path) if tokenizer_path else None,
+                               config.get("tokenizer_hash"))
 
     state_path = out_path.with_suffix(".state.json")
     state = BuildState(**json.loads(state_path.read_text())) if state_path.exists() else BuildState()
@@ -357,12 +388,14 @@ def build(config_path: Path, out_path: Path, cache_dir: Path, keep_raw: bool,
                 for text in documents_in(table, source):
                     batch.append(text)
                     if len(batch) >= BATCH_DOCUMENTS:
-                        n, raw = append_tokens(out, tokenizer, batch)
+                        n, raw = (append_text(out, batch) if tokenizer is None
+                                  else append_tokens(out, tokenizer, batch))
                         shard_tokens += n
                         state.raw_bytes_read += raw
                         batch.clear()
                 if batch:
-                    n, raw = append_tokens(out, tokenizer, batch)
+                    n, raw = (append_text(out, batch) if tokenizer is None
+                              else append_tokens(out, tokenizer, batch))
                     shard_tokens += n
                     state.raw_bytes_read += raw
 
@@ -408,10 +441,11 @@ def build(config_path: Path, out_path: Path, cache_dir: Path, keep_raw: bool,
     # The file is four bytes per token or it is not the file the count describes.
     # Cheap, and the only check that catches a duplicated or truncated fragment
     # before its root is pinned.
-    if size != state.tokens_written * 4:
+    width = 1 if tokenizer is None else 4
+    if size != state.tokens_written * width:
         raise SystemExit(
             f"the corpus is {size:,} bytes but claims {state.tokens_written:,} tokens "
-            f"({state.tokens_written * 4:,} bytes). Do not pin a root from this file."
+            f"({state.tokens_written * width:,} bytes). Do not pin a root from this file."
         )
     print(f"\n{state.tokens_written:,} tokens, {size / 1e9:.1f} GB on disk")
     print(f"{ratio:.3f} raw bytes per token with THIS tokenizer")
@@ -423,9 +457,10 @@ def build(config_path: Path, out_path: Path, cache_dir: Path, keep_raw: bool,
 
     meta = {
         "n_tokens": state.tokens_written,
-        "dtype": "uint32",
+        "dtype": "uint8" if tokenizer is None else "uint32",
         "byte_order": "little-endian",
-        "eos": EOS_TOKEN,
+        "eos": None if tokenizer is None else EOS_TOKEN,
+        "separator": BYTE_SEPARATOR.decode() if tokenizer is None else None,
         "tokenizer_hash": config.get("tokenizer_hash"),
         "raw_bytes_per_token": round(ratio, 4),
         "sources": [

@@ -20,7 +20,15 @@ namespace rnet::canon {
 enum class NormId : uint16_t { RmsNorm = 1 };
 enum class ActivationId : uint16_t { SwiGlu = 1 };
 enum class OptimizerId : uint16_t { Adafactor = 1 };
-enum class TokenDtype : uint8_t { Uint16 = 1, Uint32 = 2 };
+// Uint8 is a byte-level corpus: the token file IS the UTF-8 text, one byte per
+// token, so no tokenization step exists and nothing has to be stored twice. A
+// window may begin mid-character, which is harmless — the model reads bytes, not
+// characters — and it keeps the offset arithmetic identical to the other widths.
+enum class TokenDtype : uint8_t { Uint16 = 1, Uint32 = 2, Uint8 = 3 };
+
+inline bool IsKnownTokenDtype(TokenDtype d) {
+    return d == TokenDtype::Uint8 || d == TokenDtype::Uint16 || d == TokenDtype::Uint32;
+}
 
 // Determinism class: which hardware/kernel configuration a worker's arithmetic
 // belongs to. Spot-recompute verification only holds between workers of the same
