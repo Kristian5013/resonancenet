@@ -84,15 +84,24 @@ BATCH_DOCUMENTS = 1000
 # eight times faster while a single HTTP stream does not, so the cores go back to
 # waiting. Sixteen streams is what saturates the link without the ordering below
 # becoming the bottleneck instead.
-DOWNLOAD_WORKERS = 16
+DOWNLOAD_WORKERS = 8
 
 # Shards allowed on disk ahead of the one being tokenized. Bounds peak disk to
 # this many shards — about a gigabyte each for FineWeb-Edu — on top of the output.
 PREFETCH_SHARDS = 24
 
-# A transient 5xx on one shard out of eight hundred must not end a run that has
-# been going for an hour.
-DOWNLOAD_ATTEMPTS = 5
+# How many times a shard is retried before the run gives up on it.
+#
+# High, and deliberately so. A shard CANNOT be skipped: its bytes and its position
+# are both part of dataset_root, so a corpus missing one is a different corpus
+# that looks exactly like the right one. The only alternatives to retrying are
+# stopping — which threw away five hours of a run at shard 1595 of 2410, on an
+# internal error inside the Hub's transfer client rather than on anything wrong
+# with the file — or corrupting the output. So it retries for about half an hour
+# before admitting defeat, and admits it by stopping cleanly with the state
+# written, not by unwinding out of the middle of a write.
+DOWNLOAD_ATTEMPTS = 12
+MAX_BACKOFF_SECONDS = 300
 
 
 @dataclass
@@ -211,7 +220,7 @@ class ShardFetcher:
             except Exception as exc:            # noqa: BLE001 - retried, then reported
                 last = exc
                 if attempt + 1 < DOWNLOAD_ATTEMPTS:
-                    delay = min(2 ** attempt, 30)
+                    delay = min(2 ** attempt, MAX_BACKOFF_SECONDS)
                     print(f"  {shard}: {type(exc).__name__}, retrying in {delay}s "
                           f"({attempt + 1}/{DOWNLOAD_ATTEMPTS})", file=sys.stderr)
                     time.sleep(delay)
