@@ -25,6 +25,8 @@ std::string MessageTypeName(MessageType type) {
         case MessageType::Weights:            return "weights";
         case MessageType::GetStatus:          return "get-status";
         case MessageType::Status:             return "status";
+        case MessageType::GetCorpusChunk:     return "get-corpus-chunk";
+        case MessageType::CorpusChunk:        return "corpus-chunk";
     }
     return "unknown";
 }
@@ -38,6 +40,7 @@ bool IsWorkerToDaemon(MessageType type) {
         case MessageType::SubmitWeights:
         case MessageType::GetWeights:
         case MessageType::GetStatus:
+        case MessageType::GetCorpusChunk:
             return true;
         default:
             return false;
@@ -57,6 +60,7 @@ bool IsDaemonToWorker(MessageType type) {
         case MessageType::Weights:
         case MessageType::VerdictAccepted:
         case MessageType::Status:
+        case MessageType::CorpusChunk:
             return true;
         default:
             return false;

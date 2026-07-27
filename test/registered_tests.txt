@@ -119,6 +119,7 @@ Init.TheTensorLayoutAndTheParameterCountAgree
 Init.ValuesStayWithinTheirBound
 Inv.RoundTripsAndIsBounded
 Inv.UnknownObjectTypeIsRejected
+IpcFrame.EveryMessageTypeRoundTripsAndHasAName
 IpcServer.DeliversAFrameFromAConnectedClient
 IpcServer.RefusesADescriptorThatIsNotSealed
 IpcServer.RefusesAMessageTravellingTheWrongWay

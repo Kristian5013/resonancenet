@@ -375,6 +375,54 @@ std::vector<uint8_t> HelloRecord(uint64_t request_id) {
 // The directory is what enforces access, and it must be restrictive BEFORE the
 // socket exists — a mode applied after bind() leaves a window in which the socket
 // is reachable with umask-derived permissions.
+// Every message type must be encodable, decodable and named.
+//
+// A type added to the enum but not to the direction tables is refused at the
+// frame layer with "unknown message type 0x0060" — before any handler sees it,
+// and the daemon closes the connection because a request it cannot answer is
+// worse than a refusal. That is exactly what happened to GetCorpusChunk: the
+// handler was written, the dispatch entry was written, tests passed, and the
+// first real worker got a closed socket.
+//
+// Iterating the enum here means the next type cannot be half-added.
+RNET_TEST(IpcFrame, EveryMessageTypeRoundTripsAndHasAName) {
+    const ipc::MessageType all[] = {
+        ipc::MessageType::Hello, ipc::MessageType::HelloOk, ipc::MessageType::Error,
+        ipc::MessageType::GetAssignment, ipc::MessageType::AssignTrain,
+        ipc::MessageType::AssignVerify, ipc::MessageType::AssignNone,
+        ipc::MessageType::AssignApply, ipc::MessageType::SubmitContribution,
+        ipc::MessageType::SubmitAccepted, ipc::MessageType::SubmitVerdict,
+        ipc::MessageType::VerdictAccepted, ipc::MessageType::SubmitWeights,
+        ipc::MessageType::WeightsAccepted, ipc::MessageType::GetWeights,
+        ipc::MessageType::Weights, ipc::MessageType::GetStatus, ipc::MessageType::Status,
+        ipc::MessageType::GetCorpusChunk, ipc::MessageType::CorpusChunk,
+    };
+
+    for (auto type : all) {
+        ipc::Frame frame;
+        frame.type = type;
+        frame.request_id = 7;
+        frame.payload = {1, 2, 3};
+
+        auto encoded = ipc::EncodeFrame(frame);
+        if (!encoded) {
+            RNET_FAIL("message type 0x{:04x} cannot be encoded: {}",
+                      static_cast<uint16_t>(type), encoded.error());
+        }
+        auto decoded = ipc::DecodeFrame(encoded.value());
+        if (!decoded) {
+            RNET_FAIL("message type 0x{:04x} cannot be decoded: {}",
+                      static_cast<uint16_t>(type), decoded.error());
+        }
+        RNET_CHECK_EQ(static_cast<int>(decoded.value().type), static_cast<int>(type));
+
+        const std::string name = ipc::MessageTypeName(type);
+        if (name == "unknown") {
+            RNET_FAIL("message type 0x{:04x} has no name", static_cast<uint16_t>(type));
+        }
+    }
+}
+
 RNET_TEST(IpcServer, TheDirectoryIsRestrictedBeforeTheSocketExists) {
     const auto dir = TestSocketDir("perms");
     std::filesystem::remove_all(dir);
