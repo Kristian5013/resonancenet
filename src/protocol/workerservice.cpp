@@ -668,10 +668,24 @@ Status WorkerService::OnGetCorpusChunk(ipc::Client& client, const ipc::Frame& fr
         }
     }
 
+    // Over a sealed descriptor, not inside the frame. A chunk is a megabyte and
+    // the frame limit is 128 KB — which is the right limit, since frames are
+    // parsed into memory on receipt, and the wrong shape for bulk. The same
+    // mechanism carries 398 MB pseudo-gradients in the other direction.
+    //
+    // Sealed before it is handed over, so the bytes cannot change while the worker
+    // reads them, and accompanied by their hash so the worker can check that what
+    // it mapped is what the daemon meant — a socket squatted by the same uid is
+    // something the OS cannot prevent.
+    const auto chunk_hash = crypto::Sha3_256(bytes);
+    auto sealed = ipc::MakeSealedMemfd(bytes, "rnet-corpus");
+    if (!sealed) return Err(sealed.error());
+
     auto out = ipc::CborWriter()
-                   .BeginMap(2)
+                   .BeginMap(3)
+                   .Key("bytes").Uint(bytes.size())
+                   .Key("chunk_hash").Bytes(AsBytes(chunk_hash))
                    .Key("chunk_index").Uint(index.value())
-                   .Key("bytes").Bytes(bytes)
                    .Take();
     if (!out) return Err(out.error());
 
@@ -680,7 +694,7 @@ Status WorkerService::OnGetCorpusChunk(ipc::Client& client, const ipc::Frame& fr
     reply.request_id = frame.request_id;
     reply.payload = std::move(out.value());
     (void)now_ms;
-    return client.Send(reply);
+    return client.SendWithDescriptor(reply, sealed.value().get());
 }
 
 Status WorkerService::OnGetStatus(ipc::Client& client, const ipc::Frame& frame) {

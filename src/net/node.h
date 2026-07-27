@@ -20,6 +20,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <deque>
 #include <map>
 #include <memory>
 #include <string>
@@ -215,12 +216,22 @@ private:
     // the same reason bulk objects are: a sixty-four chunk request is 256 MB, and
     // writing it into an 8 MiB queue in one tick would disconnect the peer being
     // served.
+    // What a peer has asked for and not yet been sent.
+    //
+    // A QUEUE, not a single range. A worker's schedule scatters it across the
+    // corpus — 200 unrelated chunks in a round — so it asks for them one at a
+    // time, and a single feed per peer meant the second request erased the first.
+    // The worker then waited a full round trip per chunk with the GPU idle, which
+    // is what a training run looked like: 0% utilisation and a poll every 250 ms.
     struct CorpusFeed {
         uint64_t next_chunk{0};
         uint64_t last_chunk{0};   // exclusive
         uint32_t next_part{0};
     };
-    std::map<uint64_t, CorpusFeed> corpus_feeds_;
+    // Bounded: a peer that asks for everything at once must not make this node
+    // hold an unbounded list on its behalf.
+    static constexpr size_t kMaxQueuedCorpusFeeds = 64;
+    std::map<uint64_t, std::deque<CorpusFeed>> corpus_feeds_;
     CorpusSource* corpus_{nullptr};
 
     // Chunks being fetched from peers, and chunks that arrived and verified.

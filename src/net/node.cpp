@@ -663,12 +663,18 @@ Status Node::HandleGetCorpus(Peer& peer, const ReceivedMessage& message) {
         return Err("getcorpus: first_chunk past the end");
     }
 
+    auto& queue = corpus_feeds_[peer.id()];
+    if (queue.size() >= kMaxQueuedCorpusFeeds) {
+        peer.Misbehaving(10, "too many outstanding corpus requests");
+        return Err("getcorpus: too many outstanding requests");
+    }
+
     CorpusFeed feed;
     feed.next_chunk = request.value().first_chunk;
     feed.last_chunk = std::min<uint64_t>(corpus_->n_chunks(),
                                          request.value().first_chunk + request.value().chunk_count);
     feed.next_part = 0;
-    corpus_feeds_[peer.id()] = feed;
+    queue.push_back(feed);
     return Status::Ok();
 }
 
@@ -683,7 +689,9 @@ void Node::ServeCorpusFeeds() {
             it = corpus_feeds_.erase(it);
             continue;
         }
-        auto& feed = it->second;
+        auto& queue = it->second;
+        while (!queue.empty() && peer->second->pending_send_bytes() < kSendQueueHighWater) {
+        auto& feed = queue.front();
 
         while (feed.next_chunk < feed.last_chunk &&
                peer->second->pending_send_bytes() < kSendQueueHighWater) {
@@ -719,7 +727,13 @@ void Node::ServeCorpusFeeds() {
                 ++feed.next_chunk;
             }
         }
-        it = (feed.next_chunk >= feed.last_chunk) ? corpus_feeds_.erase(it) : std::next(it);
+        if (feed.next_chunk >= feed.last_chunk) {
+            queue.pop_front();       // this request is fully served; move to the next
+        } else {
+            break;                   // send queue is full; resume this one next tick
+        }
+        }
+        it = queue.empty() ? corpus_feeds_.erase(it) : std::next(it);
     }
 }
 

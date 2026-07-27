@@ -23,6 +23,11 @@ import torch
 
 from .consensus import canon, diloco, scheduler
 
+# How many steps ahead to fetch corpus chunks. Eight chunks is eight megabytes in
+# flight and about half a minute of training at this model's rate — enough to hide
+# a round trip several times over without holding much.
+PREFETCH_STEPS = 8
+
 
 def enable_determinism(seed: int) -> None:
     torch.use_deterministic_algorithms(True)
@@ -75,6 +80,19 @@ def load_windows(corpus, dataset_root: bytes, round_id: int, worker_id: int, ste
     tokenized the chunk knows it, and the worker and its verifier both did, with
     the artifact tokenizer_hash pins.
     """
+    # Ask for the chunks the NEXT few steps will need before blocking on this
+    # one's. A chunk comes from a seed that may be an ocean away, and fetching it
+    # only when the step needs it means the GPU waits out a round trip per step —
+    # measured at 0% utilisation with a poll every 250 ms. The schedule is known
+    # in advance, so there is no reason to discover it one step at a time.
+    if hasattr(corpus, "prefetch"):
+        upcoming = []
+        for ahead in range(1, PREFETCH_STEPS + 1):
+            for i in range(micro_batch):
+                s = scheduler.window_seed(dataset_root, round_id, worker_id, step + ahead, i)
+                upcoming.append(scheduler.chunk_for_window(s, corpus.n_chunks))
+        corpus.prefetch(upcoming)
+
     xs, ys = [], []
     for i in range(micro_batch):
         seed = scheduler.window_seed(dataset_root, round_id, worker_id, step, i)

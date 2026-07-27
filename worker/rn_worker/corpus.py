@@ -169,6 +169,25 @@ class RemoteCorpus:
         self._cache_limit = cache_chunks
         self._poll = poll_seconds
         self._timeout = timeout_seconds
+        self._asked: set[int] = set()
+
+    def prefetch(self, indices) -> None:
+        """Starts the node fetching chunks this worker will want shortly.
+
+        One non-blocking ask each: the node answers "being fetched" and begins,
+        which is the whole point — by the time the step that needs it arrives, it
+        is here. Chunks already held or already in flight cost nothing, since the
+        node recognises both.
+        """
+        for index in indices:
+            if index in self._cache or index in self._asked:
+                continue
+            self._asked.add(index)
+            try:
+                self.client.corpus_chunk(index)
+            except Exception:
+                # "Being fetched" is the expected answer and the desired effect.
+                pass
 
     def chunk_bytes(self, index: int) -> bytes:
         import time as _time

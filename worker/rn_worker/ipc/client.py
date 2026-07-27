@@ -457,7 +457,7 @@ class DaemonClient:
             "checkpoint_id": cbor.get_hash(reply, "checkpoint_id"),
         }
 
-    def corpus_chunk(self, chunk_index: int) -> bytes:
+    def corpus_chunk(self, chunk_index: int) -> bytes:  # noqa: D401
         """One chunk of the corpus, as raw UTF-8.
 
         The node answers from its own copy if it serves one, and otherwise fetches
@@ -469,13 +469,37 @@ class DaemonClient:
         daemon serves every worker from one loop and must not block in it. The
         caller retries; RemoteCorpus does that.
         """
-        msg_type, reply, _ = self._request(GET_CORPUS_CHUNK, {"chunk_index": chunk_index})
+        import mmap
+
+        msg_type, reply, fd = self._request(GET_CORPUS_CHUNK, {"chunk_index": chunk_index},
+                                            expect_fd=True)
         if msg_type != CORPUS_CHUNK:
             raise IpcError(f"expected a corpus chunk, got message type {msg_type:#06x}")
         got = reply["chunk_index"]
         if got != chunk_index:
             raise IpcError(f"asked for chunk {chunk_index}, was given {got}")
-        return reply["bytes"]
+        if fd is None:
+            raise IpcError("ipc: the daemon sent no descriptor for the corpus chunk")
+
+        # A chunk is a megabyte, which does not fit a frame, so it travels over a
+        # sealed descriptor like every other bulk payload here. The size comes from
+        # the descriptor rather than from the message: a daemon must not be able to
+        # make this worker allocate by claiming a size.
+        try:
+            size = os.fstat(fd).st_size
+            if size != reply["bytes"]:
+                raise IpcError(f"ipc: chunk is {size} bytes, the message says {reply['bytes']}")
+            with mmap.mmap(fd, size, prot=mmap.PROT_READ) as mapping:
+                raw = mapping.read(size)
+        finally:
+            os.close(fd)
+
+        # Checked against the hash the daemon stated. The daemon has already
+        # checked the chunk against dataset_root; this catches the socket being
+        # squatted by something with the same uid, which the OS cannot prevent.
+        if hashlib.sha3_256(raw).digest() != reply["chunk_hash"]:
+            raise IpcError("ipc: the corpus chunk does not hash to the value the daemon claims")
+        return raw
 
     def status(self) -> dict:
         msg_type, reply, _ = self._request(GET_STATUS, {})
