@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Node state: chain, weights, sockets. Derived, large, and local.
+.rnet/
+*.rnidx
+*.tmp
