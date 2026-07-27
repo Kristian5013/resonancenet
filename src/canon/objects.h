@@ -72,6 +72,13 @@ struct RoundDescriptor {
     OptimizerId optimizer{OptimizerId::Adafactor};
     crypto::Hash256 tokenizer_hash{};   // all-zero = byte-level, no artifact
     crypto::Hash256 dataset_root{};     // all-zero = no corpus pinned yet
+    // How many chunks that corpus has.
+    //
+    // The schedule reduces a hash modulo this, so without it a worker cannot work
+    // out which chunk it was assigned — and "the worker cannot choose its data"
+    // only holds if every input to that choice comes from consensus. The root
+    // alone is not enough: it names the corpus but not its shape.
+    uint32_t dataset_chunks{0};
 
     std::vector<uint8_t> Serialize() const;
     static Result<RoundDescriptor> Deserialize(std::span<const uint8_t> content);

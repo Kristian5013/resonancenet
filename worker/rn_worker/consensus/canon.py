@@ -231,6 +231,7 @@ class RoundDescriptor:
     optimizer_id: int
     tokenizer_hash: bytes
     dataset_root: bytes
+    dataset_chunks: int
     genesis_hash: str = field(default="")
 
     @property
@@ -261,6 +262,7 @@ def parse_round_descriptor(content: bytes) -> RoundDescriptor:
     optimizer_id = r.u16()
     tokenizer_hash = r.hash()
     dataset_root = r.hash()
+    dataset_chunks = r.u32()
     r.expect_exhausted()
 
     if protocol_version != PROTOCOL_VERSION:
@@ -279,6 +281,7 @@ def parse_round_descriptor(content: bytes) -> RoundDescriptor:
         optimizer_id,
         tokenizer_hash,
         dataset_root,
+        dataset_chunks,
     )
 
 

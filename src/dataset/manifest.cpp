@@ -28,6 +28,22 @@ Result<canon::DatasetManifest> BuildAndWriteManifest(const std::filesystem::path
     if (auto st = util::WriteTextFileAtomic(json_path, ManifestToJson(manifest).Dump(2)); !st) {
         return Err(st.error());
     }
+
+    // The index is the expensive half of publishing a corpus — reading all of it,
+    // two and a half hours for 7.36 TB — and it has just been computed. Throwing
+    // it away means the first node to serve that corpus pays the same cost again,
+    // which is exactly what happened: dataset-build produced a root and discarded
+    // the boundaries and leaves behind it, then a seed spent three hours
+    // recomputing them before it could answer a single handshake.
+    const std::filesystem::path cache_path = corpus_file.string() + ".rnidx";
+    if (auto st = index.value().SaveCache(cache_path); !st) {
+        // Not fatal: the manifest is what was asked for. The next reader rebuilds.
+        RNET_LOG_WARN("corpus: cannot write the index cache {}: {}", cache_path.string(),
+                      st.error());
+    } else {
+        RNET_LOG_INFO("corpus: index cached at {} — a node serving this corpus will not "
+                      "have to read it again", cache_path.string());
+    }
     return manifest;
 }
 

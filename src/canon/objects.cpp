@@ -87,6 +87,7 @@ std::vector<uint8_t> RoundDescriptor::Serialize() const {
     w.U16(static_cast<uint16_t>(optimizer));
     w.Hash(tokenizer_hash);
     w.Hash(dataset_root);
+    w.U32(dataset_chunks);
     return w.take();
 }
 
@@ -122,6 +123,7 @@ Result<RoundDescriptor> RoundDescriptor::Deserialize(std::span<const uint8_t> co
     RNET_READ(opt, r.U16())
     RNET_READ(d.tokenizer_hash, r.Hash())
     RNET_READ(d.dataset_root, r.Hash())
+    RNET_READ(d.dataset_chunks, r.U32())
 #undef RNET_READ
 
     d.model.norm = static_cast<NormId>(norm);

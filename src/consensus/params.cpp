@@ -163,6 +163,7 @@ NetworkParams MakeMain() {
     // seeing the same text twice.
     p.round.dataset_root = HashFromHex(
         "7195da139188f4a1b779bd380562718e080959531aee0cabbf777cd13501a3b8");
+    p.round.dataset_chunks = 6'956'933;
     p.policy = MakePolicy(MagicWord(p.message_magic),
                           // Two hundred, not two hundred and fifty. Measured on a
                           // 24 GB card at seq_len 16384: 1.86 s per inner step, so
@@ -204,8 +205,8 @@ NetworkParams MakeMain() {
     // this very descriptor (see consensus/init.h) and pinned here, so a node can
     // reproduce the starting weights offline and check that it did.
     p.genesis_weights_hash_hex =
-        "dcef15a0a3f2d2187fe76d5f6fdcfca6224785040d555878ba6511771ca7d27b";
-    p.genesis_hash_hex = "a58d4d98771a942373094c5008ec803513185725b78a5fa4218e4e3a63561588";
+        "02d93e170fd9146e81db546ba3c9fcb7a2bb61176d61d7c6d0489df97636f0e6";
+    p.genesis_hash_hex = "4de7a5892d63aa450ce871f136b2a3d2edcda0012a33a3bd2dd82a914ff82576";
     p.policy_hash_hex = "8a3426b6eee6c16c4c9d13aa12dae5bfc66ada1353aa0625243faebcc26a4e74";
     return p;
 }
@@ -230,8 +231,8 @@ NetworkParams MakeTest() {
     // Differs from main despite the identical architecture: the network magic is
     // part of the descriptor, so the seed derived from it differs too.
     p.genesis_weights_hash_hex =
-        "d2d6683c43cef8c0337d0a788e73a7224ece693f4137ce381eebb0465781b28d";
-    p.genesis_hash_hex = "4b73e441aabd5753ddcb9b44822eb5fb14489b794ae95af074379e5074972ae2";
+        "2d234c4a31f1f93ac21ddf077e1c32cea4ed22d0d0436ab24699a336117466d5";
+    p.genesis_hash_hex = "761bd498548c4d0b5eb7654702f334603ae2c09afa9546fbac4f844594eb90f4";
     p.policy_hash_hex = "42b2726ab6163d8d1dc29b1ee532c36c13be4f3553e21482da7ff4bbed1e5546";
     return p;
 }
@@ -259,8 +260,8 @@ NetworkParams MakeRegtest() {
                           /*challenge_percent=*/100,   // verify everything in tests
                           /*challenge_deadline=*/2, /*retained=*/4, /*slash_quorum=*/1);
     p.genesis_weights_hash_hex =
-        "55341a2c5c05ce2bab43e24e09bf153ccb9be7c2f5158fbd89980c6ef2cbd7d4";
-    p.genesis_hash_hex = "29c86631c8a991646dac442788a6fdc88b6056434a0b9fbd5eaa8f2ff5c5ca3d";
+        "b5d6fcfdbe9b1bc939a53be6f9003aca909120ff0815a6638b11bb465c1bdf03";
+    p.genesis_hash_hex = "fddde8262c8d23c30e4c0352bc77c0c58ffdc1fed3a20134c9fda395218d4438";
     p.policy_hash_hex = "3ef13240e05e7346ad9c173b050a16711239d9a58c21a0b2cb777293994d34ac";
     return p;
 }
