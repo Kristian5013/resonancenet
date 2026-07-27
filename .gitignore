@@ -10,3 +10,4 @@ venv/
 .rnet/
 *.rnidx
 *.tmp
+.venv/
