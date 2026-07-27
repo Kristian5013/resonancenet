@@ -65,6 +65,8 @@ class Command(IntEnum):
     CHUNK = 10
     APPLY = 11
     APPLIED = 12
+    VERIFY = 13
+    VERDICT = 14
 
 
 class IpcError(Exception):
@@ -397,6 +399,81 @@ class Applied(Message):
                    optimizer_state_hash=r.hash())
 
 
+@dataclass(frozen=True)
+class Verify(Message):
+    """Replay somebody else's round and say whether it comes out the same.
+
+    Everything needed is here except the answer: whose work, from which
+    weights, for how long. The verifier derives the same batches from the same
+    schedule — that is what makes the data un-chooseable — retrains, and
+    compares its own payload hash against the claim.
+
+    The CLAIMED HASH is sent and the payload is not. A verifier that received
+    the payload could be fooled by one that hashes to the claim without being
+    what the worker computed; a verifier that computes its own and compares
+    hashes cannot. It also means a challenge costs a hash on the wire rather
+    than 400 MB.
+    """
+
+    COMMAND = Command.VERIFY
+    challenge_id: bytes = bytes(32)
+    target_worker_id: int = 0
+    round_id: int = 0
+    outer_step: int = 0
+    inner_steps: int = 0
+    micro_batch: int = 1
+    base_weights_hash: bytes = bytes(32)
+    claimed_payload_hash: bytes = bytes(32)
+    determinism_class: int = 0
+
+    def serialize(self, w: Writer) -> Writer:
+        return (w.hash(self.challenge_id).u64(self.target_worker_id)
+                 .u64(self.round_id).u64(self.outer_step)
+                 .u32(self.inner_steps).u32(self.micro_batch)
+                 .hash(self.base_weights_hash).hash(self.claimed_payload_hash)
+                 .u32(self.determinism_class))
+
+    @classmethod
+    def parse(cls, r: Reader) -> "Verify":
+        out = cls(challenge_id=r.hash(), target_worker_id=r.u64(),
+                  round_id=r.u64(), outer_step=r.u64(), inner_steps=r.u32(),
+                  micro_batch=r.u32(), base_weights_hash=r.hash(),
+                  claimed_payload_hash=r.hash(), determinism_class=r.u32())
+        if out.inner_steps == 0:
+            raise CanonError("verify: nothing to replay")
+        return out
+
+
+@dataclass(frozen=True)
+class Verdict(Message):
+    """What the replay found.
+
+    INDETERMINATE is not a failure to answer, it is an answer: a verifier that
+    could not reproduce the work because it does not hold the base weights, or
+    because it is in a different determinism class, must say so. Reporting
+    MISMATCH instead would slash an honest worker for the verifier's own
+    circumstances.
+    """
+
+    COMMAND = Command.VERDICT
+    challenge_id: bytes = bytes(32)
+    verdict: int = 0                    # consensus.objects.Verdict
+    replay_payload_hash: bytes = bytes(32)
+    determinism_class: int = 0
+    note: str = ""
+
+    def serialize(self, w: Writer) -> Writer:
+        return (w.hash(self.challenge_id).u16(self.verdict)
+                 .hash(self.replay_payload_hash).u32(self.determinism_class)
+                 .string(self.note[:MAX_REASON]))
+
+    @classmethod
+    def parse(cls, r: Reader) -> "Verdict":
+        return cls(challenge_id=r.hash(), verdict=r.u16(),
+                   replay_payload_hash=r.hash(), determinism_class=r.u32(),
+                   note=r.string(limit=MAX_REASON))
+
+
 CODECS: dict[Command, type[Message]] = {
     Command.HELLO: Hello,
     Command.WELCOME: Welcome,
@@ -410,6 +487,8 @@ CODECS: dict[Command, type[Message]] = {
     Command.CHUNK: Chunk,
     Command.APPLY: Apply,
     Command.APPLIED: Applied,
+    Command.VERIFY: Verify,
+    Command.VERDICT: Verdict,
 }
 
 

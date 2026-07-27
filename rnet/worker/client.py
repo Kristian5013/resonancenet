@@ -122,20 +122,29 @@ class DaemonClient:
         self.contribution_bits = reply.contribution_bits
         return reply
 
-    def next_work(self) -> ipc.Assignment | ipc.NoWork | ipc.Apply:
-        """Ask what to do next.
+    def next_work(self):
+        """Ask what to do next. Four answers, in priority order.
 
-        Three answers, not two: the daemon may hand back an Apply instead of an
-        Assignment when the round's quorum is met. Producing comes before more
-        training, because a round nobody applies is a round that never closes
-        and every worker would keep contributing to a step that can no longer
-        take them.
+        A Verify comes first — it is cheap against a round, it expires, and a
+        node that put training first would let every challenge lapse under load,
+        which is exactly when a cheat would choose to act. Then an Apply, because
+        a round nobody applies never closes. Then an Assignment. Then NoWork.
         """
         self._send(ipc.GetAssignment())
         reply = self._recv()
-        if isinstance(reply, (ipc.Assignment, ipc.NoWork, ipc.Apply)):
+        if isinstance(reply, (ipc.Assignment, ipc.NoWork, ipc.Apply, ipc.Verify)):
             return reply
         raise WorkerError(f"worker: expected work, got {type(reply).__name__}")
+
+    def verdict(self, message: ipc.Verdict) -> ipc.Accepted:
+        self._send(message)
+        reply = self._recv()
+        if isinstance(reply, ipc.Refused):
+            raise WorkerError(f"worker: verdict refused ({reply.code.name}): "
+                              f"{reply.reason}")
+        if not isinstance(reply, ipc.Accepted):
+            raise WorkerError(f"worker: expected accepted, got {type(reply).__name__}")
+        return reply
 
     def applied(self, outer_step: int, weights_hash: bytes,
                 optimizer_state_hash: bytes) -> ipc.Accepted:

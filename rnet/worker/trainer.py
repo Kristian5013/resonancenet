@@ -22,6 +22,7 @@ from ..model import weights as W
 from . import ipc
 from .client import AnchorMismatch, DaemonClient, WorkerError
 from .produce import Producer
+from .verify import replay
 
 
 @dataclass
@@ -77,6 +78,11 @@ def run(config: TrainerConfig, *, log=print) -> int:
                         grad_checkpointing=True)
         producer = Producer(spec)
         base_weights = W.save_weights(model)
+        # The base of the round most recently completed, which is what a
+        # challenge about that round has to be replayed against. One extra copy
+        # of the weights, and the alternative is fetching them back over a
+        # socket at the moment a challenge lands.
+        verify_base = None
         done = 0
 
         while config.rounds == 0 or done < config.rounds:
@@ -86,6 +92,24 @@ def run(config: TrainerConfig, *, log=print) -> int:
                 time.sleep(max(0.1, reply.retry_ms / 1000.0))
                 continue
 
+            if isinstance(reply, ipc.Verify):
+                started = time.time()
+                answer = replay(model, spec, numerics, reply,
+                                dataset_root=round_desc.dataset_root,
+                                base_weights=verify_base, device=config.device,
+                                lr=config.lr)
+                # Replaying leaves the model wherever the target's round ended.
+                # Put it back, or the next round would train from somebody
+                # else's weights.
+                W.load_weights(model, base_weights)
+                client.verdict(answer)
+                from ..consensus.objects import Verdict as Kind
+                log(f"verdict {Kind(answer.verdict).name} on "
+                    f"{reply.challenge_id.hex()[:16]}…"
+                    + (f" — {answer.note}" if answer.note else "")
+                    + f", {time.time() - started:.1f}s")
+                continue
+
             if isinstance(reply, ipc.Apply):
                 started = time.time()
                 result = producer.apply(model, reply,
@@ -93,7 +117,10 @@ def run(config: TrainerConfig, *, log=print) -> int:
                                         base_weights)
                 # The applied weights become the base for the next round, for
                 # every worker that applied — which is all of them, because
-                # DiLoCo's outer step is not the producer's privilege.
+                # DiLoCo's outer step is not the producer's privilege. The
+                # weights the round STARTED from are what a challenge about it
+                # will need.
+                verify_base = base_weights
                 base_weights = W.save_weights(model)
                 client.applied(reply.outer_step, result.weights_hash,
                                result.optimizer_state_hash)

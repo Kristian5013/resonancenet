@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import os
 import socket
 import struct
@@ -75,6 +76,14 @@ class WorkerService:
     _applied_at: dict = field(default_factory=dict)
     # outer_step -> the Apply every attached worker still owes
     _pending_apply: dict = field(default_factory=dict)
+    # challenge_id -> the Verify some worker still owes, and what it is about
+    _pending_verify: dict = field(default_factory=dict)
+    _verify_done: set = field(default_factory=set)
+    # contribution_id -> its header, kept while a challenge about it is open
+    _contribution_headers: dict = field(default_factory=dict)
+    challenged: int = 0
+    verdicts: int = 0
+    mismatches: int = 0
 
     _server: object = None
     _next_worker_id: int = 1
@@ -236,6 +245,8 @@ class WorkerService:
             await self._on_get_chunk(conn, message)
         elif isinstance(message, ipc.Applied):
             await self._on_applied(conn, message)
+        elif isinstance(message, ipc.Verdict):
+            await self._on_verdict(conn, message)
         elif isinstance(message, ipc.Hello):
             raise ipc.IpcError("ipc: a second hello")
 
@@ -243,14 +254,34 @@ class WorkerService:
         head = self.chain.head
         outer_step = head.height + 1
 
-        # Anything already aggregated that THIS worker has not applied comes
-        # first, whatever step it belongs to. A worker that skipped an outer
-        # step holds weights the rest of the network has moved past, and would
-        # spend the next round training from them.
+        # Applying comes first, and the order matters more than it looks.
+        #
+        # A verifier replays against the weights the challenged round STARTED
+        # from, and a worker only holds those once it has applied that round's
+        # outer step — applying is what moves the previous base into the slot a
+        # challenge needs. Handing out a challenge first therefore asks a worker
+        # to judge a round it has not caught up to, and the honest answer is
+        # INDETERMINATE. Measured: with the checks the other way round, whether
+        # a challenge could be answered depended on which worker happened to
+        # report first. Proved by
+        # WorkerServiceTests.ApplyingComesBeforeAnyChallenge.
         for step in sorted(self._pending_apply):
             if conn.worker_id not in self._applied_at.get(step, {}):
                 await self._send(conn, self._pending_apply[step])
                 return
+
+        # Then a challenge, ahead of more training: it is cheap against a round,
+        # it expires, and a node that put training first would let every
+        # challenge lapse under load — which is exactly when a cheat would
+        # choose to act.
+        for challenge_id, (verify, _) in list(self._pending_verify.items()):
+            if (challenge_id, conn.worker_id) in self._verify_done:
+                continue
+            if verify.target_worker_id == conn.worker_id:
+                continue        # nobody audits their own work
+            self._verify_done.add((challenge_id, conn.worker_id))
+            await self._send(conn, verify)
+            return
 
         # Production comes before more training. A round whose quorum is met and
         # which nobody applies is a round that never closes, and every worker
@@ -367,14 +398,110 @@ class WorkerService:
             del self.contributions[key]
 
         if self.service is not None:
-            self.service.node.height = self.chain.height
+            # Suppressed together. Relaying is best-effort by construction, and
+            # a failure to announce a checkpoint must not tear down the worker
+            # connection that produced it — the checkpoint is on the chain
+            # either way, and the worker has done nothing wrong.
             with contextlib.suppress(Exception):
+                self.service.node.height = self.chain.height
                 self.service.publish(header)
         self._log(f"step {message.outer_step}: checkpoint {header.id.hex()[:16]} "
                   f"({outcome.value}), weights {message.weights_hash.hex()[:16]}, "
                   f"{len(parts)} contribution(s)")
         self._retire_applied()
+        self._issue_challenges(header)
         await self._send(conn, ipc.Accepted(contribution_id=header.id))
+
+    def _issue_challenges(self, checkpoint) -> None:
+        """Decide which of this checkpoint's contributions get replayed.
+
+        Derived from the checkpoint id and each contribution id, so nobody
+        chooses: not the producer, not the verifier, not the worker being
+        checked. The checkpoint id is a hash over all of them and does not exist
+        until they all do, so no worker can steer whether it is picked.
+        """
+        from ..verification.select import should_challenge
+
+        percent = self.policy.challenge_percent
+        deadline = checkpoint.outer_step + self.policy.challenge_deadline_steps
+        for contribution_id in self._contribution_ids(checkpoint.outer_step):
+            if not should_challenge(checkpoint.id, contribution_id, percent):
+                continue
+            header = self._contribution_headers.get(contribution_id)
+            if header is None:
+                continue
+            challenge_id = hashlib.sha3_256(
+                b"rnet/challenge-id/v1" + checkpoint.id + contribution_id).digest()
+            self._pending_verify[challenge_id] = (ipc.Verify(
+                challenge_id=challenge_id,
+                target_worker_id=header.worker_id,
+                round_id=header.round_id,
+                outer_step=header.outer_step,
+                inner_steps=self.policy.inner_steps,
+                micro_batch=self.policy.micro_batch,
+                base_weights_hash=header.base_weights_hash,
+                claimed_payload_hash=header.payload_hash,
+                determinism_class=self.round_desc.numerics.determinism_class,
+            ), deadline)
+            self.challenged += 1
+            self._log(f"step {checkpoint.outer_step}: challenging "
+                      f"{contribution_id.hex()[:16]} from worker "
+                      f"{header.worker_id}")
+
+    async def _on_verdict(self, conn: WorkerConn, message: ipc.Verdict) -> None:
+        from ..consensus.objects import VerificationVerdict, Verdict as Kind
+
+        entry = self._pending_verify.get(message.challenge_id)
+        if entry is None:
+            await self._refuse(conn, ipc.Refusal.UNKNOWN_ASSIGNMENT,
+                               "no challenge by that id is open here")
+            return
+        try:
+            kind = Kind(message.verdict)
+        except ValueError:
+            await self._refuse(conn, ipc.Refusal.BAD_PAYLOAD,
+                               f"unknown verdict {message.verdict}")
+            return
+
+        self.verdicts += 1
+        if kind is Kind.MISMATCH:
+            self.mismatches += 1
+
+        verdict = VerificationVerdict(
+            challenge_id=message.challenge_id, verifier_id=conn.worker_id,
+            verdict=kind, replay_payload_hash=message.replay_payload_hash,
+            determinism_class=message.determinism_class)
+        if self.service is not None:
+            with contextlib.suppress(Exception):
+                self.service.publish(verdict)
+
+        shadow = " (shadow mode: recorded, nothing punished)" \
+            if self.policy.shadow_mode else ""
+        self._log(f"verdict {kind.name} from worker {conn.worker_id} on "
+                  f"{message.challenge_id.hex()[:16]}"
+                  + (f": {message.note}" if message.note else "") + shadow)
+
+        # An indeterminate answer leaves the challenge open for somebody who
+        # CAN judge it. Closing it would let a verifier retire a challenge by
+        # being unable to answer, which is the cheapest way to protect a friend.
+        if kind is not Kind.INDETERMINATE:
+            del self._pending_verify[message.challenge_id]
+        await self._send(conn, ipc.Accepted(contribution_id=message.challenge_id))
+
+    def expire_challenges(self) -> int:
+        """Drop challenges past their deadline.
+
+        The policy guarantees the deadline falls while the weights needed to
+        answer are still retained, so a challenge that expires is one nobody
+        able to judge it chose to.
+        """
+        height = self.chain.height
+        stale = [c for c, (_, deadline) in self._pending_verify.items()
+                 if deadline < height]
+        for challenge_id in stale:
+            del self._pending_verify[challenge_id]
+            self._log(f"challenge {challenge_id.hex()[:16]} expired unanswered")
+        return len(stale)
 
     def _retire_applied(self) -> None:
         """Drop an Apply once every attached worker has taken it.
@@ -441,6 +568,7 @@ class WorkerService:
             worker_id=conn.worker_id)
         del conn.assignments[message.assignment_id]
         self._headers.append((assignment.outer_step, header.id))
+        self._contribution_headers[header.id] = header
         conn.submitted += 1
         self.accepted += 1
 
@@ -486,10 +614,14 @@ class WorkerService:
         return len(self.contributions_at(outer_step)) >= self.policy.min_contributors
 
     def status(self) -> str:
-        return (f"workers {len(self.workers)} — {self.accepted} accepted, "
+        line = (f"workers {len(self.workers)} — {self.accepted} accepted, "
                 f"{self.refused} refused, {self.deferred} deferred, "
                 f"{self.produced} produced — "
                 f"{len(self.contributions)} contribution(s) held")
+        if self.challenged:
+            line += (f" — {self.challenged} challenged, {self.verdicts} judged"
+                     + (f", {self.mismatches} MISMATCH" if self.mismatches else ""))
+        return line
 
 
 def _payload_hash(values: np.ndarray, scale_exp: int) -> bytes:

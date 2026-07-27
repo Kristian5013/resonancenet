@@ -66,6 +66,13 @@ class WorkerIpcTests(unittest.TestCase):
                 lr_q16=45875, nesterov=True, packed=b"\x01" * 8),
             ipc.Command.APPLIED: ipc.Applied(
                 outer_step=1, weights_hash=h[0], optimizer_state_hash=h[1]),
+            ipc.Command.VERIFY: ipc.Verify(
+                challenge_id=h[0], target_worker_id=2, round_id=0, outer_step=1,
+                inner_steps=4, micro_batch=1, base_weights_hash=h[1],
+                claimed_payload_hash=h[2], determinism_class=0xDF7C5208),
+            ipc.Command.VERDICT: ipc.Verdict(
+                challenge_id=h[0], verdict=1, replay_payload_hash=h[1],
+                determinism_class=0xDF7C5208, note=""),
         }
 
     def test_EveryCommandHasACodec(self):
@@ -466,6 +473,139 @@ class WorkerServiceTests(unittest.IsolatedAsyncioTestCase):
         # And the channel is still usable: one message, one reply, no drift.
         self.assertIsInstance(await self.in_thread(client.next_work),
                               ipc.Assignment)
+
+    # -- verification -----------------------------------------------------------
+
+    async def close_a_round(self, clients):
+        """Drive step 1 to a checkpoint so its challenges get issued."""
+        for client in clients:
+            work = await self.in_thread(client.next_work)
+            self.assertIsInstance(work, ipc.Apply)
+            await self.in_thread(client.applied, work.outer_step,
+                                 bytes([5]) * 32, bytes([6]) * 32)
+
+    async def test_ApplyingComesBeforeAnyChallenge(self):
+        """A verifier replays against the weights the challenged round STARTED
+        from, and only holds those once it has applied that round's outer step.
+        With the checks the other way round, whether a challenge could be
+        answered at all depended on which worker happened to report first —
+        measured, as a run of INDETERMINATE verdicts."""
+        clients = await self.two_contributions()
+        # Force every contribution to be challenged, so the ordering is what is
+        # under test rather than the draw.
+        self.service.policy = type(self.policy)(
+            **{**self.policy.__dict__, "challenge_percent": 100})
+
+        first = await self.in_thread(clients[0].next_work)
+        self.assertIsInstance(first, ipc.Apply)
+        await self.in_thread(clients[0].applied, first.outer_step,
+                             bytes([5]) * 32, bytes([6]) * 32)
+        self.assertGreater(self.service.challenged, 0)
+
+        # The other worker has not applied yet, so it gets the Apply, not a
+        # challenge it could only answer INDETERMINATE.
+        second = await self.in_thread(clients[1].next_work)
+        self.assertIsInstance(second, ipc.Apply)
+        await self.in_thread(clients[1].applied, second.outer_step,
+                             bytes([5]) * 32, bytes([6]) * 32)
+        third = await self.in_thread(clients[1].next_work)
+        self.assertIsInstance(third, ipc.Verify)
+
+    async def test_ChallengesAreIssuedAtTheCheckpoint(self):
+        clients = await self.two_contributions()
+        self.service.policy = type(self.policy)(
+            **{**self.policy.__dict__, "challenge_percent": 100})
+        await self.close_a_round(clients)
+        self.assertEqual(self.service.challenged, 2)
+        self.assertEqual(len(self.service._pending_verify), 2)
+
+    async def test_NobodyAuditsTheirOwnWork(self):
+        clients = await self.two_contributions()
+        self.service.policy = type(self.policy)(
+            **{**self.policy.__dict__, "challenge_percent": 100})
+        await self.close_a_round(clients)
+        for i, client in enumerate(clients):
+            work = await self.in_thread(client.next_work)
+            if isinstance(work, ipc.Verify):
+                self.assertNotEqual(work.target_worker_id, client.worker_id)
+
+    async def test_AVerdictBecomesAPublishedObject(self):
+        published = []
+
+        class FakeService:
+            node = type("N", (), {"height": 0})()
+
+            def publish(self, obj):
+                published.append(obj)
+                return 1
+
+        self.service.service = FakeService()
+        clients = await self.two_contributions()
+        self.service.policy = type(self.policy)(
+            **{**self.policy.__dict__, "challenge_percent": 100})
+        await self.close_a_round(clients)
+
+        work = await self.in_thread(clients[0].next_work)
+        self.assertIsInstance(work, ipc.Verify)
+        await self.in_thread(clients[0].verdict, ipc.Verdict(
+            challenge_id=work.challenge_id, verdict=1,
+            replay_payload_hash=bytes([7]) * 32,
+            determinism_class=work.determinism_class))
+        self.assertEqual(self.service.verdicts, 1)
+        self.assertEqual(self.service.mismatches, 0)
+        self.assertTrue(published)
+
+    async def test_AMismatchIsCounted(self):
+        clients = await self.two_contributions()
+        self.service.policy = type(self.policy)(
+            **{**self.policy.__dict__, "challenge_percent": 100})
+        await self.close_a_round(clients)
+        work = await self.in_thread(clients[0].next_work)
+        await self.in_thread(clients[0].verdict, ipc.Verdict(
+            challenge_id=work.challenge_id, verdict=2,
+            replay_payload_hash=bytes([7]) * 32,
+            determinism_class=work.determinism_class))
+        self.assertEqual(self.service.mismatches, 1)
+        self.assertNotIn(work.challenge_id, self.service._pending_verify)
+
+    async def test_IndeterminateLeavesTheChallengeOpen(self):
+        """Otherwise a verifier retires a challenge by being unable to answer
+        it, which is the cheapest way to protect a friend."""
+        clients = await self.two_contributions()
+        self.service.policy = type(self.policy)(
+            **{**self.policy.__dict__, "challenge_percent": 100})
+        await self.close_a_round(clients)
+        work = await self.in_thread(clients[0].next_work)
+        await self.in_thread(clients[0].verdict, ipc.Verdict(
+            challenge_id=work.challenge_id, verdict=3,
+            replay_payload_hash=bytes(32),
+            determinism_class=work.determinism_class,
+            note="different class"))
+        self.assertIn(work.challenge_id, self.service._pending_verify)
+
+    async def test_AnUnknownChallengeIsRefused(self):
+        client = self.client()
+        await self.in_thread(client.hello)
+        with self.assertRaises(WorkerError) as ctx:
+            await self.in_thread(client.verdict, ipc.Verdict(
+                challenge_id=bytes([9]) * 32, verdict=1,
+                replay_payload_hash=bytes([7]) * 32, determinism_class=0))
+        self.assertIn("UNKNOWN_ASSIGNMENT", str(ctx.exception))
+
+    async def test_ChallengesExpire(self):
+        """The policy guarantees the deadline falls while the weights needed to
+        answer are still retained, so one that expires is one nobody able to
+        judge it chose to."""
+        clients = await self.two_contributions()
+        self.service.policy = type(self.policy)(
+            **{**self.policy.__dict__, "challenge_percent": 100})
+        await self.close_a_round(clients)
+        self.assertEqual(self.service.expire_challenges(), 0)
+        for challenge_id in list(self.service._pending_verify):
+            verify, _ = self.service._pending_verify[challenge_id]
+            self.service._pending_verify[challenge_id] = (verify, -1)
+        self.assertEqual(self.service.expire_challenges(), 2)
+        self.assertEqual(self.service._pending_verify, {})
 
     async def test_TheStatusLineNamesWhatMatters(self):
         client = self.client()
