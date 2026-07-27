@@ -27,11 +27,14 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 
 from ..canon.stream import CanonError, Reader, Writer
+from . import framing
 from .address import NetAddress, Services, TimestampedAddress
 
 PROTOCOL_VERSION = 2
 
-HEADER_SIZE = 4 + 2 + 4 + 4
+# Framing itself lives in framing.py, shared with the worker channel: two
+# layouts would mean two places to get a length check wrong.
+HEADER_SIZE = framing.HEADER_SIZE
 
 # Nothing this protocol says is large. Bulk — weights, corpus chunks — moves in
 # explicitly chunked messages, so the ceiling is about what a header may claim,
@@ -96,59 +99,30 @@ class ProtocolError(Exception):
     """A peer said something that ends the conversation."""
 
 
-# ---------------------------------------------------------------------------
-# Framing
-# ---------------------------------------------------------------------------
-
-def checksum(payload: bytes) -> int:
-    return int.from_bytes(hashlib.sha3_256(payload).digest()[:4], "big")
+Header = framing.Header
+checksum = framing.checksum
 
 
 def frame(magic: int, command: Command, payload: bytes) -> bytes:
-    if len(payload) > MAX_PAYLOAD:
-        raise ProtocolError(
-            f"wire: a {len(payload)}-byte payload exceeds the {MAX_PAYLOAD} limit")
-    return (Writer().u32(magic).u16(command).u32(len(payload))
-            .u32(checksum(payload)).raw(payload).take())
-
-
-@dataclass(frozen=True)
-class Header:
-    magic: int
-    command: Command
-    length: int
-    checksum: int
+    try:
+        return framing.frame(magic, command, payload, max_payload=MAX_PAYLOAD)
+    except framing.FramingError as exc:
+        raise ProtocolError(str(exc)) from exc
 
 
 def parse_header(raw: bytes, expected_magic: int) -> Header:
-    """Read the fourteen fixed bytes, and refuse before any body is read."""
-    if len(raw) != HEADER_SIZE:
-        raise ProtocolError(f"wire: a header is {HEADER_SIZE} bytes, got {len(raw)}")
-    r = Reader(raw)
-    magic = r.u32()
-    if magic != expected_magic:
-        raise ProtocolError(
-            f"wire: magic {magic:#010x} is not this network's {expected_magic:#010x}")
     try:
-        command = Command(r.u16())
-    except ValueError as exc:
-        raise ProtocolError(f"wire: unknown command ({exc})") from exc
-    length = r.u32()
-    if length > MAX_PAYLOAD:
-        # Before the body. This is the whole reason the length is in a
-        # fixed-width header rather than inline with the data.
-        raise ProtocolError(
-            f"wire: {command.name} claims {length} bytes, over the {MAX_PAYLOAD} limit")
-    return Header(magic, command, length, r.u32())
+        return framing.parse_header(raw, expected_magic, Command,
+                                    max_payload=MAX_PAYLOAD)
+    except framing.FramingError as exc:
+        raise ProtocolError(str(exc)) from exc
 
 
 def check_payload(header: Header, payload: bytes) -> None:
-    if len(payload) != header.length:
-        raise ProtocolError(
-            f"wire: {header.command.name} declared {header.length} bytes, got "
-            f"{len(payload)}")
-    if checksum(payload) != header.checksum:
-        raise ProtocolError(f"wire: {header.command.name} failed its checksum")
+    try:
+        framing.check_payload(header, payload)
+    except framing.FramingError as exc:
+        raise ProtocolError(str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------

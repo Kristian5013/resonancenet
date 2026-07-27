@@ -68,6 +68,22 @@ def cmd_daemon(args) -> int:
         return 0
 
 
+def cmd_train(args) -> int:
+    """Attach a worker to the local daemon and train for it."""
+    from .worker.trainer import TrainerConfig, run
+    from .worker.client import WorkerError
+    try:
+        return run(TrainerConfig(
+            network=args.network, datadir=args.datadir or "", device=args.device,
+            lr=args.lr, rounds=args.rounds))
+    except WorkerError as exc:
+        print(f"rnet: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\nrnet: stopped")
+        return 0
+
+
 def cmd_genesis_weights(args) -> int:
     """Derive the initial weights and check them against the anchor.
 
@@ -138,6 +154,15 @@ def main(argv: list[str] | None = None) -> int:
     daemon.add_argument("--status-interval", type=float, default=60.0,
                         metavar="SECONDS")
     daemon.set_defaults(fn=cmd_daemon)
+
+    train = sub.add_parser("train", help="attach a worker to the local daemon")
+    train.add_argument("--network", default="regtest")
+    train.add_argument("--datadir", default=None)
+    train.add_argument("--device", default="cuda")
+    train.add_argument("--lr", type=float, default=1e-3)
+    train.add_argument("--rounds", type=int, default=0,
+                       help="0 means until stopped")
+    train.set_defaults(fn=cmd_train)
 
     show = sub.add_parser("genesis-show", help="what this build believes each network is")
     show.add_argument("networks", nargs="*")

@@ -123,6 +123,7 @@ class Daemon:
     config: DaemonConfig
     node: Node = None
     service: Service = None
+    workers: object = None
     started_at: float = field(default_factory=time.monotonic)
     _stopping: asyncio.Event = None
     _log = print
@@ -180,6 +181,12 @@ class Daemon:
         self.service.install()
         self.node.height = chain.height
 
+        from .workerservice import WorkerService
+        self.workers = WorkerService(
+            datadir=datadir, round_desc=round_desc, policy=policy, chain=chain,
+            service=self.service)
+        self.workers._log = self._log
+
     # -- running ---------------------------------------------------------------
 
     async def run(self) -> int:
@@ -189,7 +196,9 @@ class Daemon:
         self._stopping = asyncio.Event()
 
         bound = await self.node.start()
+        worker_socket = await self.workers.start()
         self._log(f"rnet {network}: listening on {', '.join(bound) or 'nothing'}")
+        self._log(f"  workers  {worker_socket}")
         self._log(f"  datadir  {datadir}")
         self._log(f"  genesis  {genesis_module.GENESIS_HASH[network][:32]}…")
         self._log(f"  weights  {genesis_module.WEIGHTS_HASH[network][:32]}…")
@@ -243,6 +252,8 @@ class Daemon:
             self._log(f"rnet: saved {saved} addresses")
         except OSError as exc:
             self._log(f"rnet: could not save addresses: {exc}")
+        if self.workers is not None:
+            await self.workers.stop()
         await self.node.stop()
         self._log("rnet: stopped")
 
@@ -253,8 +264,11 @@ class Daemon:
 
     def status(self) -> str:
         uptime = time.monotonic() - self.started_at
-        return (f"[{uptime / 60:6.1f}m] {self.node.status()} | "
+        line = (f"[{uptime / 60:6.1f}m] {self.node.status()} | "
                 f"{self.service.status()}")
+        if self.workers is not None and self.workers.workers:
+            line += f" | {self.workers.status()}"
+        return line
 
     def peer_lines(self) -> list[str]:
         return [f"  {p.describe()}" for p in self.node.peers.values()]
