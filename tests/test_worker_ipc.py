@@ -61,6 +61,11 @@ class WorkerIpcTests(unittest.TestCase):
                                              reason="the chain moved on"),
             ipc.Command.GET_CHUNK: ipc.GetChunk(index=6_956_932),
             ipc.Command.CHUNK: ipc.Chunk(index=5, data=b"document text\n\n"),
+            ipc.Command.APPLY: ipc.Apply(
+                outer_step=1, scale_exp=-17, value_count=8, momentum_q16=58982,
+                lr_q16=45875, nesterov=True, packed=b"\x01" * 8),
+            ipc.Command.APPLIED: ipc.Applied(
+                outer_step=1, weights_hash=h[0], optimizer_state_hash=h[1]),
         }
 
     def test_EveryCommandHasACodec(self):
@@ -189,7 +194,7 @@ class WorkerServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_AnAssignmentNamesTheHead(self):
         client = self.client()
         await self.in_thread(client.hello)
-        assignment = await self.in_thread(client.get_assignment)
+        assignment = await self.in_thread(client.next_work)
         self.assertIsInstance(assignment, ipc.Assignment)
         self.assertEqual(assignment.outer_step, 1)
         self.assertEqual(assignment.base_checkpoint, self.chain.head.id)
@@ -202,9 +207,9 @@ class WorkerServiceTests(unittest.IsolatedAsyncioTestCase):
         step, so the second run trains on exactly the data the first did."""
         client = self.client()
         await self.in_thread(client.hello)
-        first = await self.in_thread(client.get_assignment)
+        first = await self.in_thread(client.next_work)
         self.assertIsInstance(first, ipc.Assignment)
-        second = await self.in_thread(client.get_assignment)
+        second = await self.in_thread(client.next_work)
         self.assertIsInstance(second, ipc.NoWork)
         self.assertIn("already hold", second.reason)
 
@@ -212,8 +217,8 @@ class WorkerServiceTests(unittest.IsolatedAsyncioTestCase):
         a, b = self.client(), self.client()
         await self.in_thread(a.hello)
         await self.in_thread(b.hello)
-        first = await self.in_thread(a.get_assignment)
-        second = await self.in_thread(b.get_assignment)
+        first = await self.in_thread(a.next_work)
+        second = await self.in_thread(b.next_work)
         self.assertNotEqual(first.assignment_id, second.assignment_id)
         self.assertEqual(first.outer_step, second.outer_step)
 
@@ -227,7 +232,7 @@ class WorkerServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_AGoodSubmissionIsAccepted(self):
         client = self.client()
         await self.in_thread(client.hello)
-        assignment = await self.in_thread(client.get_assignment)
+        assignment = await self.in_thread(client.next_work)
         count = self.round_desc.model.parameter_count()
         packed, exp = self.contribution(count)
         accepted = await self.in_thread(
@@ -239,12 +244,12 @@ class WorkerServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_AWorkerCannotContributeTwiceToOneStep(self):
         client = self.client()
         await self.in_thread(client.hello)
-        assignment = await self.in_thread(client.get_assignment)
+        assignment = await self.in_thread(client.next_work)
         count = self.round_desc.model.parameter_count()
         packed, exp = self.contribution(count)
         await self.in_thread(client.submit, assignment.assignment_id, packed,
                              exp, count, 5.68)
-        again = await self.in_thread(client.get_assignment)
+        again = await self.in_thread(client.next_work)
         self.assertIsInstance(again, ipc.NoWork)
         self.assertIn("already contributed", again.reason)
 
@@ -260,7 +265,7 @@ class WorkerServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_AWrongValueCountIsRefused(self):
         client = self.client()
         await self.in_thread(client.hello)
-        assignment = await self.in_thread(client.get_assignment)
+        assignment = await self.in_thread(client.next_work)
         packed, exp = self.contribution(64)
         with self.assertRaises(WorkerError) as ctx:
             await self.in_thread(client.submit, assignment.assignment_id,
@@ -270,7 +275,7 @@ class WorkerServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_AWrongByteCountIsRefused(self):
         client = self.client()
         await self.in_thread(client.hello)
-        assignment = await self.in_thread(client.get_assignment)
+        assignment = await self.in_thread(client.next_work)
         count = self.round_desc.model.parameter_count()
         with self.assertRaises(WorkerError) as ctx:
             await self.in_thread(client.submit, assignment.assignment_id,
@@ -282,7 +287,7 @@ class WorkerServiceTests(unittest.IsolatedAsyncioTestCase):
         whoever reads the log."""
         client = self.client()
         await self.in_thread(client.hello)
-        assignment = await self.in_thread(client.get_assignment)
+        assignment = await self.in_thread(client.next_work)
         moved = CheckpointHeader(
             round_id=0, outer_step=1, parent=self.chain.head.id,
             weights_hash=bytes([7]) * 32, optimizer_state_hash=bytes([8]) * 32,
@@ -344,6 +349,123 @@ class WorkerServiceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(WorkerError) as ctx:
             await self.in_thread(extra.hello)
         self.assertIn("already serves", str(ctx.exception))
+
+    # -- production ------------------------------------------------------------
+
+    async def two_contributions(self):
+        """Two workers, both contributed to step 1, quorum met."""
+        count = self.round_desc.model.parameter_count()
+        clients = []
+        for seed in (0, 1):
+            client = self.client()
+            await self.in_thread(client.hello)
+            assignment = await self.in_thread(client.next_work)
+            packed, exp = self.contribution(count, seed)
+            await self.in_thread(client.submit, assignment.assignment_id,
+                                 packed, exp, count, 5.7)
+            clients.append(client)
+        return clients
+
+    async def test_TheQuorumTurnsIntoAnApply(self):
+        clients = await self.two_contributions()
+        self.assertTrue(self.service.ready_to_produce(1))
+        work = await self.in_thread(clients[0].next_work)
+        self.assertIsInstance(work, ipc.Apply)
+        self.assertEqual(work.outer_step, 1)
+        self.assertEqual(work.value_count,
+                         self.round_desc.model.parameter_count())
+        self.assertEqual(work.momentum_q16, self.policy.outer_momentum_q16)
+
+    def test_TheAggregateFitsTheContributionFormat(self):
+        """Why the aggregate can ride back at int8 instead of int64: each part
+        is within the format after alignment, a sum of n is within n times it,
+        and the mean is within it again. 400 MB instead of 3.2 GB."""
+        from rnet.diloco.aggregate import Contribution, average_contributions
+        fmt = ContributionFormat.INT8_POW2
+        from rnet.diloco.aggregate import MAX_ALIGN_SHIFT
+        rng = np.random.default_rng(0)
+        for n in (2, 3, 8, 50):
+            # Spreads within the alignment rule; wider than MAX_ALIGN_SHIFT is
+            # refused outright as a different quantity, not aggregated.
+            spread = [(i * MAX_ALIGN_SHIFT) // max(1, n - 1) for i in range(n)]
+            for exponents in ([0] * n, spread, [-e for e in spread]):
+                parts = [
+                    Contribution(
+                        values=rng.integers(-fmt.max_magnitude,
+                                            fmt.max_magnitude + 1, 64),
+                        scale_exp=e, fmt=fmt, worker_id=i)
+                    for i, e in enumerate(exponents)]
+                mean, _ = average_contributions(parts)
+                self.assertLessEqual(int(np.abs(mean).max()), fmt.max_magnitude,
+                                     f"{n} parts at {exponents[:3]}…")
+
+    async def test_EveryWorkerIsHandedTheApplyWhenItAsks(self):
+        """Not pushed. This channel is strict request-and-response, so an
+        unsolicited message lands in the middle of another exchange and
+        desynchronises it — measured as `expected accepted, got NoWork` on a
+        worker that had submitted perfectly correctly."""
+        clients = await self.two_contributions()
+        for client in clients:
+            work = await self.in_thread(client.next_work)
+            self.assertIsInstance(work, ipc.Apply)
+            self.assertEqual(work.outer_step, 1)
+
+    async def test_AnAppliedReportBuildsTheCheckpoint(self):
+        clients = await self.two_contributions()
+        work = await self.in_thread(clients[0].next_work)
+        weights = bytes([5]) * 32
+        optimizer = bytes([6]) * 32
+        accepted = await self.in_thread(clients[0].applied, work.outer_step,
+                                        weights, optimizer)
+        self.assertEqual(len(accepted.contribution_id), 32)
+        self.assertEqual(self.chain.height, 1)
+        head = self.chain.head.header
+        self.assertEqual(head.weights_hash, weights)
+        self.assertEqual(head.optimizer_state_hash, optimizer)
+        self.assertEqual(head.outer_step, 1)
+        self.assertEqual(self.service.produced, 1)
+
+    async def test_TheContributionsAreSpent(self):
+        """Keeping them would let the next round aggregate work already
+        applied."""
+        clients = await self.two_contributions()
+        work = await self.in_thread(clients[0].next_work)
+        await self.in_thread(clients[0].applied, work.outer_step,
+                             bytes([5]) * 32, bytes([6]) * 32)
+        self.assertEqual(self.service.contributions_at(1), [])
+
+    async def test_TheSecondApplierDoesNotBuildASecondCheckpoint(self):
+        clients = await self.two_contributions()
+        for client in clients:
+            work = await self.in_thread(client.next_work)
+            self.assertIsInstance(work, ipc.Apply)
+            await self.in_thread(client.applied, work.outer_step,
+                                 bytes([5]) * 32, bytes([6]) * 32)
+        self.assertEqual(self.chain.height, 1)
+        self.assertEqual(self.service.produced, 1)
+
+    async def test_DisagreeingWorkersAreShoutedAbout(self):
+        """Same aggregate, same base, integer arithmetic — a disagreement is
+        this node's own workers computing differently, which is worth saying
+        loudly rather than resolving quietly."""
+        said = []
+        self.service._log = lambda *a: said.append(" ".join(str(x) for x in a))
+        clients = await self.two_contributions()
+        for i, client in enumerate(clients):
+            work = await self.in_thread(client.next_work)
+            await self.in_thread(client.applied, work.outer_step,
+                                 bytes([5 + i]) * 32, bytes([6]) * 32)
+        self.assertTrue(any("DISAGREE" in line for line in said), said)
+
+    async def test_AnUnaskedAppliedIsRefused(self):
+        client = self.client()
+        await self.in_thread(client.hello)
+        with self.assertRaises(WorkerError) as ctx:
+            await self.in_thread(client.applied, 7, bytes(32), bytes(32))
+        self.assertIn("UNKNOWN_ASSIGNMENT", str(ctx.exception))
+        # And the channel is still usable: one message, one reply, no drift.
+        self.assertIsInstance(await self.in_thread(client.next_work),
+                              ipc.Assignment)
 
     async def test_TheStatusLineNamesWhatMatters(self):
         client = self.client()

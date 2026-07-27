@@ -63,6 +63,8 @@ class Command(IntEnum):
     REFUSED = 8
     GET_CHUNK = 9
     CHUNK = 10
+    APPLY = 11
+    APPLIED = 12
 
 
 class IpcError(Exception):
@@ -329,6 +331,72 @@ class Chunk(Message):
         return cls(index=r.u64(), data=r.blob(limit=MAX_IPC_PAYLOAD))
 
 
+@dataclass(frozen=True)
+class Apply(Message):
+    """Produce: apply this aggregate and tell me what the weights became.
+
+    The daemon holds no weights and no optimizer state — a relay node runs on a
+    machine with no GPU and must not carry 3.2 GB of momentum for a model it
+    cannot evaluate — so the outer step happens where the weights already are.
+    The daemon supplies what consensus decided (the aggregate, the rates), the
+    worker supplies the arithmetic, and the result is checkable by anyone who
+    holds the same inputs.
+
+    The aggregate travels at the round's CONTRIBUTION width, not at int64. Each
+    contribution is within ±max_magnitude after alignment, a sum of n is within
+    ±n·max, and the mean is within ±max again — so the average fits exactly the
+    format the parts arrived in. That is 400 MB instead of 3.2 GB for the dense
+    model. Proved by WorkerIpcTests.TheAggregateFitsTheContributionFormat.
+    """
+
+    COMMAND = Command.APPLY
+    outer_step: int = 0
+    scale_exp: int = 0
+    value_count: int = 0
+    momentum_q16: int = 0
+    lr_q16: int = 0
+    nesterov: bool = True
+    packed: bytes = b""
+
+    def serialize(self, w: Writer) -> Writer:
+        return (w.u64(self.outer_step).i64(self.scale_exp).u64(self.value_count)
+                 .u32(self.momentum_q16).u32(self.lr_q16).boolean(self.nesterov)
+                 .blob(self.packed))
+
+    @classmethod
+    def parse(cls, r: Reader) -> "Apply":
+        out = cls(outer_step=r.u64(), scale_exp=r.i64(), value_count=r.u64(),
+                  momentum_q16=r.u32(), lr_q16=r.u32(), nesterov=r.boolean(),
+                  packed=r.blob(limit=MAX_IPC_PAYLOAD))
+        if out.value_count == 0:
+            raise CanonError("apply: an empty update is not an update")
+        return out
+
+
+@dataclass(frozen=True)
+class Applied(Message):
+    """What the weights and the optimizer became.
+
+    Both hashes, because a checkpoint commits to both: two producers who
+    applied the same contributions to different momentum would otherwise agree
+    about the weights and disagree about everything after.
+    """
+
+    COMMAND = Command.APPLIED
+    outer_step: int = 0
+    weights_hash: bytes = bytes(32)
+    optimizer_state_hash: bytes = bytes(32)
+
+    def serialize(self, w: Writer) -> Writer:
+        return (w.u64(self.outer_step).hash(self.weights_hash)
+                 .hash(self.optimizer_state_hash))
+
+    @classmethod
+    def parse(cls, r: Reader) -> "Applied":
+        return cls(outer_step=r.u64(), weights_hash=r.hash(),
+                   optimizer_state_hash=r.hash())
+
+
 CODECS: dict[Command, type[Message]] = {
     Command.HELLO: Hello,
     Command.WELCOME: Welcome,
@@ -340,6 +408,8 @@ CODECS: dict[Command, type[Message]] = {
     Command.REFUSED: Refused,
     Command.GET_CHUNK: GetChunk,
     Command.CHUNK: Chunk,
+    Command.APPLY: Apply,
+    Command.APPLIED: Applied,
 }
 
 

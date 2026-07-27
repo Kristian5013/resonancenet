@@ -122,12 +122,40 @@ class DaemonClient:
         self.contribution_bits = reply.contribution_bits
         return reply
 
-    def get_assignment(self) -> ipc.Assignment | ipc.NoWork:
+    def next_work(self) -> ipc.Assignment | ipc.NoWork | ipc.Apply:
+        """Ask what to do next.
+
+        Three answers, not two: the daemon may hand back an Apply instead of an
+        Assignment when the round's quorum is met. Producing comes before more
+        training, because a round nobody applies is a round that never closes
+        and every worker would keep contributing to a step that can no longer
+        take them.
+        """
         self._send(ipc.GetAssignment())
         reply = self._recv()
-        if isinstance(reply, (ipc.Assignment, ipc.NoWork)):
+        if isinstance(reply, (ipc.Assignment, ipc.NoWork, ipc.Apply)):
             return reply
-        raise WorkerError(f"worker: expected an assignment, got {type(reply).__name__}")
+        raise WorkerError(f"worker: expected work, got {type(reply).__name__}")
+
+    def applied(self, outer_step: int, weights_hash: bytes,
+                optimizer_state_hash: bytes) -> ipc.Accepted:
+        """Report what the outer step produced, and wait to be told it landed.
+
+        Every message a worker sends gets exactly one reply — no exceptions,
+        because a channel where some messages are answered and some are not is a
+        channel where one unanswered message shifts every reply after it by one.
+        That is not a hypothetical: it is how a correct submission came back as
+        `expected accepted, got NoWork`.
+        """
+        self._send(ipc.Applied(outer_step=outer_step, weights_hash=weights_hash,
+                               optimizer_state_hash=optimizer_state_hash))
+        reply = self._recv()
+        if isinstance(reply, ipc.Refused):
+            raise WorkerError(f"worker: apply refused ({reply.code.name}): "
+                              f"{reply.reason}")
+        if not isinstance(reply, ipc.Accepted):
+            raise WorkerError(f"worker: expected accepted, got {type(reply).__name__}")
+        return reply
 
     def submit(self, assignment_id: int, payload: bytes, scale_exp: int,
                value_count: int, final_loss: float) -> ipc.Accepted:

@@ -101,6 +101,11 @@ class RoundResult:
     scale_exp: int
     final_loss: float
     steps: int
+    # The weights the round STARTED from, kept because the outer step must be
+    # applied to those and not to where training left the model. Costs a second
+    # copy — 8 MB on regtest, 800 MB on the dense 400M — which is the price of
+    # not having to fetch the base back over a socket.
+    base_weights: dict = None
 
 
 def derive_batch(spec: ModelSpec, dataset_root: bytes, round_id: int,
@@ -167,7 +172,7 @@ def run(model: Transformer, spec: ModelSpec, numerics: Numerics, *,
     payload, exp = quantize_update(flat_before - flat_after,
                                    numerics.contribution_format)
     return RoundResult(payload=payload, scale_exp=exp, final_loss=loss_value,
-                       steps=inner_steps)
+                       steps=inner_steps, base_weights=before)
 
 
 def _to_float(words: np.ndarray) -> np.ndarray:

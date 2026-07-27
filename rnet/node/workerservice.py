@@ -68,11 +68,19 @@ class WorkerService:
 
     workers: dict = field(default_factory=dict)
     contributions: dict = field(default_factory=dict)
+    # (outer_step, contribution_id) — kept apart from the values so the root can
+    # be rebuilt after the values are spent.
+    _headers: list = field(default_factory=list)
+    # outer_step -> {worker_id: (weights_hash, optimizer_state_hash)}
+    _applied_at: dict = field(default_factory=dict)
+    # outer_step -> the Apply every attached worker still owes
+    _pending_apply: dict = field(default_factory=dict)
 
     _server: object = None
     _next_worker_id: int = 1
     _next_assignment_id: int = 1
     _log = print
+    produced: int = 0
 
     accepted: int = 0
     refused: int = 0
@@ -226,12 +234,30 @@ class WorkerService:
             await self._on_submit(conn, message)
         elif isinstance(message, ipc.GetChunk):
             await self._on_get_chunk(conn, message)
+        elif isinstance(message, ipc.Applied):
+            await self._on_applied(conn, message)
         elif isinstance(message, ipc.Hello):
             raise ipc.IpcError("ipc: a second hello")
 
     async def _on_get_assignment(self, conn: WorkerConn) -> None:
         head = self.chain.head
         outer_step = head.height + 1
+
+        # Anything already aggregated that THIS worker has not applied comes
+        # first, whatever step it belongs to. A worker that skipped an outer
+        # step holds weights the rest of the network has moved past, and would
+        # spend the next round training from them.
+        for step in sorted(self._pending_apply):
+            if conn.worker_id not in self._applied_at.get(step, {}):
+                await self._send(conn, self._pending_apply[step])
+                return
+
+        # Production comes before more training. A round whose quorum is met and
+        # which nobody applies is a round that never closes, and every worker
+        # would keep contributing to a step that can no longer accept them.
+        if self.ready_to_produce(outer_step):
+            await self._ask_to_produce(conn, outer_step)
+            return
 
         # One assignment per worker per step, whether it is still training or
         # has already submitted. Two would mean the same worker's id feeding the
@@ -263,6 +289,108 @@ class WorkerService:
             deadline_ms=int(time.time() * 1000) + self.policy.round_deadline_ms)
         conn.assignments[assignment_id] = assignment
         await self._send(conn, assignment)
+
+    async def _ask_to_produce(self, conn: WorkerConn, outer_step: int) -> None:
+        from ..diloco.aggregate import average_contributions
+        from ..diloco.quantize import pack
+
+        parts = self.contributions_at(outer_step)
+        mean, exp = average_contributions(parts)
+        fmt = self.round_desc.numerics.contribution_format
+        if int(np.abs(mean).max()) > fmt.max_magnitude:
+            # The bound that lets the aggregate ride in the contribution format
+            # is arithmetic, not hope — but it is checked, because a violation
+            # would silently clamp the update rather than fail.
+            raise ipc.IpcError(
+                f"produce: aggregate reached {int(np.abs(mean).max())}, past "
+                f"int{fmt.value}'s {fmt.max_magnitude}")
+        # Held, and handed out when each worker NEXT ASKS. Every worker must
+        # apply — DiLoCo's outer step is not the producer's privilege, and one
+        # that skipped it would start the next round from weights the network
+        # has moved past — but pushing it to all of them was the obvious design
+        # and it is wrong. This channel is strict request-and-response, so an
+        # unsolicited message lands in the middle of whatever exchange the other
+        # worker was in and desynchronises it. Measured as `expected accepted,
+        # got NoWork` on a worker that had submitted perfectly correctly.
+        # Proved by WorkerServiceTests.EveryWorkerIsHandedTheApplyWhenItAsks.
+        self._applied_at.setdefault(outer_step, {})
+        self._pending_apply[outer_step] = ipc.Apply(
+            outer_step=outer_step, scale_exp=exp, value_count=int(mean.size),
+            momentum_q16=self.policy.outer_momentum_q16,
+            lr_q16=self.policy.outer_lr_q16, nesterov=self.policy.nesterov,
+            packed=pack(mean, fmt))
+        await self._send(conn, self._pending_apply[outer_step])
+        self._log(f"step {outer_step}: applying {len(parts)} contribution(s)")
+
+    async def _on_applied(self, conn: WorkerConn, message: ipc.Applied) -> None:
+        from ..consensus.objects import CheckpointHeader
+        from ..diloco.aggregate import contribution_root
+
+        seen = self._applied_at.get(message.outer_step)
+        if seen is None:
+            await self._refuse(conn, ipc.Refusal.UNKNOWN_ASSIGNMENT,
+                               f"nobody was asked to apply step {message.outer_step}")
+            return
+        seen[conn.worker_id] = (message.weights_hash, message.optimizer_state_hash)
+
+        # Every applier should reach the same two hashes: same aggregate, same
+        # base, integer arithmetic. A disagreement is not a peer being
+        # dishonest — it is this node's own workers computing differently, which
+        # is worth shouting about rather than resolving quietly.
+        distinct = set(seen.values())
+        if len(distinct) > 1:
+            self._log(f"step {message.outer_step}: WORKERS DISAGREE — "
+                      + ", ".join(f"{w}:{h[0].hex()[:12]}" for w, h in seen.items()))
+
+        if self.chain.height >= message.outer_step:
+            # Already built from somebody else's report. Still answered, because
+            # every worker message gets exactly one reply.
+            await self._send(conn, ipc.Accepted(
+                contribution_id=self.chain.at_height(message.outer_step).id))
+            return
+
+        parts = self.contributions_at(message.outer_step)
+        header = CheckpointHeader(
+            round_id=self.round_desc.round_id, outer_step=message.outer_step,
+            parent=self.chain.head.id,
+            weights_hash=message.weights_hash,
+            optimizer_state_hash=message.optimizer_state_hash,
+            contribution_root=contribution_root(
+                sorted(self._contribution_ids(message.outer_step))),
+            producer_id=conn.worker_id, timestamp_ms=int(time.time() * 1000))
+
+        outcome = self.chain.add(header)
+        self.produced += 1
+        # The contributions are spent. Keeping them would let the next round
+        # aggregate work that was already applied.
+        for key in [k for k in self.contributions if k[0] == message.outer_step]:
+            del self.contributions[key]
+
+        if self.service is not None:
+            self.service.node.height = self.chain.height
+            with contextlib.suppress(Exception):
+                self.service.publish(header)
+        self._log(f"step {message.outer_step}: checkpoint {header.id.hex()[:16]} "
+                  f"({outcome.value}), weights {message.weights_hash.hex()[:16]}, "
+                  f"{len(parts)} contribution(s)")
+        self._retire_applied()
+        await self._send(conn, ipc.Accepted(contribution_id=header.id))
+
+    def _retire_applied(self) -> None:
+        """Drop an Apply once every attached worker has taken it.
+
+        Kept until then, and no longer: a worker that attaches afterwards has
+        weights from wherever it started, and replaying one outer step at it
+        would not put it on the chain — it needs the checkpoint, which is a
+        different problem and not this one.
+        """
+        attached = set(self.workers)
+        for step in list(self._pending_apply):
+            if attached and attached <= set(self._applied_at.get(step, {})):
+                del self._pending_apply[step]
+
+    def _contribution_ids(self, outer_step: int) -> list:
+        return [i for (step, i) in self._headers if step == outer_step]
 
     async def _on_submit(self, conn: WorkerConn, message: ipc.Submit) -> None:
         assignment = conn.assignments.get(message.assignment_id)
@@ -312,6 +440,7 @@ class WorkerService:
             values=values, scale_exp=message.scale_exp, fmt=fmt,
             worker_id=conn.worker_id)
         del conn.assignments[message.assignment_id]
+        self._headers.append((assignment.outer_step, header.id))
         conn.submitted += 1
         self.accepted += 1
 
@@ -358,7 +487,8 @@ class WorkerService:
 
     def status(self) -> str:
         return (f"workers {len(self.workers)} — {self.accepted} accepted, "
-                f"{self.refused} refused, {self.deferred} deferred — "
+                f"{self.refused} refused, {self.deferred} deferred, "
+                f"{self.produced} produced — "
                 f"{len(self.contributions)} contribution(s) held")
 
 

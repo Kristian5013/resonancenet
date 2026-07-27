@@ -21,6 +21,7 @@ from ..diloco.quantize import pack
 from ..model import weights as W
 from . import ipc
 from .client import AnchorMismatch, DaemonClient, WorkerError
+from .produce import Producer
 
 
 @dataclass
@@ -74,13 +75,31 @@ def run(config: TrainerConfig, *, log=print) -> int:
         # it is about to overwrite.
         model = W.build(spec, numerics, genesis_hash, device=config.device,
                         grad_checkpointing=True)
+        producer = Producer(spec)
+        base_weights = W.save_weights(model)
         done = 0
 
         while config.rounds == 0 or done < config.rounds:
-            reply = client.get_assignment()
+            reply = client.next_work()
             if isinstance(reply, ipc.NoWork):
                 log(f"waiting: {reply.reason}")
                 time.sleep(max(0.1, reply.retry_ms / 1000.0))
+                continue
+
+            if isinstance(reply, ipc.Apply):
+                started = time.time()
+                result = producer.apply(model, reply,
+                                        numerics.contribution_format,
+                                        base_weights)
+                # The applied weights become the base for the next round, for
+                # every worker that applied — which is all of them, because
+                # DiLoCo's outer step is not the producer's privilege.
+                base_weights = W.save_weights(model)
+                client.applied(reply.outer_step, result.weights_hash,
+                               result.optimizer_state_hash)
+                log(f"step {reply.outer_step}: applied, weights "
+                    f"{result.weights_hash.hex()[:16]}…, "
+                    f"{time.time() - started:.1f}s")
                 continue
 
             started = time.time()
@@ -107,6 +126,7 @@ def run(config: TrainerConfig, *, log=print) -> int:
                 device=config.device, on_step=progress)
             print()
 
+            base_weights = result.base_weights
             payload = pack(result.payload, numerics.contribution_format)
             accepted = client.submit(
                 assignment_id=reply.assignment_id, payload=payload,
