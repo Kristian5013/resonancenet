@@ -119,15 +119,25 @@ class AddrMan:
     # -- adding -------------------------------------------------------------
 
     def add(self, entry: TimestampedAddress, source: NetAddress | None,
-            now_ms: int) -> bool:
+            now_ms: int, *, explicit: bool = False) -> bool:
         """Record an address heard from `source`. True if it was new to us.
 
-        An unroutable address is refused outright rather than stored and skipped
-        later: keeping it would let a peer spend our table space on addresses
-        that can never be dialled.
+        A gossiped unroutable address is refused outright rather than stored and
+        skipped later: keeping it would let a peer spend our table space on
+        addresses that can never be dialled.
+
+        `explicit` is for an address an operator named on the command line. That
+        is not hearsay — it is an instruction, and it is often a LAN address or
+        one reachable through a tunnel, so the routability filter would refuse
+        exactly the case the flag exists for. Such addresses are kept and dialled
+        but never gossiped: relaying them would tell strangers the shape of
+        somebody's private network. Proved by
+        AddrManTests.AnExplicitAddressIsKeptButNeverGossiped.
         """
         address = entry.address
-        if not address.is_routable or address.port == 0:
+        if address.port == 0:
+            return False
+        if not explicit and not address.is_routable:
             return False
 
         stamp = min(entry.last_seen_ms, now_ms + FUTURE_SLACK_MS)
@@ -257,7 +267,7 @@ class AddrMan:
         someone else's table space on a peer that is probably gone.
         """
         fresh = [e for e in self._entries.values()
-                 if now_ms - e.last_seen_ms < HORIZON_MS]
+                 if now_ms - e.last_seen_ms < HORIZON_MS and e.address.is_routable]
         fresh.sort(key=lambda e: e.last_seen_ms, reverse=True)
         return [TimestampedAddress(e.address, e.services, e.last_seen_ms)
                 for e in fresh[:limit]]

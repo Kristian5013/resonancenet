@@ -47,6 +47,27 @@ def cmd_genesis_verify(args) -> int:
     return 1 if failed else 0
 
 
+def cmd_daemon(args) -> int:
+    """Run a node until it is told to stop."""
+    import asyncio
+
+    from .node.daemon import Daemon, DaemonConfig
+
+    config = DaemonConfig(
+        network=args.network, datadir=args.datadir or "", port=args.port,
+        connect=tuple(args.connect or ()),
+        listen_v4=not args.no_v4, listen_v6=not args.no_v6,
+        max_outbound=args.max_outbound, max_inbound=args.max_inbound,
+        status_interval_s=args.status_interval)
+    try:
+        return asyncio.run(Daemon(config=config).run())
+    except KeyboardInterrupt:
+        # asyncio installs handlers for SIGINT where it can; this is the path
+        # on platforms where it cannot, and exiting quietly beats a traceback.
+        print("\nrnet: interrupted")
+        return 0
+
+
 def cmd_genesis_weights(args) -> int:
     """Derive the initial weights and check them against the anchor.
 
@@ -102,6 +123,21 @@ def cmd_genesis_anchors(args) -> int:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="rnet", description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="command", required=True)
+
+    daemon = sub.add_parser("daemon", help="run a node")
+    daemon.add_argument("--network", default="regtest")
+    daemon.add_argument("--datadir", default=None,
+                        help="default: ~/.rnet/<network>")
+    daemon.add_argument("--port", type=int, default=9444)
+    daemon.add_argument("--connect", action="append", metavar="HOST:PORT",
+                        help="dial this peer; repeatable. [::1]:9444 for IPv6")
+    daemon.add_argument("--no-v4", action="store_true", help="do not listen on IPv4")
+    daemon.add_argument("--no-v6", action="store_true", help="do not listen on IPv6")
+    daemon.add_argument("--max-outbound", type=int, default=8)
+    daemon.add_argument("--max-inbound", type=int, default=64)
+    daemon.add_argument("--status-interval", type=float, default=60.0,
+                        metavar="SECONDS")
+    daemon.set_defaults(fn=cmd_daemon)
 
     show = sub.add_parser("genesis-show", help="what this build believes each network is")
     show.add_argument("networks", nargs="*")

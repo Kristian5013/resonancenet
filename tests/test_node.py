@@ -247,6 +247,20 @@ class NodeTests(unittest.IsolatedAsyncioTestCase):
         await a._dial_once()
         self.assertLessEqual(len(a.outbound) + len(a._dialling), 1)
 
+    async def test_ThereIsOnlyEverOneConnectionToAnAddress(self):
+        """Two sockets to one peer waste two outbound slots while looking like
+        two peers in every count."""
+        a, b = await self.make(), await self.make()
+        target = NetAddress.parse(f"127.0.0.1:{b.config.port}")
+        first, second = await asyncio.gather(a.connect(target), a.connect(target))
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)
+        self.assertEqual(len(a.outbound), 1)
+        # And again once the first is established, not merely in flight.
+        self.assertTrue(await settle(lambda: first.state is State.READY))
+        self.assertIsNone(await a.connect(target))
+        self.assertEqual(len(a.outbound), 1)
+
     async def test_ABannedGroupIsNotDialled(self):
         import time as _t
         a = await self.make()

@@ -199,9 +199,22 @@ class Node:
         self._spawn(self._serve(peer))
 
     async def connect(self, address: NetAddress) -> Peer | None:
-        """Dial one address. Returns the peer once its handshake completes."""
+        """Dial one address. Returns the peer once its handshake completes.
+
+        Refuses to open a second connection to somewhere already connected or
+        being connected to. The dial loop and an explicit --connect can both
+        reach for the same address in the same tick — the loop runs once before
+        its first sleep, while the explicit dial is still only a scheduled
+        future — and two sockets to one peer waste two outbound slots while
+        looking like two peers in every count. Proved by
+        NodeTests.ThereIsOnlyEverOneConnectionToAnAddress.
+        """
         now = time.monotonic()
         if self.is_banned(address, now):
+            return None
+        if address in self._dialling:
+            return None
+        if any(p.address == address and not p.inbound for p in self.peers.values()):
             return None
         self._dialling.add(address)
         try:
