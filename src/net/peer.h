@@ -76,6 +76,15 @@ public:
     Socket& socket() { return socket_; }
     int misbehaviour() const { return misbehaviour_; }
     bool should_disconnect() const { return state_ == PeerState::Disconnecting; }
+
+    // Set when the handshake showed this peer to be this very node.
+    //
+    // The address has to leave the database or it is dialled again forever: the
+    // node hears its own address back from a peer it told, adds it, connects,
+    // recognises itself, drops the connection, and starts over. Observed on the
+    // seed at twenty-one self-connections a minute — harmless per attempt and
+    // endless.
+    bool is_self() const { return is_self_; }
     const std::string& disconnect_reason() const { return disconnect_reason_; }
 
     // The peer's own claims, valid once the handshake completes.
@@ -127,6 +136,7 @@ private:
     VersionMessage version_;
     bool sent_version_{false};
     int misbehaviour_{0};
+    bool is_self_{false};
     std::string disconnect_reason_;
     int64_t last_receive_{0};
 

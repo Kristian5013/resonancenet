@@ -339,6 +339,9 @@ void Node::DropDisconnected(int64_t now_ms) {
         // Only a peer that actually earned a ban gets one; an ordinary
         // disconnection is not evidence of hostility.
         if (it->second->misbehaviour() >= kBanThreshold) Ban(it->second->address(), now_ms);
+        // A node's own address is not a peer and never will be. Left in the
+        // database it is dialled again on the next tick, forever.
+        if (it->second->is_self()) addresses_.Forget(it->second->address());
         // A departed peer cannot deliver what it owed; release those requests and
         // abandon any half-assembled transfer, which is worthless without its
         // remaining chunks.

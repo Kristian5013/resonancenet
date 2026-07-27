@@ -161,6 +161,25 @@ void AddressManager::MarkFailed(const NetAddress& address, int64_t now) {
     entries_.erase(it);
 }
 
+void AddressManager::Forget(const NetAddress& address) {
+    const auto it = entries_.find(address);
+    if (it == entries_.end()) return;
+
+    auto drop_from = [&](auto& buckets) {
+        for (auto& bucket : buckets) {
+            const auto found = std::find(bucket.begin(), bucket.end(), address);
+            if (found != bucket.end()) { bucket.erase(found); return true; }
+        }
+        return false;
+    };
+    if (it->second.tried) {
+        drop_from(tried_buckets_);
+    } else {
+        drop_from(new_buckets_);
+    }
+    entries_.erase(it);
+}
+
 std::optional<AddrInfo> AddressManager::Select(uint64_t randomness, uint32_t bias_tried) const {
     const bool prefer_tried = (randomness % 100) < bias_tried;
 

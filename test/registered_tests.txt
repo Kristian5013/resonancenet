@@ -3,6 +3,7 @@ AddrMan.BucketingIsKeyed
 AddrMan.DeadAddressesAreReleased
 AddrMan.DuplicatesRefreshRatherThanGrow
 AddrMan.FloodFromOneNetworkIsConfined
+AddrMan.ForgetRemovesAnAddressOutright
 AddrMan.GetAddressesIsCappedAndRotates
 AddrMan.GossipCannotEvictProvenPeers
 AddrMan.GroupsByNetworkNotByAddress

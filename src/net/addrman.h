@@ -73,6 +73,11 @@ public:
     // A connection failed: count it, and drop the address once it is clearly dead.
     void MarkFailed(const NetAddress& address, int64_t now);
 
+    // Removes an address outright, for the case where retrying is pointless
+    // rather than merely unlucky — a node's own address, which it learns by
+    // being told about itself and would otherwise dial forever.
+    void Forget(const NetAddress& address);
+
     // Picks an address to connect to. `bias_tried` is the percentage chance of
     // drawing from the tried table; the rest of the time a new address gets a
     // turn, so the node keeps discovering rather than talking to the same peers

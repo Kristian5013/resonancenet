@@ -2063,6 +2063,43 @@ RNET_TEST(Node, ACorpusChunkThatFailsItsProofIsRefused) {
     std::filesystem::remove(corpus.value().path);
 }
 
+// An address that will never work has to leave the database, not merely fail.
+//
+// A node learns its own address by being told about it — a peer it has spoken to
+// gossips it back — and then dials it forever: connect, recognise the nonce,
+// drop, repeat. Observed on the seed at twenty-one self-connections a minute,
+// each harmless and none of them the last. MarkFailed is not the answer: it
+// removes an address only after several attempts, and this one is not unlucky,
+// it is impossible.
+//
+// What this covers is Forget. The one line in Node::DropDisconnected that calls
+// it for a self-connected peer is not covered here, because building a real
+// self-connection needs a routable address and the test harness only has
+// loopback, which the database refuses on purpose.
+RNET_TEST(AddrMan, ForgetRemovesAnAddressOutright) {
+    AddressManager addresses(crypto::Sha3_256(std::string_view("k")));
+    auto own = NetAddress::FromString("203.0.113.7:9444", 9444);
+    RNET_CHECK_OK(own);
+    auto source = NetAddress::FromString("198.51.100.2:9444", 9444);
+    RNET_CHECK_OK(source);
+
+    RNET_CHECK(addresses.Add(own.value(), source.value(), 1000));
+    RNET_CHECK_EQ(addresses.Size(), size_t{1});
+
+    addresses.Forget(own.value());
+    RNET_CHECK_EQ(addresses.Size(), size_t{0});
+
+    // And it is gone from the buckets, not merely from the index: Select must not
+    // hand it back.
+    for (int i = 0; i < 32; ++i) {
+        RNET_CHECK(!addresses.Select(static_cast<uint64_t>(i) * 2654435761u).has_value());
+    }
+
+    // Forgetting something absent is not an error — the caller does not know
+    // whether the address was ever recorded.
+    addresses.Forget(own.value());
+}
+
 // A node that keeps no corpus says so rather than leaving the asker to time out.
 RNET_TEST(Node, ANodeWithoutACorpusSaysSo) {
     Node seed(TestNodeConfig(19819), crypto::Sha3_256(std::string_view("a")), 1111);

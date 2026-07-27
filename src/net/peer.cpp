@@ -148,6 +148,7 @@ Status Peer::HandleVersion(const VersionMessage& remote, const VersionMessage& l
     }
     // Connecting to yourself wastes a slot and pollutes the address database.
     if (remote.nonce == local_nonce) {
+        is_self_ = true;
         Disconnect("self-connection");
         return Err("peer: connected to self");
     }
