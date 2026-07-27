@@ -40,3 +40,5 @@ weights/
 *.swp
 .DS_Store
 dist/
+dist/
+build-release/

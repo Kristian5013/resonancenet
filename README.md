@@ -29,61 +29,60 @@ Three properties define the design:
 
 ## Status
 
-**Pre-launch. There is no network to join.** Everything below runs on your own
-machine, alone or against nodes you start yourself.
+**The corpus is pinned and there is a seed.** What you cannot yet do is join
+late: a node that starts after the first checkpoint has no way to catch up, so
+round 0 begins with everyone starting together. That is the one remaining hole
+and it is being closed.
+
+<details open>
+<summary><strong>Round 0</strong></summary>
+
+| | |
+| --- | --- |
+| Parameters | 397,728,768 |
+| Shape | `d_model` 1024, 24 layers, 8 heads (head_dim 128), GQA 4:1, `d_ff` 4096 |
+| Vocabulary | 32,000 — byte-level BPE, pinned by hash |
+| Context | 16,384 tokens |
+| Corpus | FineWeb-Edu, every dump, 7.36 TB of text in 6,956,933 chunks |
+| Schedule | 200 inner steps per round, 20-minute rounds |
+| Hardware | 24 GB GPU. Measured: 6.0 GB peak, 4.09 s per inner step on an RTX 5090 |
+
+Every number was chosen by measurement on a consumer card rather than by
+analogy. The reasoning is in the commits; the short version is in
+[docs/training.md](docs/training.md).
+</details>
 
 <details open>
 <summary><strong>What is implemented and tested</strong></summary>
 
 Canonical serialization; the genesis trust anchor; initial weights derived from
-that anchor rather than distributed; corpus integrity (Merkle root over
-document-aligned chunks of text); deterministic batch derivation; quantised
-pseudo-gradients and integer aggregation; the producer election and its fork rule;
-the peer-to-peer transport; and the local channel between a node and a training
-worker.
+that anchor rather than distributed; corpus integrity over document-aligned
+chunks of text; deterministic batch derivation; quantised pseudo-gradients and
+integer aggregation; the producer election and its fork rule; the peer-to-peer
+transport; the local channel between a node and a worker; and fetching corpus
+chunks from a seed with an inclusion proof against `dataset_root`.
 
-A full cycle runs end to end on one machine: contribute, close the round, elect a
-producer, aggregate, publish a checkpoint, and let a second worker catch up from
-it — including catching a worker that trained on data it chose itself. 317 tests,
-plus a cross-language suite that drives the real `rnet-tool` binary from Python so
-the two implementations cannot drift apart silently.
-
-**Round 0** is 397,728,768 parameters: `d_model` 1024, 24 layers, 8 heads, a
-32,000-entry byte-level BPE, and a 16,384-token context. Every number in that
-sentence was chosen by measurement on a 24 GB consumer card, not by analogy —
-see [docs/training.md](docs/training.md).
+A full cycle runs end to end: contribute, close the round, elect a producer,
+aggregate, publish a checkpoint — including catching a worker that trained on
+data it chose itself. 320 tests, plus a cross-language suite that drives the
+real `rnet-tool` binary from Python so the two implementations cannot drift
+apart silently.
 </details>
 
 <details open>
-<summary><strong>What is missing, and why you cannot join yet</strong></summary>
+<summary><strong>What is missing</strong></summary>
 
-- **The corpus root is unpinned.** `dataset_root` is all-zero on every network,
-  so no worker can be told which tokens to train on. This is the next thing being
-  built.
-- **No seed infrastructure.** `seed.resonancenet.org` does not resolve. Nodes
-  find each other only through `--connect`.
-- **A node cannot catch up.** There is no chain sync — no `getheaders`, and
-  nothing asks a peer for a checkpoint's missing parent. A node joining an
-  established network receives checkpoints whose parents it does not hold,
-  refuses them as not-for-us, and stays where it started. Joining works today
-  only from genesis, alongside everyone else.
-- **A node cannot re-derive the optimizer.** Momentum accumulates across every
-  step and is committed to as a hash, not distributed. A node that missed a step
-  can follow the chain but can never reproduce the state, so it correctly refuses
-  to produce, and short of replaying every historical contribution there is no
-  way back.
-- **Verification is not wired up.** Challenge selection and bit-exact replay are
-  implemented and tested as libraries, and a node issues challenges and gossips
-  them. Nothing answers one: `AssignVerify` and `SubmitVerdict` exist as message
-  types with no handler, and `PendingChallenges()` has no caller outside the test
-  suite. So no verdict is produced, no evidence is built or recorded, and a worker
-  submitting noise would be aggregated with no possibility of detection.
-- **There is no round transition.** See [The dataset question](#the-dataset-question).
+- **A node cannot catch up.** There is no chain sync: a node that joins after
+  the first checkpoint receives ones whose parents it does not hold and stays
+  where it started. Round 0 therefore starts with everyone together.
+- **A node cannot re-derive optimizer state.** Momentum is committed to as a
+  hash, not distributed. A node that missed a step follows the chain but will
+  not produce.
+- **Verification is not wired up.** Challenge selection and bit-exact replay
+  work as libraries and are exercised by the simulations. In a running node
+  nothing answers a challenge: `AssignVerify` and `SubmitVerdict` are message
+  types with no handler.
 - **No incentive layer.** Contributions are not rewarded.
-
-There is no trainer CLI either — the worker is a library plus test harnesses. See
-[Running a node and a worker](#running-a-node-and-a-worker) for what actually runs
-today.
 </details>
 
 Linux only for a full node. `rnet-tool` is portable and is how you verify the
@@ -91,7 +90,11 @@ anchors on any platform; a Windows GPU can run the Linux build under WSL2.
 
 ---
 
-## Quick start
+## Joining
+
+Three steps. The whole thing is one node and one trainer.
+
+### 1. Build
 
 ```bash
 git clone https://github.com/Kristian5013/resonancenet.git
@@ -101,29 +104,77 @@ cmake --build build -j"$(nproc)"
 ./build/rnet_tests
 ```
 
-Requires CMake ≥ 3.24 and a C++26 compiler (GCC ≥ 14 or Clang ≥ 19). No
-dependencies to fetch: everything the node needs is in the tree.
+The last two lines must read `320 passed, 0 failed` and `suite: consensus +
+transport (complete)`. If the second says `consensus ONLY`, the transport
+suites were not compiled and the green number above describes a third less code
+than you think.
 
-Expected last two lines:
+Requires CMake ≥ 3.24 and GCC ≥ 14 or Clang ≥ 19. Nothing to fetch.
 
-```
-313 passed, 0 failed
-suite: consensus + transport (complete)
-```
-
-That second line matters. The transport half of the suite compiles only under
-UNIX, and a build without it would otherwise print a smaller green number that
-reads exactly like a complete run.
-
-Then verify what your build believes:
+### 2. Check what your build believes
 
 ```bash
 ./build/rnet-tool genesis-show --network main
 ```
 
-The `genesis_hash` it prints must equal `pinned_anchor`. If it does not, your
-build disagrees with the network about what model is being trained, and no
-contribution it produces would be accepted.
+`genesis_hash` must equal `pinned_anchor`, and `policy_hash` must equal
+`pinned_policy_anchor`. If they differ, your build would train a different model
+from everyone else, and nothing it produced would be accepted.
+
+To go further and re-derive the initial weights — real arithmetic over 397
+million parameters, a couple of minutes:
+
+```bash
+./build/rnet-tool genesis-weights --network main
+```
+
+### 3. Run a node, then a trainer
+
+```bash
+./build/rnet-tool genesis-emit --network main --out ~/.rnet/main
+./build/rnetd --network main --worker-id YOUR_ID --datadir ~/.rnet/main
+```
+
+`--worker-id` is any number nobody else on the network is using. The node finds
+the seed through DNS; no `--connect` is needed.
+
+Then, in another terminal:
+
+```bash
+python3 -m venv worker/.venv
+worker/.venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cu128
+worker/.venv/bin/pip install numpy tokenizers
+
+export CUBLAS_WORKSPACE_CONFIG=:4096:8
+worker/.venv/bin/python worker/rn_train.py
+```
+
+That is the whole thing. The trainer asks the node what to train, trains it, and
+submits. It chooses nothing: weights, corpus, schedule and stopping point all
+come from consensus, which is what makes a contribution checkable rather than
+merely received.
+
+`CUBLAS_WORKSPACE_CONFIG` must be set in the shell, before Python starts. By the
+time a script could set it, the decision it affects has been made.
+
+### What you will see
+
+```
+network   main, round 0
+model     397,728,768 parameters, seq_len 16384
+corpus    7195da139188f4a1…
+schedule  200 inner steps per round
+worker id 7 (assigned by the node, not chosen here)
+
+step 0: training 200 inner steps
+step 0: submitted, loss 10.3421, 818s
+```
+
+If instead you see the node and the worker disagreeing about a genesis hash,
+they are on different commits — rebuild both.
+
+Longer form, including what each assertion means and what to do when it breaks:
+**[docs/training.md](docs/training.md)**.
 
 ---
 
@@ -144,6 +195,8 @@ Two binaries. `rnet-tool` is offline and portable; `rnetd` is the node.
 | `schedule-show` | Prints the exact training windows a worker is assigned at a step. |
 
 Full options, exact output, and worked examples: **[docs/cli.md](docs/cli.md)**.
+Running a node and a worker without joining the network — the whole protocol on
+one machine — is in **[docs/running-a-node.md](docs/running-a-node.md)**.
 
 ```bash
 # What is this build training?
@@ -177,45 +230,6 @@ Full options, exact output, and worked examples: **[docs/cli.md](docs/cli.md)**.
 
 Without `--worker-id` the daemon runs as a relay: it gossips objects but takes no
 part in consensus and opens no worker socket.
-
----
-
-## Running a node and a worker
-
-There is no `rnet-train` command yet. The worker is a Python library, and the two
-ways to drive it today are both real end-to-end runs:
-
-Detailed, with what each assertion means and what to do when it breaks:
-**[docs/training.md](docs/training.md)**.
-
-**1. The whole protocol on one machine, no transport involved.** Genesis to a
-verified checkpoint, including a dishonest worker being caught by recomputation:
-
-```bash
-python3 worker/tests/test_local_simulation.py --workers 4 --rounds 2
-```
-
-**2. A real daemon and a real worker over the Unix socket.** This one starts its
-own `rnetd` on a throwaway datadir and drives it through the Python IPC client —
-the actual binary, not a reimplementation of it:
-
-```bash
-python3 worker/tests/test_ipc_roundtrip.py
-```
-
-To watch a daemon yourself instead, run one and leave it in the foreground:
-
-```bash
-./build/rnetd --network regtest --worker-id 1 --datadir /tmp/rnet-a \
-              --connect 127.0.0.1:19556 --log debug
-```
-
-Regtest is a 3M-parameter model with a 1-second round deadline, so a full cycle
-takes seconds on a CPU. Main is RN-1B (983,635,968 parameters) with a ten-minute
-deadline and needs a 24 GB GPU.
-
-Step-by-step, including two nodes talking to each other:
-**[docs/running-a-node.md](docs/running-a-node.md)**.
 
 ---
 
