@@ -201,12 +201,28 @@ def main() -> int:
             started = time.time()
             print(f"\nstep {step}: training {policy.inner_steps} inner steps")
 
+            # A round is a quarter of an hour. Without this the terminal is silent
+            # for all of it, and silence is indistinguishable from a hang — which
+            # is exactly what a first-time joiner will conclude.
+            def progress(i, loss, _started=started, _total=policy.inner_steps):
+                if i % 5 and i + 1 != _total:
+                    return
+                done = i + 1
+                elapsed = time.time() - _started
+                rate = elapsed / done
+                left = (_total - done) * rate
+                bar = int(20 * done / _total)
+                print(f"\r  [{'#' * bar}{'.' * (20 - bar)}] {done:>3}/{_total}  "
+                      f"loss {loss:6.3f}  {rate:4.1f}s/step  {left / 60:4.1f} min left",
+                      end="", flush=True)
+
             result = inner_loop.run_inner_loop(
                 model, round_desc.model, optimizer_factory, corpus,
                 round_desc.dataset_root, round_desc.round_id, client.worker_id, step,
                 policy.inner_steps, policy.micro_batch, round_desc.model.seq_len,
-                args.lr, args.device,
+                args.lr, args.device, on_step=progress,
             )
+            print()
 
             client.submit_contribution(assignment["assignment_id"], result["payload"],
                                        result["scale_exp"])

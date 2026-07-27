@@ -23,10 +23,14 @@ import torch
 
 from .consensus import canon, diloco, scheduler
 
-# How many steps ahead to fetch corpus chunks. Eight chunks is eight megabytes in
-# flight and about half a minute of training at this model's rate — enough to hide
-# a round trip several times over without holding much.
-PREFETCH_STEPS = 8
+# How many steps ahead to fetch corpus chunks.
+#
+# Measured on a worker in Korea against a seed in Virginia: on demand, the card
+# sat at 8% and waited a round trip per step. Eight ahead took it to 67%, which
+# still puts a 200-step round at twenty minutes against a twenty-minute deadline.
+# Twenty-four is twenty-four megabytes in flight and a minute and a half of
+# training — deep enough that a slow fetch is absorbed rather than waited on.
+PREFETCH_STEPS = 24
 
 
 def enable_determinism(seed: int) -> None:
@@ -109,7 +113,7 @@ def load_windows(corpus, dataset_root: bytes, round_id: int, worker_id: int, ste
 def run_inner_loop(model, model_spec, optimizer_factory, corpus,
                    dataset_root: bytes, round_id: int, worker_id: int, outer_step: int,
                    inner_steps: int, micro_batch: int, seq_len: int, lr: float, device,
-                   poison: "PoisonPolicy | None" = None) -> dict:
+                   poison: "PoisonPolicy | None" = None, on_step=None) -> dict:
     """Runs one worker's local training and returns its quantised contribution.
 
     `poison` exists so the simulation can inject a dishonest worker and verify
@@ -135,6 +139,8 @@ def run_inner_loop(model, model_spec, optimizer_factory, corpus,
             with deterministic_attention(next(model.parameters()).dtype):
                 _, loss = model(x, y)
                 loss.backward()
+            if on_step is not None:
+                on_step(step, float(loss.detach()))
     finally:
         # Always detach: a leaked hook would corrupt every subsequent run on this
         # model instance.
