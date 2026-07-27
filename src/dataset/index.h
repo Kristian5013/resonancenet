@@ -58,6 +58,24 @@ public:
 
     canon::DatasetManifest ToManifest(const crypto::Hash256& tokenizer_hash) const;
 
+    // Writes the derived boundaries and leaf hashes beside the corpus, and reads
+    // them back.
+    //
+    // Building the index means reading the whole corpus: 7.36 TB is two and a half
+    // hours, and a seed paid it on every start, during which it answered nobody —
+    // a node that cannot handshake for two hours looks exactly like a node that is
+    // down. The cache is about 280 MB for that corpus and loads in seconds.
+    //
+    // What Load proves is that the cached leaves reproduce `expected_root`, which
+    // is what makes them the corpus's commitment. What it does NOT prove is that
+    // the file on disk still matches them — checking that is the whole scan again.
+    // That is deliberate: a seed serving bytes that do not match is caught by the
+    // receiver's inclusion proof, which is the guarantee the protocol actually
+    // rests on, so re-reading terabytes to catch it earlier buys nothing.
+    Status SaveCache(const std::filesystem::path& path) const;
+    static Result<DatasetIndex> LoadCache(const std::filesystem::path& path,
+                                          const crypto::Hash256& expected_root);
+
     Result<crypto::MerkleProof> ProofForChunk(uint64_t chunk_index) const;
 
 private:

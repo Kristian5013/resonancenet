@@ -9,6 +9,7 @@
 #include <cstring>
 #include <format>
 
+#include "canon/canon.h"
 #include "util/fs.h"
 
 namespace rnet::dataset {
@@ -191,6 +192,72 @@ Result<DatasetIndex> DatasetIndex::Build(const std::filesystem::path& corpus_fil
     idx.offsets_.push_back(n_bytes);
 
     idx.root_ = crypto::MerkleRoot(idx.leaves_);
+    return idx;
+}
+
+namespace {
+constexpr uint32_t kCacheMagic = 0x524E4958;   // "RNIX"
+constexpr uint32_t kCacheVersion = 1;
+}  // namespace
+
+Status DatasetIndex::SaveCache(const std::filesystem::path& path) const {
+    canon::Writer w;
+    w.U32(kCacheMagic);
+    w.U32(kCacheVersion);
+    w.U64(n_bytes_);
+    w.U32(target_chunk_bytes_);
+    w.U64(static_cast<uint64_t>(leaves_.size()));
+    for (uint64_t off : offsets_) w.U64(off);
+    for (const auto& leaf : leaves_) w.Hash(leaf);
+    return util::WriteFileAtomic(path, w.data());
+}
+
+Result<DatasetIndex> DatasetIndex::LoadCache(const std::filesystem::path& path,
+                                             const crypto::Hash256& expected_root) {
+    auto raw = util::ReadFile(path);
+    if (!raw) return Err(raw.error());
+
+    canon::Reader r(raw.value());
+    auto magic = r.U32();
+    if (!magic || magic.value() != kCacheMagic) return Err("index cache: not an index cache");
+    auto version = r.U32();
+    if (!version || version.value() != kCacheVersion) {
+        return Err("index cache: written by a different version");
+    }
+
+    DatasetIndex idx;
+    auto n_bytes = r.U64();
+    if (!n_bytes) return Err(n_bytes.error());
+    idx.n_bytes_ = n_bytes.value();
+
+    auto target = r.U32();
+    if (!target) return Err(target.error());
+    idx.target_chunk_bytes_ = target.value();
+
+    auto count = r.U64();
+    if (!count) return Err(count.error());
+    if (count.value() == 0 || count.value() > (1ull << 32)) {
+        return Err("index cache: implausible chunk count");
+    }
+
+    idx.offsets_.reserve(count.value() + 1);
+    for (uint64_t i = 0; i <= count.value(); ++i) {
+        auto off = r.U64();
+        if (!off) return Err(off.error());
+        idx.offsets_.push_back(off.value());
+    }
+    idx.leaves_.reserve(count.value());
+    for (uint64_t i = 0; i < count.value(); ++i) {
+        auto leaf = r.Hash();
+        if (!leaf) return Err(leaf.error());
+        idx.leaves_.push_back(leaf.value());
+    }
+    if (auto st = r.ExpectExhausted(); !st) return Err(st.error());
+
+    idx.root_ = crypto::MerkleRoot(idx.leaves_);
+    if (idx.root_ != expected_root) {
+        return Err("index cache: leaves do not reproduce the pinned root");
+    }
     return idx;
 }
 

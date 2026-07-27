@@ -8,6 +8,7 @@
 #include <format>
 
 #include "util/hex.h"
+#include "util/logging.h"
 
 namespace rnet::net {
 
@@ -44,8 +45,32 @@ Result<CorpusSource> CorpusSource::Open(const std::filesystem::path& corpus_file
                                         const canon::DatasetManifest& manifest) {
     if (auto st = manifest.Validate(); !st) return Err(st.error());
 
-    auto index = dataset::DatasetIndex::Build(corpus_file, manifest.target_chunk_bytes);
-    if (!index) return Err(index.error());
+    // The cache first: building the index reads the whole corpus, which is two and
+    // a half hours for 7.36 TB, and a node that spends that before it can complete
+    // a handshake is indistinguishable from a node that is down.
+    //
+    // The cache is trusted only insofar as its leaves reproduce dataset_root — a
+    // stale or tampered one fails that and the scan happens anyway. What it does
+    // not re-check is that the file still matches those leaves, because that IS
+    // the scan; a seed serving bytes that do not match is caught by the receiver's
+    // inclusion proof, which is where the guarantee actually lives.
+    const auto cache_path = std::filesystem::path(corpus_file.string() + ".rnidx");
+    auto index = dataset::DatasetIndex::LoadCache(cache_path, manifest.dataset_root);
+    if (index) {
+        RNET_LOG_INFO("corpus: index loaded from {} ({} chunks), corpus not re-read",
+                      cache_path.string(), index.value().n_chunks());
+    } else {
+        RNET_LOG_INFO("corpus: no usable index cache ({}); reading {} to build one",
+                      index.error(), corpus_file.string());
+        index = dataset::DatasetIndex::Build(corpus_file, manifest.target_chunk_bytes);
+        if (!index) return Err(index.error());
+        if (auto st = index.value().SaveCache(cache_path); !st) {
+            // Not fatal: the node works, it will just pay the scan again next time.
+            RNET_LOG_WARN("corpus: cannot write the index cache: {}", st.error());
+        } else {
+            RNET_LOG_INFO("corpus: index cached at {}", cache_path.string());
+        }
+    }
 
     // Checked here rather than left for the first worker to discover. A node
     // serving a file that is not the corpus would hand out tokens that fail every

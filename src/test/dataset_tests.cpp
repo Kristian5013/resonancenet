@@ -257,6 +257,46 @@ RNET_TEST(Index, ChunkProofsVerifyAgainstRoot) {
     std::filesystem::remove(path);
 }
 
+// Indexing reads the whole corpus, so a seed with a 7 TB one spent two and a half
+// hours before it could complete a handshake — indistinguishable, from outside,
+// from a node that is down. The cache makes that a one-off.
+RNET_TEST(Index, TheCacheReproducesTheIndexWithoutRereadingTheCorpus) {
+    const auto path = WriteCorpus("cache", 180);
+    const auto cache = std::filesystem::temp_directory_path() / "rnet_test_cache.rnidx";
+
+    auto built = DatasetIndex::Build(path, 4096);
+    RNET_CHECK_OK(built);
+    RNET_CHECK_OK(built.value().SaveCache(cache));
+
+    auto loaded = DatasetIndex::LoadCache(cache, built.value().root());
+    RNET_CHECK_OK(loaded);
+    RNET_CHECK_EQ(loaded.value().root(), built.value().root());
+    RNET_CHECK_EQ(loaded.value().n_bytes(), built.value().n_bytes());
+    RNET_CHECK_EQ(loaded.value().n_chunks(), built.value().n_chunks());
+    RNET_CHECK_EQ(loaded.value().offsets(), built.value().offsets());
+    RNET_CHECK_EQ(loaded.value().leaves(), built.value().leaves());
+
+    // It must still serve proofs, which is the only reason a seed holds an index.
+    auto proof = loaded.value().ProofForChunk(3);
+    RNET_CHECK_OK(proof);
+    auto raw = util::ReadFile(path);
+    RNET_CHECK_OK(raw);
+    auto extent = loaded.value().ChunkExtent(3);
+    RNET_CHECK_OK(extent);
+    RNET_CHECK(VerifyChunk(
+        std::span<const uint8_t>(raw.value().data() + extent.value().first,
+                                 static_cast<size_t>(extent.value().second - extent.value().first)),
+        proof.value(), loaded.value().root()));
+
+    // A cache whose leaves do not reproduce the expected root is refused, not
+    // used. Trusting it would mean serving chunks against a root nobody agreed on.
+    const auto other = crypto::Sha3_256(std::string_view("a different corpus"));
+    RNET_CHECK_ERR(DatasetIndex::LoadCache(cache, other));
+
+    std::filesystem::remove(path);
+    std::filesystem::remove(cache);
+}
+
 RNET_TEST(Index, RejectsAnEmptyCorpus) {
     const auto path = std::filesystem::temp_directory_path() / "rnet_test_empty.txt";
     RNET_CHECK_OK(util::WriteFileAtomic(path, std::vector<uint8_t>{}));

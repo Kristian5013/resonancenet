@@ -106,6 +106,7 @@ Index.BuildsAndVerifies
 Index.ChunkProofsVerifyAgainstRoot
 Index.ChunksEndAtDocumentBoundaries
 Index.RejectsAnEmptyCorpus
+Index.TheCacheReproducesTheIndexWithoutRereadingTheCorpus
 Init.AnySliceCanBeGeneratedOnItsOwn
 Init.Bf16RoundsHalfToEven
 Init.EveryTensorHasADistinctName
