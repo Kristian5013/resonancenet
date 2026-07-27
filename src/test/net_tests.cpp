@@ -1977,6 +1977,92 @@ RNET_TEST(Node, CorpusChunksTravelWithProofsAndVerifyAgainstTheRoot) {
     std::filesystem::remove(corpus.value().path);
 }
 
+// The path a worker actually uses: ask the node, the node asks a peer, the node
+// hands back bytes that proved themselves.
+//
+// The test above assembles chunks by hand in its own handler, which proves the
+// wire format and nothing about the code a worker runs. This drives
+// RequestCorpusChunk and TakeCorpusChunk — the two calls between a worker asking
+// for chunk N and getting it — because until today nothing sent a getcorpus at
+// all and a path with no caller is a path with no evidence.
+RNET_TEST(Node, RequestingACorpusChunkFetchesAndVerifiesIt) {
+    auto corpus = MakeCorpus("fetch", 200'000, 700'000);
+    RNET_CHECK_OK(corpus);
+    auto source = CorpusSource::Open(corpus.value().path, corpus.value().manifest);
+    RNET_CHECK_OK(source);
+
+    Node seed(TestNodeConfig(19841), crypto::Sha3_256(std::string_view("s")), 3131);
+    Node asker(TestNodeConfig(0), crypto::Sha3_256(std::string_view("w")), 3232);
+    seed.SetCorpus(&source.value());
+    RNET_CHECK_OK(seed.Start());
+    RNET_CHECK_OK(asker.Start());
+
+    auto target = NetAddress::FromString("127.0.0.1:19841", 19841);
+    RNET_CHECK_OK(target);
+    RNET_CHECK_OK(asker.ConnectTo(target.value(), 1000));
+    Pump(seed, asker, [&] { return seed.ReadyCount() == 1 && asker.ReadyCount() == 1; });
+
+    const auto& root = corpus.value().manifest.dataset_root;
+    const auto peers = asker.ReadyPeerIds();
+    RNET_CHECK_EQ(peers.size(), size_t{1});
+
+    const uint64_t wanted = 2;
+    RNET_CHECK_OK(asker.RequestCorpusChunk(peers[0], wanted, root));
+    RNET_CHECK(asker.CorpusChunkInFlight(wanted));
+
+    const bool arrived = Pump(seed, asker,
+                              [&] { return asker.TakeCorpusChunk(wanted) != nullptr; }, 3000);
+    if (!arrived) RNET_FAIL("chunk {} never arrived through RequestCorpusChunk", wanted);
+    RNET_CHECK(!asker.CorpusChunkInFlight(wanted));
+
+    // The bytes must be the seed's, not merely bytes that passed a proof.
+    auto size = source.value().ChunkBytes(wanted);
+    RNET_CHECK_OK(size);
+    std::vector<uint8_t> expected(static_cast<size_t>(size.value()));
+    RNET_CHECK_OK(source.value().ReadChunkRange(wanted, 0, expected));
+    RNET_CHECK(*asker.TakeCorpusChunk(wanted) == expected);
+
+    // Asking again for a chunk already held does not put another request on the
+    // wire — a worker draws hundreds of chunks a round and revisits some.
+    RNET_CHECK_OK(asker.RequestCorpusChunk(peers[0], wanted, root));
+    RNET_CHECK(!asker.CorpusChunkInFlight(wanted));
+
+    std::filesystem::remove(corpus.value().path);
+}
+
+// Bytes that do not prove membership in the pinned root are refused, and the peer
+// that served them is scored. This is the property that makes it safe to take a
+// corpus from a stranger, so it is checked rather than assumed.
+RNET_TEST(Node, ACorpusChunkThatFailsItsProofIsRefused) {
+    auto corpus = MakeCorpus("badproof", 200'000, 700'000);
+    RNET_CHECK_OK(corpus);
+    auto source = CorpusSource::Open(corpus.value().path, corpus.value().manifest);
+    RNET_CHECK_OK(source);
+
+    Node seed(TestNodeConfig(19842), crypto::Sha3_256(std::string_view("s")), 3333);
+    Node asker(TestNodeConfig(0), crypto::Sha3_256(std::string_view("w")), 3434);
+    seed.SetCorpus(&source.value());
+    RNET_CHECK_OK(seed.Start());
+    RNET_CHECK_OK(asker.Start());
+
+    auto target = NetAddress::FromString("127.0.0.1:19842", 19842);
+    RNET_CHECK_OK(target);
+    RNET_CHECK_OK(asker.ConnectTo(target.value(), 1000));
+    Pump(seed, asker, [&] { return seed.ReadyCount() == 1 && asker.ReadyCount() == 1; });
+
+    // A root from a different corpus. The chunk the seed serves is genuine; it
+    // simply does not belong to the corpus this node was told to expect, which is
+    // exactly what a seed serving the wrong data looks like.
+    const auto wrong_root = crypto::Sha3_256(std::string_view("a different corpus"));
+    const auto peers = asker.ReadyPeerIds();
+    RNET_CHECK_OK(asker.RequestCorpusChunk(peers[0], 1, wrong_root));
+
+    Pump(seed, asker, [&] { return !asker.CorpusChunkInFlight(1); }, 3000);
+    RNET_CHECK(asker.TakeCorpusChunk(1) == nullptr);
+
+    std::filesystem::remove(corpus.value().path);
+}
+
 // A node that keeps no corpus says so rather than leaving the asker to time out.
 RNET_TEST(Node, ANodeWithoutACorpusSaysSo) {
     Node seed(TestNodeConfig(19819), crypto::Sha3_256(std::string_view("a")), 1111);

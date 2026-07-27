@@ -149,6 +149,7 @@ Message.OversizedDeclaredLengthIsRefused
 Message.OversizedPayloadCannotBeSent
 Message.RoundTrips
 Network.NamesParseRoundTrip
+Node.ACorpusChunkThatFailsItsProofIsRefused
 Node.ANodeWithoutACorpusSaysSo
 Node.AnObjectIsFetchedFromOnePeerOnly
 Node.BansExpire
@@ -164,6 +165,7 @@ Node.ObjectsPropagateFromAnnouncementToStorage
 Node.OversizedObjectsAreRefusedWithAReasonNotSilence
 Node.PeersExchangeAddresses
 Node.RefusesDuplicateAndBannedConnections
+Node.RequestingACorpusChunkFetchesAndVerifiesIt
 Node.SilentPeersLoseTheirSlot
 Node.SubstitutedObjectBytesAreRejectedAndScored
 Node.TwoNodesCompleteAHandshake
