@@ -147,8 +147,20 @@ Status Peer::HandleVersion(const VersionMessage& remote, const VersionMessage& l
         return st;
     }
     // Connecting to yourself wastes a slot and pollutes the address database.
+    //
+    // Answer before hanging up. Only the side that RECEIVES a version can see the
+    // matching nonce, and for an inbound connection that side holds an ephemeral
+    // source port — forgetting it achieves nothing, while the dialer, which holds
+    // the address that is actually in the database, learns only that the
+    // connection closed. Sending our version first lets it draw the same
+    // conclusion and drop the address. Without this the node dials itself on
+    // every tick forever; measured on the seed at twenty-one attempts a minute.
     if (remote.nonce == local_nonce) {
         is_self_ = true;
+        if (!sent_version_) {
+            (void)Send(cmd::kVersion, local.Serialize());
+            sent_version_ = true;
+        }
         Disconnect("self-connection");
         return Err("peer: connected to self");
     }

@@ -336,6 +336,21 @@ void Node::DropDisconnected(int64_t now_ms) {
             ++it;
             continue;
         }
+        // One last attempt to say why before hanging up.
+        //
+        // A peer dropped for a stated reason has that reason queued as a message,
+        // and the queue is drained by ServicePeer, which already ran this tick —
+        // so without this the socket closes with the explanation still in it. It
+        // matters for the self-connection reply in particular: only the side that
+        // receives a version can see the matching nonce, and the dialer learns it
+        // solely from the version sent back here.
+        while (it->second->HasPendingSend()) {
+            const auto pending = it->second->PendingSend();
+            auto written = it->second->socket().Write(pending);
+            if (!written || written.value().closed || written.value().bytes == 0) break;
+            it->second->ConsumeSent(written.value().bytes);
+        }
+
         // Only a peer that actually earned a ban gets one; an ordinary
         // disconnection is not evidence of hostility.
         if (it->second->misbehaviour() >= kBanThreshold) Ban(it->second->address(), now_ms);
