@@ -566,7 +566,9 @@ class WorkerServiceTests(unittest.IsolatedAsyncioTestCase):
             replay_payload_hash=bytes([7]) * 32,
             determinism_class=work.determinism_class))
         self.assertEqual(self.service.mismatches, 1)
-        self.assertNotIn(work.challenge_id, self.service._pending_verify)
+        # Still open: one verdict is not a quorum, and closing here is what made
+        # slash_quorum decorative.
+        self.assertIn(work.challenge_id, self.service._pending_verify)
 
     async def test_IndeterminateLeavesTheChallengeOpen(self):
         """Otherwise a verifier retires a challenge by being unable to answer
@@ -592,6 +594,23 @@ class WorkerServiceTests(unittest.IsolatedAsyncioTestCase):
                 replay_payload_hash=bytes([7]) * 32, determinism_class=0))
         self.assertIn("UNKNOWN_ASSIGNMENT", str(ctx.exception))
 
+    async def test_NobodyJudgesTheirOwnWork(self):
+        """Refusing to HAND a worker its own challenge is not enough: a verdict
+        is a message it can send unprompted, so without this it clears itself by
+        answering a question it was never asked."""
+        clients = await self.two_contributions()
+        self.service.policy = type(self.policy)(
+            **{**self.policy.__dict__, "challenge_percent": 100})
+        await self.close_a_round(clients)
+        challenge_id, (verify, _) = next(iter(self.service._pending_verify.items()))
+        accused = next(c for c in clients if c.worker_id == verify.target_worker_id)
+        with self.assertRaises(WorkerError) as ctx:
+            await self.in_thread(accused.verdict, ipc.Verdict(
+                challenge_id=challenge_id, verdict=1,
+                replay_payload_hash=bytes([7]) * 32,
+                determinism_class=verify.determinism_class))
+        self.assertIn("own work", str(ctx.exception))
+
     async def test_ChallengesExpire(self):
         """The policy guarantees the deadline falls while the weights needed to
         answer are still retained, so one that expires is one nobody able to
@@ -606,6 +625,117 @@ class WorkerServiceTests(unittest.IsolatedAsyncioTestCase):
             self.service._pending_verify[challenge_id] = (verify, -1)
         self.assertEqual(self.service.expire_challenges(), 2)
         self.assertEqual(self.service._pending_verify, {})
+
+    # -- from verdicts to a refusal ---------------------------------------------
+
+    async def three_workers_one_challenged(self):
+        """Three contributors, all challenged.
+
+        Three because the quorum is two and nobody judges their own work: with
+        two workers, every challenge has only one eligible verifier and no
+        accusation can ever reach a quorum. That is a property of the network,
+        not of the test — a two-worker network cannot prove anything.
+        """
+        published = []
+
+        class FakeService:
+            node = type("N", (), {"height": 0})()
+
+            def publish(self, obj):
+                published.append(obj)
+                return 1
+
+        self.service.service = FakeService()
+        count = self.round_desc.model.parameter_count()
+        clients, assignments = [], []
+        # Every assignment first, then every submission. Interleaving them means
+        # the third worker asks after the quorum is already met and is handed an
+        # Apply instead — correct behaviour, wrong shape for this fixture.
+        for _ in range(3):
+            client = self.client()
+            await self.in_thread(client.hello)
+            clients.append(client)
+            assignments.append(await self.in_thread(client.next_work))
+        for seed, (client, assignment) in enumerate(zip(clients, assignments)):
+            packed, exp = self.contribution(count, seed)
+            await self.in_thread(client.submit, assignment.assignment_id,
+                                 packed, exp, count, 5.7)
+        self.service.policy = type(self.policy)(
+            **{**self.policy.__dict__, "challenge_percent": 100})
+        for client in clients:
+            work = await self.in_thread(client.next_work)
+            await self.in_thread(client.applied, work.outer_step,
+                                 bytes([5]) * 32, bytes([6]) * 32)
+        return clients, published
+
+    async def test_AQuorumOfMismatchesBecomesEvidence(self):
+        clients, published = await self.three_workers_one_challenged()
+        challenge_id = next(iter(self.service._pending_verify))
+        verify, _ = self.service._pending_verify[challenge_id]
+
+        # regtest's quorum is two, so two distinct verifiers settle it.
+        self.assertEqual(self.policy.slash_quorum, 2)
+        for client in clients:
+            if client.worker_id == verify.target_worker_id:
+                continue                # nobody judges their own work
+            await self.in_thread(client.verdict, ipc.Verdict(
+                challenge_id=challenge_id, verdict=2,
+                replay_payload_hash=bytes([client.worker_id]) * 32,
+                determinism_class=verify.determinism_class))
+
+        from rnet.consensus.objects import SlashEvidence
+        proofs = [o for o in published if isinstance(o, SlashEvidence)]
+        self.assertEqual(len(proofs), 1)
+        self.assertEqual(proofs[0].target_worker_id, verify.target_worker_id)
+        self.assertEqual(len(proofs[0].verdict_ids), 2)
+        self.assertTrue(self.service.evidence.is_proven(verify.target_worker_id))
+
+    async def test_ShadowModeProvesAndStillGivesWork(self):
+        """Recorded, not acted on — which is the shipped setting."""
+        clients, _ = await self.three_workers_one_challenged()
+        challenge_id = next(iter(self.service._pending_verify))
+        verify, _ = self.service._pending_verify[challenge_id]
+        for client in clients:
+            if client.worker_id == verify.target_worker_id:
+                continue
+            await self.in_thread(client.verdict, ipc.Verdict(
+                challenge_id=challenge_id, verdict=2,
+                replay_payload_hash=bytes([client.worker_id]) * 32,
+                determinism_class=verify.determinism_class))
+
+        accused = next(c for c in clients
+                       if c.worker_id == verify.target_worker_id)
+        self.assertTrue(self.service.evidence.is_proven(accused.worker_id))
+        self.assertFalse(self.service.evidence.should_refuse(accused.worker_id))
+        work = await self.in_thread(accused.next_work)
+        self.assertIsInstance(work, (ipc.Assignment, ipc.Verify, ipc.NoWork))
+
+    async def test_EnforcingStopsGivingTheProvenWorkerWork(self):
+        clients, _ = await self.three_workers_one_challenged()
+        challenge_id = next(iter(self.service._pending_verify))
+        verify, _ = self.service._pending_verify[challenge_id]
+        for client in clients:
+            if client.worker_id == verify.target_worker_id:
+                continue
+            await self.in_thread(client.verdict, ipc.Verdict(
+                challenge_id=challenge_id, verdict=2,
+                replay_payload_hash=bytes([client.worker_id]) * 32,
+                determinism_class=verify.determinism_class))
+
+        # Flip enforcement on, as a network that had watched shadow mode long
+        # enough would do by re-pinning its policy.
+        self.service.evidence.shadow_mode = False
+        accused = next(c for c in clients
+                       if c.worker_id == verify.target_worker_id)
+        innocent = next(c for c in clients
+                        if c.worker_id != verify.target_worker_id)
+
+        refused = await self.in_thread(accused.next_work)
+        self.assertIsInstance(refused, ipc.NoWork)
+        self.assertIn("did not replay", refused.reason)
+        # And the other one is unaffected: guilt is per worker, not per node.
+        self.assertNotIsInstance(await self.in_thread(innocent.next_work),
+                                 ipc.NoWork)
 
     async def test_TheStatusLineNamesWhatMatters(self):
         client = self.client()

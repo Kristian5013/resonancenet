@@ -84,6 +84,7 @@ class WorkerService:
     challenged: int = 0
     verdicts: int = 0
     mismatches: int = 0
+    evidence: object = None
 
     _server: object = None
     _next_worker_id: int = 1
@@ -196,6 +197,15 @@ class WorkerService:
         _, uid, _ = struct.unpack("3i", raw)
         return uid == os.getuid()
 
+    def _evidence(self):
+        """The collector, built from policy on first use."""
+        if self.evidence is None:
+            from ..verification.evidence import EvidenceCollector
+            self.evidence = EvidenceCollector(
+                quorum=self.policy.slash_quorum,
+                shadow_mode=self.policy.shadow_mode)
+        return self.evidence
+
     async def _handshake(self, reader, writer) -> WorkerConn:
         message = await ipc.read_message(reader)
         if not isinstance(message, ipc.Hello):
@@ -253,6 +263,21 @@ class WorkerService:
     async def _on_get_assignment(self, conn: WorkerConn) -> None:
         head = self.chain.head
         outer_step = head.height + 1
+
+        # A worker proven not to have done the work it claimed gets nothing —
+        # and this comes FIRST, before challenges as well as before training.
+        # Letting it keep verifying was the version that shipped in the first
+        # draft, and it is worse than useless: a worker that fabricated its own
+        # round is exactly the one that will fabricate a verdict about somebody
+        # else's. Outside shadow mode only, because a rule whose first act is
+        # historically to be wrong about somebody should not act until it has
+        # been watched. Proved by
+        # WorkerServiceTests.EnforcingStopsGivingTheProvenWorkerWork.
+        if self.evidence is not None and self.evidence.should_refuse(conn.worker_id):
+            await self._send(conn, ipc.NoWork(
+                reason="a quorum of verifiers found your work did not replay",
+                retry_ms=600_000))
+            return
 
         # Applying comes first, and the order matters more than it looks.
         #
@@ -443,6 +468,11 @@ class WorkerService:
                 claimed_payload_hash=header.payload_hash,
                 determinism_class=self.round_desc.numerics.determinism_class,
             ), deadline)
+            from ..verification.evidence import Accusation
+            self._evidence().expect(challenge_id, Accusation(
+                contribution_id=contribution_id,
+                target_worker_id=header.worker_id,
+                round_id=header.round_id))
             self.challenged += 1
             self._log(f"step {checkpoint.outer_step}: challenging "
                       f"{contribution_id.hex()[:16]} from worker "
@@ -455,6 +485,13 @@ class WorkerService:
         if entry is None:
             await self._refuse(conn, ipc.Refusal.UNKNOWN_ASSIGNMENT,
                                "no challenge by that id is open here")
+            return
+        if entry[0].target_worker_id == conn.worker_id:
+            # Refusing to HAND a worker its own challenge is not enough: a
+            # verdict is a message a worker can send unprompted, so without this
+            # a worker clears itself by answering a question it was never asked.
+            await self._refuse(conn, ipc.Refusal.UNKNOWN_ASSIGNMENT,
+                               "nobody judges their own work")
             return
         try:
             kind = Kind(message.verdict)
@@ -475,17 +512,35 @@ class WorkerService:
             with contextlib.suppress(Exception):
                 self.service.publish(verdict)
 
+        proof = self._evidence().add(verdict, verdict.id)
+        if proof is not None:
+            self._log(f"PROVEN: worker {proof.target_worker_id} did not do the "
+                      f"work it claimed for {proof.contribution_id.hex()[:16]} "
+                      f"({len(proof.verdict_ids)} verifiers agree)"
+                      + ("  [shadow mode: recorded, not acted on]"
+                         if self.policy.shadow_mode else "  [REFUSING FURTHER WORK]"))
+            if self.service is not None:
+                with contextlib.suppress(Exception):
+                    self.service.publish(proof)
+
         shadow = " (shadow mode: recorded, nothing punished)" \
             if self.policy.shadow_mode else ""
         self._log(f"verdict {kind.name} from worker {conn.worker_id} on "
                   f"{message.challenge_id.hex()[:16]}"
                   + (f": {message.note}" if message.note else "") + shadow)
 
-        # An indeterminate answer leaves the challenge open for somebody who
-        # CAN judge it. Closing it would let a verifier retire a challenge by
-        # being unable to answer, which is the cheapest way to protect a friend.
-        if kind is not Kind.INDETERMINATE:
+        # Closed only when a quorum has agreed, either way. Closing on the first
+        # answer — which is what this did — makes the quorum unreachable by
+        # construction: the second verifier is told there is no such challenge,
+        # so slash_quorum is decorative and every accusation rests on one
+        # opinion. An indeterminate answer never settles anything, for the
+        # separate reason that a verifier could otherwise retire a challenge by
+        # being unable to answer it.
+        if self._evidence().is_settled(message.challenge_id):
             del self._pending_verify[message.challenge_id]
+            if self._evidence().cleared(message.challenge_id):
+                self._log(f"challenge {message.challenge_id.hex()[:16]} cleared: "
+                          f"a quorum reproduced the work")
         await self._send(conn, ipc.Accepted(contribution_id=message.challenge_id))
 
     def expire_challenges(self) -> int:
@@ -621,6 +676,8 @@ class WorkerService:
         if self.challenged:
             line += (f" — {self.challenged} challenged, {self.verdicts} judged"
                      + (f", {self.mismatches} MISMATCH" if self.mismatches else ""))
+        if self.evidence is not None:
+            line += f" | {self.evidence.status()}"
         return line
 
 
