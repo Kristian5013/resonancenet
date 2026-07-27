@@ -737,6 +737,73 @@ class WorkerServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIsInstance(await self.in_thread(innocent.next_work),
                                  ipc.NoWork)
 
+    # -- being behind -----------------------------------------------------------
+
+    async def test_AWorkerOutOfSyncIsDetectedByTheCommitmentAlreadyInTheHeader(self):
+        """The only way a node can tell, and it needs no new mechanism.
+
+        Momentum cannot be re-derived from the chain — under a constant
+        aggregate the recurrence has a plateau of fixed points, so two differing
+        histories stay different forever. But every checkpoint header already
+        commits to optimizer_state_hash, so a worker's own hashes against the
+        settled checkpoint answer the question exactly.
+        """
+        clients = await self.two_contributions()
+        good = await self.in_thread(clients[0].next_work)
+        await self.in_thread(clients[0].applied, good.outer_step,
+                             bytes([5]) * 32, bytes([6]) * 32)
+        self.assertEqual(self.chain.height, 1)
+
+        # The second worker applies and reports something else: it is behind.
+        work = await self.in_thread(clients[1].next_work)
+        self.assertIsInstance(work, ipc.Apply)
+        await self.in_thread(clients[1].applied, work.outer_step,
+                             bytes([9]) * 32, bytes([9]) * 32)
+        self.assertIs(self.service._in_sync[clients[1].worker_id], False)
+        self.assertIs(self.service._in_sync.get(clients[0].worker_id), None)
+        self.assertIn("behind", self.service.status())
+
+    async def test_AWorkerThatAgreesIsMarkedInSync(self):
+        clients = await self.two_contributions()
+        good = await self.in_thread(clients[0].next_work)
+        weights, optimizer = bytes([5]) * 32, bytes([6]) * 32
+        await self.in_thread(clients[0].applied, good.outer_step, weights, optimizer)
+
+        work = await self.in_thread(clients[1].next_work)
+        await self.in_thread(clients[1].applied, work.outer_step, weights, optimizer)
+        self.assertIs(self.service._in_sync[clients[1].worker_id], True)
+        self.assertNotIn("behind", self.service.status())
+
+    async def test_AWorkerKnownBehindDoesNotDefineACheckpoint(self):
+        """Its arithmetic is not wrong — it is arithmetic over a momentum the
+        rest of the network does not share, and a checkpoint built from it would
+        be a fork with one participant."""
+        clients = await self.two_contributions()
+        first = await self.in_thread(clients[0].next_work)
+        await self.in_thread(clients[0].applied, first.outer_step,
+                             bytes([5]) * 32, bytes([6]) * 32)
+        work = await self.in_thread(clients[1].next_work)
+        await self.in_thread(clients[1].applied, work.outer_step,
+                             bytes([9]) * 32, bytes([9]) * 32)
+        self.assertIs(self.service._in_sync[clients[1].worker_id], False)
+
+        # Next round: the behind worker must not be the one whose report becomes
+        # the checkpoint.
+        count = self.round_desc.model.parameter_count()
+        for seed, client in enumerate(clients):
+            assignment = await self.in_thread(client.next_work)
+            if not isinstance(assignment, ipc.Assignment):
+                continue
+            packed, exp = self.contribution(count, seed + 5)
+            await self.in_thread(client.submit, assignment.assignment_id,
+                                 packed, exp, count, 5.7)
+        behind = clients[1]
+        work = await self.in_thread(behind.next_work)
+        if isinstance(work, ipc.Apply):
+            await self.in_thread(behind.applied, work.outer_step,
+                                 bytes([9]) * 32, bytes([9]) * 32)
+            self.assertEqual(self.chain.height, 1, "a behind worker produced")
+
     async def test_TheStatusLineNamesWhatMatters(self):
         client = self.client()
         await self.in_thread(client.hello)

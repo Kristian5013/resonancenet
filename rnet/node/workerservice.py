@@ -81,6 +81,9 @@ class WorkerService:
     _verify_done: set = field(default_factory=set)
     # contribution_id -> its header, kept while a challenge about it is open
     _contribution_headers: dict = field(default_factory=dict)
+    # worker_id -> whether its last applied state agreed with the chain's.
+    # Absent means "not yet compared", which is not the same as out of sync.
+    _in_sync: dict = field(default_factory=dict)
     challenged: int = 0
     verdicts: int = 0
     mismatches: int = 0
@@ -389,6 +392,14 @@ class WorkerService:
             return
         seen[conn.worker_id] = (message.weights_hash, message.optimizer_state_hash)
 
+        # A worker known to be behind does not get to define the checkpoint.
+        # Its arithmetic is not wrong — it is arithmetic over a momentum the
+        # rest of the network does not share, and a checkpoint built from it
+        # would be a fork with one participant.
+        if self._in_sync.get(conn.worker_id) is False:
+            await self._send(conn, ipc.Accepted(contribution_id=bytes(32)))
+            return
+
         # Every applier should reach the same two hashes: same aggregate, same
         # base, integer arithmetic. A disagreement is not a peer being
         # dishonest — it is this node's own workers computing differently, which
@@ -398,11 +409,34 @@ class WorkerService:
             self._log(f"step {message.outer_step}: WORKERS DISAGREE — "
                       + ", ".join(f"{w}:{h[0].hex()[:12]}" for w, h in seen.items()))
 
-        if self.chain.height >= message.outer_step:
-            # Already built from somebody else's report. Still answered, because
-            # every worker message gets exactly one reply.
-            await self._send(conn, ipc.Accepted(
-                contribution_id=self.chain.at_height(message.outer_step).id))
+        settled = (self.chain.at_height(message.outer_step)
+                   if self.chain.height >= message.outer_step else None)
+        if settled is not None:
+            # The checkpoint at this step already exists — built from another
+            # worker's report, or received from the network. Comparing against
+            # it is how a node finds out whether it is in sync AT ALL, and it is
+            # the only way it can: the outer optimizer's momentum cannot be
+            # re-derived from the chain, because under a constant aggregate the
+            # recurrence has a plateau of fixed points rather than one and two
+            # histories that differ stay different forever. Measured in
+            # tests/test_momentum_memory.py.
+            #
+            # So the commitment already in every header does the work. A worker
+            # whose hashes disagree with the settled checkpoint is behind, and
+            # is marked so — it may still contribute, because a contribution is
+            # checked against the weights it names, but it must not produce.
+            in_sync = (message.weights_hash == settled.header.weights_hash
+                       and message.optimizer_state_hash
+                       == settled.header.optimizer_state_hash)
+            self._in_sync[conn.worker_id] = in_sync
+            if not in_sync:
+                self._log(
+                    f"worker {conn.worker_id} is not in sync at step "
+                    f"{message.outer_step}: weights "
+                    f"{message.weights_hash.hex()[:12]} against "
+                    f"{settled.header.weights_hash.hex()[:12]} — it will "
+                    f"contribute but not produce until it agrees")
+            await self._send(conn, ipc.Accepted(contribution_id=settled.id))
             return
 
         parts = self.contributions_at(message.outer_step)
@@ -676,6 +710,9 @@ class WorkerService:
         if self.challenged:
             line += (f" — {self.challenged} challenged, {self.verdicts} judged"
                      + (f", {self.mismatches} MISMATCH" if self.mismatches else ""))
+        behind = sum(1 for v in self._in_sync.values() if v is False)
+        if behind:
+            line += f" — {behind} worker(s) behind, contributing but not producing"
         if self.evidence is not None:
             line += f" | {self.evidence.status()}"
         return line
