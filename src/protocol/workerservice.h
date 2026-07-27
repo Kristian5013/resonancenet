@@ -59,6 +59,11 @@ public:
     uint64_t contributions_accepted() const { return accepted_; }
     uint64_t requests_refused() const { return refused_; }
 
+    // Requests answered with "ask again" rather than turned down. Separate from
+    // refusals because they mean the opposite: a worker fetching ahead is a worker
+    // that is keeping its GPU busy.
+    uint64_t requests_deferred() const { return deferred_; }
+
 private:
     Status Dispatch(ipc::Client& client, ipc::ReceivedFrame& received, int64_t now_ms);
     Status OnHello(ipc::Client& client, const ipc::Frame& frame);
@@ -102,6 +107,7 @@ private:
 
     uint64_t accepted_{0};
     uint64_t refused_{0};
+    uint64_t deferred_{0};
 };
 
 }  // namespace rnet::protocol

@@ -45,8 +45,18 @@ WorkerService::WorkerService(ipc::Server& server, net::Node& node, Participant& 
 
 Status WorkerService::Refuse(ipc::Client& client, uint64_t request_id, IpcError error,
                              std::string_view reason) {
-    ++refused_;
-    RNET_LOG_INFO("ipc: worker {} refused ({}): {}", client.id(), IpcErrorName(error), reason);
+    // "Not yet" is not a refusal, and counting it as one made a healthy node
+    // report two thousand rejections an hour. A worker asks for chunks it will
+    // need shortly and is told they are being fetched — that is the mechanism
+    // working, and an operator reading the status line should not have to know
+    // that to feel calm about it.
+    if (error == IpcError::Unavailable) {
+        ++deferred_;
+        RNET_LOG_DEBUG("ipc: worker {} deferred: {}", client.id(), reason);
+    } else {
+        ++refused_;
+        RNET_LOG_INFO("ipc: worker {} refused ({}): {}", client.id(), IpcErrorName(error), reason);
+    }
 
     auto payload = ipc::CborWriter()
                        .BeginMap(2)

@@ -396,9 +396,11 @@ int main(int argc, char** argv) {
                               "accepted / {} refused",
                               participant->outer_step(), participant->submission_count(),
                               service->objects_accepted(), service->objects_rejected());
-                RNET_LOG_INFO("local workers: {} connected, {} contributions accepted, {} refused",
-                              ipc_server.client_count(), worker_service->contributions_accepted(),
-                              worker_service->requests_refused());
+                RNET_LOG_INFO(
+                    "local workers: {} connected, {} contributions accepted, {} refused, "
+                    "{} corpus fetches deferred",
+                    ipc_server.client_count(), worker_service->contributions_accepted(),
+                    worker_service->requests_refused(), worker_service->requests_deferred());
                 auto held = weights_store.List();
                 auto bytes = weights_store.TotalBytes();
                 RNET_LOG_INFO("weights: {} checkpoint(s) held, {} MB",
