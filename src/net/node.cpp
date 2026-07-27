@@ -632,6 +632,13 @@ Status Node::HandleCorpus(Peer& peer, const ReceivedMessage& message) {
         corpus_fetches_.erase(fetch);
         return Err(bytes.error());
     }
+    if (corpus_ready_.find(index) == corpus_ready_.end()) {
+        while (corpus_ready_order_.size() >= kMaxReadyCorpusChunks) {
+            corpus_ready_.erase(corpus_ready_order_.front());
+            corpus_ready_order_.pop_front();
+        }
+        corpus_ready_order_.push_back(index);
+    }
     corpus_ready_[index] = std::move(bytes.value());
     corpus_fetches_.erase(fetch);
     RNET_LOG_DEBUG("corpus: chunk {} verified against the pinned root", index);

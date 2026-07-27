@@ -241,7 +241,17 @@ private:
         int64_t started_at{0};
     };
     std::map<uint64_t, CorpusFetch> corpus_fetches_;
+
+    // Chunks that arrived and proved themselves, newest last.
+    //
+    // BOUNDED, because a worker revisits chunks within a round and almost never
+    // across them: a round draws two hundred at random out of seven million. Left
+    // unbounded this holds every chunk the node has ever fetched — a megabyte
+    // each, two hundred megabytes a round, for a cache whose hit rate after the
+    // round ends is nil.
+    static constexpr size_t kMaxReadyCorpusChunks = 256;
     std::map<uint64_t, std::vector<uint8_t>> corpus_ready_;
+    std::deque<uint64_t> corpus_ready_order_;
     uint64_t next_peer_id_{1};
     bool running_{false};
 };

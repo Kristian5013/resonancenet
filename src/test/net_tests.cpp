@@ -2030,6 +2030,57 @@ RNET_TEST(Node, RequestingACorpusChunkFetchesAndVerifiesIt) {
     std::filesystem::remove(corpus.value().path);
 }
 
+// The cache of fetched chunks has to be bounded.
+//
+// A worker revisits chunks within a round and almost never across them — a round
+// draws two hundred at random out of seven million — so an unbounded cache holds
+// every chunk the node has ever fetched, a megabyte each, for a hit rate that is
+// nil once the round ends.
+RNET_TEST(Node, TheFetchedChunkCacheIsBounded) {
+    auto corpus = MakeCorpus("cachebound", 20'000, 40'000);
+    RNET_CHECK_OK(corpus);
+    auto source = CorpusSource::Open(corpus.value().path, corpus.value().manifest);
+    RNET_CHECK_OK(source);
+    RNET_CHECK(source.value().n_chunks() > 300);
+
+    Node seed(TestNodeConfig(19851), crypto::Sha3_256(std::string_view("s")), 6161);
+    Node asker(TestNodeConfig(0), crypto::Sha3_256(std::string_view("w")), 6262);
+    seed.SetCorpus(&source.value());
+    RNET_CHECK_OK(seed.Start());
+    RNET_CHECK_OK(asker.Start());
+
+    auto target = NetAddress::FromString("127.0.0.1:19851", 19851);
+    RNET_CHECK_OK(target);
+    RNET_CHECK_OK(asker.ConnectTo(target.value(), 1000));
+    Pump(seed, asker, [&] { return seed.ReadyCount() == 1 && asker.ReadyCount() == 1; });
+
+    const auto& root = corpus.value().manifest.dataset_root;
+    const auto peers = asker.ReadyPeerIds();
+    RNET_CHECK_EQ(peers.size(), size_t{1});
+
+    // More chunks than the cache can hold, in batches the seed's request queue
+    // will accept — asking for all of them at once is itself refused, and rightly.
+    const uint64_t wanted = 300;
+    for (uint64_t base = 0; base < wanted; base += 32) {
+        for (uint64_t i = base; i < std::min(base + 32, wanted); ++i) {
+            RNET_CHECK_OK(asker.RequestCorpusChunk(peers[0], i, root));
+        }
+        Pump(seed, asker,
+             [&] { return asker.TakeCorpusChunk(std::min(base + 31, wanted - 1)) != nullptr; },
+             10000);
+    }
+
+    // The newest is held and the oldest is not, which is the whole property: a
+    // node that kept them all would answer for chunk 0 as well.
+    RNET_CHECK(asker.TakeCorpusChunk(wanted - 1) != nullptr);
+    if (asker.TakeCorpusChunk(0) != nullptr) {
+        RNET_FAIL("chunk 0 is still cached after {} more arrived; the cache is unbounded",
+                  wanted - 1);
+    }
+
+    std::filesystem::remove(corpus.value().path);
+}
+
 // Bytes that do not prove membership in the pinned root are refused, and the peer
 // that served them is scored. This is the property that makes it safe to take a
 // corpus from a stranger, so it is checked rather than assumed.
