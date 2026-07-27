@@ -1,8 +1,10 @@
 #include "dataset/manifest.h"
 
+#include <algorithm>
 #include <format>
 
 #include "util/fs.h"
+#include "util/logging.h"
 #include "util/hex.h"
 
 namespace rnet::dataset {
@@ -53,6 +55,26 @@ Status VerifyCorpus(const std::filesystem::path& corpus_file,
                    util::ToHex(index.value().root()) + "\n  manifest: " +
                    util::ToHex(manifest.dataset_root));
     }
+    // The smallest chunk decides whether every assignment is trainable. A chunk
+    // must hold seq_len + 1 tokens, and the rule gives the LAST chunk no minimum
+    // at all — it is whatever follows the final boundary, which can be a single
+    // byte. A worker sent there cannot form a window and fails on an assignment
+    // nobody else ever draws, which is the worst shape a bug can have.
+    uint64_t smallest = UINT64_MAX;
+    uint64_t smallest_at = 0;
+    const auto& offsets = index.value().offsets();
+    for (size_t i = 0; i + 1 < offsets.size(); ++i) {
+        const uint64_t width = offsets[i + 1] - offsets[i];
+        if (width < smallest) { smallest = width; smallest_at = i; }
+    }
+    RNET_LOG_INFO("corpus: smallest chunk is {} bytes (chunk {}), largest is {} bytes",
+                  smallest, smallest_at, [&] {
+                      uint64_t big = 0;
+                      for (size_t i = 0; i + 1 < offsets.size(); ++i) {
+                          big = std::max(big, offsets[i + 1] - offsets[i]);
+                      }
+                      return big;
+                  }());
     return Status::Ok();
 }
 
