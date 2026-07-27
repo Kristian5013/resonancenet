@@ -44,6 +44,18 @@ POLICY_HASH: dict[str, str] = {
     "regtest": "9f64c73609b15760c2583a5df7e852608be67a78c00ceb4ded90cc8aff93cf50",
 }
 
+# The fourth anchor: the Merkle root over every tensor of the initial weights,
+# derived from the genesis hash above. Nobody ships these weights — this is what
+# they must come out as. Checking one costs real work (85 seconds for the 29.4
+# billion-parameter mixture, 1.5 for the dense 400M), which is why verify_build
+# does not do it and `rnet genesis-weights` does.
+WEIGHTS_HASH: dict[str, str] = {
+    "main":    "26358eaeb57666cf9e5d5fa59106ab407e5dbbd0f67da925f040abd064bdb37d",
+    "moe":     "9360d21931a36f52732d88e8438626e44565373b39eb54d76ef2f81cfac1b50a",
+    "test":    "7f06a158466cf62426beb621b655d0cf352e8e5b60510304ed8aab8b3d89eb44",
+    "regtest": "f1f0c82d26889543586f6a5bbe76d301696edf017b159d66fb343eb21bd40cae",
+}
+
 
 class GenesisError(Exception):
     """A refusal to trust something. Never recoverable by trying again."""
@@ -79,6 +91,29 @@ def verify_build(network: str | None = None) -> None:
                     f"genesis: {name} {kind} table hashes to {actual}, the anchor is "
                     f"{expected}. A consensus value was changed without regenerating "
                     f"the anchor — which forks the network, so do it deliberately.")
+
+
+def verify_weights(network: str, *, progress=None) -> bytes:
+    """Derive the initial weights and check them against the anchor.
+
+    Separate from verify_build because it is the expensive one: the mixture is
+    29.4 billion parameters and takes about a minute and a half of real work.
+    Kept as a deliberate act rather than an import-time cost, and the only part
+    of this module that needs numpy.
+    """
+    from .init import weights_hash
+    verify_build(network)
+    if network not in WEIGHTS_HASH:
+        raise GenesisError(f"genesis: {network} has no weights anchor")
+    spec = NETWORKS[network][0].model
+    actual = weights_hash(spec, bytes.fromhex(GENESIS_HASH[network]),
+                          progress=progress).hex()
+    if actual != WEIGHTS_HASH[network]:
+        raise GenesisError(
+            f"genesis: {network} initial weights derive to {actual}, the anchor is "
+            f"{WEIGHTS_HASH[network]}. Either the derivation changed or the model "
+            f"shape did; both are consensus changes.")
+    return bytes.fromhex(actual)
 
 
 def round_descriptor(network: str) -> RoundDescriptor:
@@ -167,6 +202,7 @@ def describe(network: str) -> str:
         f"network        {network}  (magic {round_desc.network_magic:#010x})\n"
         f"genesis        {GENESIS_HASH[network]}\n"
         f"policy         {POLICY_HASH[network]}\n"
+        f"weights        {WEIGHTS_HASH[network]}  (derived, not shipped)\n"
         f"model          {m.describe()}\n"
         f"arithmetic     {round_desc.numerics.describe()}\n"
         f"corpus         {corpus}\n"

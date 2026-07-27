@@ -47,6 +47,38 @@ def cmd_genesis_verify(args) -> int:
     return 1 if failed else 0
 
 
+def cmd_genesis_weights(args) -> int:
+    """Derive the initial weights and check them against the anchor.
+
+    The expensive one — about a minute and a half for the 29.4 billion-parameter
+    mixture — and the only command that needs numpy. It is what turns "the
+    network says it started here" into something a stranger can check.
+    """
+    import time
+    failed = False
+    for network in args.networks or genesis.networks():
+        spec = genesis.round_descriptor(network).model
+        started = time.monotonic()
+
+        # Overwritten in place, so the finished line is the only one that stays.
+        # Padded to clear whatever the previous, longer line left behind.
+        def show(done, total, _n=network, _t=started):
+            if done % 256 and done != total:
+                return
+            print(f"\r{_n:8} {done:>6}/{total} tensors  "
+                  f"{time.monotonic() - _t:5.1f}s".ljust(78), end="", flush=True)
+
+        try:
+            digest = genesis.verify_weights(network, progress=show)
+            line = (f"{network:8} {digest.hex()}  {spec.parameter_count():,} params  "
+                    f"{time.monotonic() - started:.1f}s")
+        except genesis.GenesisError as exc:
+            line = f"{network:8} REFUSED: {exc}"
+            failed = True
+        print("\r" + line.ljust(78))
+    return 1 if failed else 0
+
+
 def cmd_genesis_anchors(args) -> int:
     """Print the anchors the tables currently produce.
 
@@ -62,6 +94,8 @@ def cmd_genesis_anchors(args) -> int:
     for name, (_, p) in sorted(NETWORKS.items()):
         print(f'    "{name}":{" " * (10 - len(name))}"{p.id.hex()}",')
     print("}")
+    print("\n# Regenerate WEIGHTS_HASH with `rnet genesis-weights` — the anchors "
+          "there\n# depend on these, so a change here invalidates them too.")
     return 0
 
 
@@ -82,6 +116,11 @@ def main(argv: list[str] | None = None) -> int:
     verify.add_argument("networks", nargs="*")
     verify.add_argument("--dir", default="share/genesis")
     verify.set_defaults(fn=cmd_genesis_verify)
+
+    weights = sub.add_parser("genesis-weights",
+                             help="derive the initial weights and check the anchor (slow)")
+    weights.add_argument("networks", nargs="*")
+    weights.set_defaults(fn=cmd_genesis_weights)
 
     anchors = sub.add_parser("genesis-anchors",
                              help="print the anchors the tables produce (forks the network)")

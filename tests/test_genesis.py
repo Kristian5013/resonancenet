@@ -169,11 +169,45 @@ class GenesisTests(unittest.TestCase):
         for network in genesis.networks():
             self.assertTrue(genesis.policy_descriptor(network).shadow_mode, network)
 
-    def test_DescribeMentionsBothAnchors(self):
+    def test_DescribeMentionsEveryAnchor(self):
         for network in genesis.networks():
             text = genesis.describe(network)
             self.assertIn(genesis.GENESIS_HASH[network], text)
             self.assertIn(genesis.POLICY_HASH[network], text)
+            self.assertIn(genesis.WEIGHTS_HASH[network], text)
+
+    # -- the fourth anchor --------------------------------------------------
+
+    def test_EveryNetworkHasAWeightsAnchor(self):
+        self.assertEqual(sorted(NETWORKS), sorted(genesis.WEIGHTS_HASH))
+        self.assertEqual(len(set(genesis.WEIGHTS_HASH.values())), len(NETWORKS))
+
+    def test_TheRegtestWeightsDeriveToTheirAnchor(self):
+        """Checked here because regtest is 4 million parameters and instant.
+
+        The other three are real work — 1.5 seconds for the dense 400M and 85
+        for the 29.4 billion mixture — so they are checked by
+        `rnet genesis-weights`, deliberately and not on every test run.
+        """
+        self.assertEqual(genesis.verify_weights("regtest").hex(),
+                         genesis.WEIGHTS_HASH["regtest"])
+
+    def test_AChangedWeightsAnchorIsCaught(self):
+        real = genesis.WEIGHTS_HASH["regtest"]
+        genesis.WEIGHTS_HASH["regtest"] = "00" * 32
+        try:
+            with self.assertRaises(genesis.GenesisError) as ctx:
+                genesis.verify_weights("regtest")
+            self.assertIn("consensus change", str(ctx.exception))
+        finally:
+            genesis.WEIGHTS_HASH["regtest"] = real
+
+    def test_TheWeightsAnchorDependsOnTheGenesisHash(self):
+        """Which is what makes it the fourth anchor and not a fifth constant."""
+        from rnet.consensus.init import weights_hash
+        spec = genesis.round_descriptor("regtest").model
+        theirs = weights_hash(spec, bytes.fromhex(genesis.GENESIS_HASH["main"]))
+        self.assertNotEqual(theirs.hex(), genesis.WEIGHTS_HASH["regtest"])
 
 
 class CommandLineTests(unittest.TestCase):

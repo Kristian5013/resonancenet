@@ -158,15 +158,56 @@ class InitTests(unittest.TestCase):
     # -- the hash -----------------------------------------------------------
 
     def test_ParallelDerivationMatchesSequential(self):
-        """Hashing is ordered; only derivation is concurrent."""
+        """Leaves come back in layout order, never as they finish — the root is
+        defined by the order."""
         self.assertEqual(init.weights_hash(TINY_3M, G, workers=1),
-                         init.weights_hash(TINY_3M, G, workers=16))
+                         init.weights_hash(TINY_3M, G, workers=8))
+        self.assertEqual(init.leaves(TINY_3M, G, workers=1),
+                         init.leaves(TINY_3M, G, workers=8))
 
     def test_TheRegtestWeightsHashIsPinned(self):
         """The fourth anchor, for the network small enough to check in a test."""
         self.assertEqual(
             init.weights_hash(TINY_3M, G).hex(),
-            "a84d838872295b0c741f00c844f281b391219f3c15f196b9d7cc75b53d7eb94f")
+            "f1f0c82d26889543586f6a5bbe76d301696edf017b159d66fb343eb21bd40cae")
+        self.assertEqual(genesis.WEIGHTS_HASH["regtest"],
+                         init.weights_hash(TINY_3M, G).hex())
+
+    def test_OneTensorCanProveItBelongs(self):
+        """What a flat digest could not offer at any price.
+
+        A shard holder proves its experts are the ones the network settled on
+        without producing a model that exists nowhere in one place.
+        """
+        from rnet.crypto import merkle
+        root = init.weights_hash(TINY_3M, G)
+        name = "layers.2.ffn.up.weight"
+        proof = init.tensor_proof(TINY_3M, G, name)
+        spec = next(t for t in layout(TINY_3M) if t.name == name)
+        leaf = merkle.leaf_hash(init.tensor_bytes(spec, G))
+        self.assertTrue(merkle.verify_proof(leaf, proof, root))
+
+        # And a tensor that is not the one claimed does not prove.
+        other = next(t for t in layout(TINY_3M) if t.name == "layers.2.ffn.gate.weight")
+        self.assertFalse(merkle.verify_proof(
+            merkle.leaf_hash(init.tensor_bytes(other, G)), proof, root))
+
+    def test_AProofForAnAbsentTensorIsRefused(self):
+        with self.assertRaises(KeyError):
+            init.tensor_proof(TINY_3M, G, "layers.0.moe.router.weight")
+
+    def test_TheStreamIsBlockedWithoutChangingTheValues(self):
+        """Blocking bounds the largest allocation; it must not move a value.
+
+        A tensor spanning several blocks and one that fits in a single block
+        must agree wherever they overlap, or the block index would be silently
+        part of the derivation for large tensors only.
+        """
+        big = init._stream("probe", G, init.BLOCK_ELEMS + 100)
+        small = init._stream("probe", G, 64)
+        self.assertTrue(np.array_equal(big[:64], small))
+        # And the second block is not a repeat of the first.
+        self.assertFalse(np.array_equal(big[:100], big[init.BLOCK_ELEMS:]))
 
     def test_HashingDerivedValuesMatchesDerivingTheHash(self):
         self.assertEqual(init.hash_of_values(TINY_3M, init.derive_all(TINY_3M, G)),
