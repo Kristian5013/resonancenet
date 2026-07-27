@@ -53,6 +53,8 @@ SUBMIT_VERDICT = 0x0040
 VERDICT_ACCEPTED = 0x0041
 SUBMIT_WEIGHTS = 0x0044
 WEIGHTS_ACCEPTED = 0x0045
+GET_CORPUS_CHUNK = 0x0060
+CORPUS_CHUNK = 0x0061
 GET_STATUS = 0x0050
 STATUS = 0x0051
 
@@ -454,6 +456,26 @@ class DaemonClient:
             "outer_step": cbor.get_uint(reply, "outer_step"),
             "checkpoint_id": cbor.get_hash(reply, "checkpoint_id"),
         }
+
+    def corpus_chunk(self, chunk_index: int) -> bytes:
+        """One chunk of the corpus, as raw UTF-8.
+
+        The node answers from its own copy if it serves one, and otherwise fetches
+        it from a peer and checks it against dataset_root before handing it over —
+        so the bytes are trustworthy wherever they came from, which is the point of
+        a seed.
+
+        A fetch in flight is refused with Unavailable rather than waited on: the
+        daemon serves every worker from one loop and must not block in it. The
+        caller retries; RemoteCorpus does that.
+        """
+        msg_type, reply, _ = self._request(GET_CORPUS_CHUNK, {"chunk_index": chunk_index})
+        if msg_type != CORPUS_CHUNK:
+            raise IpcError(f"expected a corpus chunk, got message type {msg_type:#06x}")
+        got = reply["chunk_index"]
+        if got != chunk_index:
+            raise IpcError(f"asked for chunk {chunk_index}, was given {got}")
+        return reply["bytes"]
 
     def status(self) -> dict:
         msg_type, reply, _ = self._request(GET_STATUS, {})

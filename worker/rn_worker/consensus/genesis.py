@@ -18,8 +18,8 @@ from . import canon
 # Two artifacts per network, because they change for different reasons: the round
 # is frozen until a hard fork, the policy may be retuned from real network data.
 GENESIS_HASH = {
-    "main": "93e932f33d0d86eadb5c16fef2d20784c45bb819f5c167440009979915e69d25",
-    "test": "9c8db75ddaaebd51e9e609eba8fb667d84a6cd210b6c89a14103fcf019525f92",
+    "main": "a58d4d98771a942373094c5008ec803513185725b78a5fa4218e4e3a63561588",
+    "test": "4b73e441aabd5753ddcb9b44822eb5fb14489b794ae95af074379e5074972ae2",
     "regtest": "29c86631c8a991646dac442788a6fdc88b6056434a0b9fbd5eaa8f2ff5c5ca3d",
 }
 

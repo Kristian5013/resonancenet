@@ -74,16 +74,24 @@ class LocalNetwork:
 
     def __init__(self, network: str, genesis_dir: str, tokens: np.ndarray, workers: list[WorkerSpec],
                  device: str = "cuda", lr: float = 1e-3, verbose: bool = True,
-                 dtype: torch.dtype = torch.float32, grad_checkpointing: bool = False):
+                 dtype: torch.dtype = torch.float32, grad_checkpointing: bool = False,
+                 corpus=None):
         self.round = genesis.load_network(network, genesis_dir)
         self.policy = genesis.load_policy_for_network(network, genesis_dir)
         self.tokens = tokens
         # The inner loop takes a corpus, not a token array: with the corpus
         # addressed in chunks of text, "which tokens" is a question only something
-        # that holds the corpus can answer. ArrayCorpus presents that surface over
-        # an array so the simulation exercises the same path a real worker does.
-        from .corpus import ArrayCorpus
-        self.corpus = ArrayCorpus(tokens)
+        # that holds the corpus can answer.
+        #
+        # Pass `corpus` to train on real text through the same path a worker uses —
+        # fetch a chunk, tokenize it, take the window. Without one, ArrayCorpus
+        # presents the same surface over an array, so the simulation still
+        # exercises one code path rather than two.
+        if corpus is not None:
+            self.corpus = corpus
+        else:
+            from .corpus import ArrayCorpus
+            self.corpus = ArrayCorpus(tokens)
         self.workers = workers
         self.device = device if torch.cuda.is_available() else "cpu"
         self.lr = lr

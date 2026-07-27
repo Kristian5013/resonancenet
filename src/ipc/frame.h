@@ -73,6 +73,16 @@ enum class MessageType : uint16_t {
     GetWeights = 0x0020,
     Weights = 0x0021,
 
+    // A worker asking its node for one chunk of the corpus.
+    //
+    // Without this a worker can only train on a corpus its own machine holds,
+    // which makes a seed pointless: the reason chunks travel with inclusion
+    // proofs is so they can safely come from a stranger. The node fetches from a
+    // peer if it does not hold the corpus itself, checks the bytes against
+    // dataset_root, and only then answers.
+    GetCorpusChunk = 0x0060,
+    CorpusChunk = 0x0061,
+
     GetStatus = 0x0050,
     Status = 0x0051,
 };

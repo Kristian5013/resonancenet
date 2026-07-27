@@ -97,6 +97,14 @@ size_t Node::ReadyCount() const {
                       [](const auto& kv) { return kv.second->state() == PeerState::Ready; }));
 }
 
+std::vector<uint64_t> Node::ReadyPeerIds() const {
+    std::vector<uint64_t> out;
+    for (const auto& [id, peer] : peers_) {
+        if (peer->state() == PeerState::Ready) out.push_back(id);
+    }
+    return out;
+}
+
 void Node::SetHandler(std::string command, MessageHandler handler) {
     handlers_[std::move(command)] = std::move(handler);
 }
@@ -209,7 +217,10 @@ Status Node::DispatchMessage(Peer& peer, const ReceivedMessage& message, int64_t
         if (auto st = HandleGetCorpus(peer, message); !st) return st;
         return NotifyHandler(peer, message, now_ms);
     }
-    if (message.command == cmd::kCorpus) return NotifyHandler(peer, message, now_ms);
+    if (message.command == cmd::kCorpus) {
+        if (auto st = HandleCorpus(peer, message); !st) return st;
+        return NotifyHandler(peer, message, now_ms);
+    }
     if (message.command == cmd::kGetChunks) {
         if (auto st = HandleGetChunks(peer, message); !st) return st;
         return NotifyHandler(peer, message, now_ms);
@@ -541,6 +552,81 @@ Result<size_t> Node::ReadObjectRange(const crypto::Hash256& hash, uint64_t offse
     }
     if (weights_ != nullptr && weights_->Has(hash)) return weights_->ReadRange(hash, offset, out);
     return Err("node: object is not held");
+}
+
+Status Node::RequestCorpusChunk(uint64_t peer_id, uint64_t chunk_index,
+                                const crypto::Hash256& dataset_root) {
+    if (corpus_ready_.count(chunk_index) != 0) return Status::Ok();   // already here
+    if (corpus_fetches_.count(chunk_index) != 0) return Status::Ok(); // already asked
+
+    auto peer = peers_.find(peer_id);
+    if (peer == peers_.end()) return Err("corpus: no such peer");
+
+    GetCorpusMessage request;
+    request.first_chunk = chunk_index;
+    request.chunk_count = 1;
+    if (auto st = peer->second->Send(cmd::kGetCorpus, request.Serialize()); !st) return st;
+
+    CorpusFetch fetch;
+    fetch.dataset_root = dataset_root;
+    corpus_fetches_.emplace(chunk_index, std::move(fetch));
+    return Status::Ok();
+}
+
+// A part of a corpus chunk arrived.
+//
+// The assembler is created from part zero, because that is the part carrying the
+// inclusion proof, and a chunk assembled without one could not be checked against
+// anything. Parts for a chunk nobody asked for are dropped rather than buffered:
+// otherwise a peer could fill this node's memory by sending corpus it was never
+// asked for, which is the same shape as the unsolicited-object problem.
+Status Node::HandleCorpus(Peer& peer, const ReceivedMessage& message) {
+    auto part = CorpusMessage::Deserialize(message.payload);
+    if (!part) {
+        peer.Misbehaving(20, part.error());
+        return Err(part.error());
+    }
+    const uint64_t index = part.value().chunk_index;
+
+    auto fetch = corpus_fetches_.find(index);
+    if (fetch == corpus_fetches_.end()) {
+        peer.Misbehaving(10, "corpus part for a chunk this node did not request");
+        return Status::Ok();
+    }
+
+    if (fetch->second.assembler == nullptr) {
+        if (part.value().part != 0) return Status::Ok();   // waiting for the proof
+        fetch->second.assembler = std::make_unique<CorpusAssembler>(
+            index, part.value().chunk_bytes, part.value().proof);
+    }
+    if (auto st = fetch->second.assembler->Accept(part.value().part, part.value().data); !st) {
+        peer.Misbehaving(20, st.error());
+        corpus_fetches_.erase(fetch);
+        return Err(st.error());
+    }
+    if (!fetch->second.assembler->Complete()) return Status::Ok();
+
+    auto bytes = fetch->second.assembler->Finish(fetch->second.dataset_root);
+    if (!bytes) {
+        // Served bytes that do not prove membership in the pinned root. That is
+        // not a mistake a healthy node makes.
+        peer.Misbehaving(50, bytes.error());
+        corpus_fetches_.erase(fetch);
+        return Err(bytes.error());
+    }
+    corpus_ready_[index] = std::move(bytes.value());
+    corpus_fetches_.erase(fetch);
+    RNET_LOG_DEBUG("corpus: chunk {} verified against the pinned root", index);
+    return Status::Ok();
+}
+
+const std::vector<uint8_t>* Node::TakeCorpusChunk(uint64_t chunk_index) {
+    auto it = corpus_ready_.find(chunk_index);
+    return it == corpus_ready_.end() ? nullptr : &it->second;
+}
+
+bool Node::CorpusChunkInFlight(uint64_t chunk_index) const {
+    return corpus_fetches_.count(chunk_index) != 0;
 }
 
 Status Node::HandleGetCorpus(Peer& peer, const ReceivedMessage& message) {

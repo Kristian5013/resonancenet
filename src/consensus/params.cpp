@@ -151,7 +151,18 @@ NetworkParams MakeMain() {
     p.round.determinism_class = DeterminismClass::Pending;
     p.round.optimizer = OptimizerId::Adafactor;
     p.round.tokenizer_hash = HashFromHex(kTokenizerRound0);
-    p.round.dataset_root = crypto::Hash256{};     // pinned when the corpus is published
+    // FineWeb-Edu, every Common Crawl dump the dataset covers, pinned at revision
+    // 87f09149ef4734204d70ed1d046ddc9ca3f2b8f9: 2410 parquet shards extracted to
+    // 7,359,506,899,436 bytes of UTF-8 and cut into 6,956,933 document-aligned
+    // chunks at a 1 MiB target.
+    //
+    // That is about 1.54 trillion tokens for a 397M-parameter model — some 3,800
+    // tokens per parameter, roughly twice the ratio Llama 3 8B was trained at. The
+    // network trains continuously and samples with replacement, so a corpus this
+    // size is not waste: it is how many steps can be taken before the model starts
+    // seeing the same text twice.
+    p.round.dataset_root = HashFromHex(
+        "7195da139188f4a1b779bd380562718e080959531aee0cabbf777cd13501a3b8");
     p.policy = MakePolicy(MagicWord(p.message_magic),
                           // Two hundred, not two hundred and fifty. Measured on a
                           // 24 GB card at seq_len 16384: 1.86 s per inner step, so
@@ -193,8 +204,8 @@ NetworkParams MakeMain() {
     // this very descriptor (see consensus/init.h) and pinned here, so a node can
     // reproduce the starting weights offline and check that it did.
     p.genesis_weights_hash_hex =
-        "db92552dc1a8115ebec224c0c8b8fae459d30b47a4606dfdd932366d659c76d7";
-    p.genesis_hash_hex = "93e932f33d0d86eadb5c16fef2d20784c45bb819f5c167440009979915e69d25";
+        "dcef15a0a3f2d2187fe76d5f6fdcfca6224785040d555878ba6511771ca7d27b";
+    p.genesis_hash_hex = "a58d4d98771a942373094c5008ec803513185725b78a5fa4218e4e3a63561588";
     p.policy_hash_hex = "8a3426b6eee6c16c4c9d13aa12dae5bfc66ada1353aa0625243faebcc26a4e74";
     return p;
 }
@@ -219,8 +230,8 @@ NetworkParams MakeTest() {
     // Differs from main despite the identical architecture: the network magic is
     // part of the descriptor, so the seed derived from it differs too.
     p.genesis_weights_hash_hex =
-        "cc3edecb0dcd5dae9d5c6736c449c7fddc78654acbc84e67c3323299ca1b5df0";
-    p.genesis_hash_hex = "9c8db75ddaaebd51e9e609eba8fb667d84a6cd210b6c89a14103fcf019525f92";
+        "d2d6683c43cef8c0337d0a788e73a7224ece693f4137ce381eebb0465781b28d";
+    p.genesis_hash_hex = "4b73e441aabd5753ddcb9b44822eb5fb14489b794ae95af074379e5074972ae2";
     p.policy_hash_hex = "42b2726ab6163d8d1dc29b1ee532c36c13be4f3553e21482da7ff4bbed1e5546";
     return p;
 }

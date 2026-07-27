@@ -65,6 +65,7 @@ private:
     Status OnGetAssignment(ipc::Client& client, const ipc::Frame& frame, int64_t now_ms);
     Status OnSubmitContribution(ipc::Client& client, ipc::ReceivedFrame& received, int64_t now_ms);
     Status OnGetStatus(ipc::Client& client, const ipc::Frame& frame);
+    Status OnGetCorpusChunk(ipc::Client& client, const ipc::Frame& frame, int64_t now_ms);
     Status OnSubmitWeights(ipc::Client& client, ipc::ReceivedFrame& received, int64_t now_ms);
     Status OnGetWeights(ipc::Client& client, const ipc::Frame& frame);
     Status OfferPendingApply(ipc::Client& client, const ipc::Frame& frame, int64_t now_ms);

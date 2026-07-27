@@ -130,6 +130,8 @@ Status WorkerService::Dispatch(ipc::Client& client, ipc::ReceivedFrame& received
             return OnGetAssignment(client, frame, now_ms);
         case ipc::MessageType::SubmitContribution:
             return OnSubmitContribution(client, received, now_ms);
+        case ipc::MessageType::GetCorpusChunk:
+            return OnGetCorpusChunk(client, frame, now_ms);
         case ipc::MessageType::GetStatus:
             return OnGetStatus(client, frame);
         case ipc::MessageType::SubmitWeights:
@@ -602,6 +604,82 @@ Status WorkerService::OnSubmitContribution(ipc::Client& client, ipc::ReceivedFra
     reply.type = ipc::MessageType::SubmitAccepted;
     reply.request_id = frame.request_id;
     reply.payload = std::move(reply_payload.value());
+    return client.Send(reply);
+}
+
+// A worker asking for a chunk of the corpus.
+//
+// Answered from this node's own copy when it has one, and otherwise fetched from
+// a peer that announced it — the bytes are checked against dataset_root either
+// way, so where they came from does not have to be trusted.
+//
+// A fetch in progress is answered with "not yet" rather than by blocking: the
+// daemon serves every worker from one loop, and waiting on the network here would
+// stop it answering anyone. The worker asks again.
+Status WorkerService::OnGetCorpusChunk(ipc::Client& client, const ipc::Frame& frame,
+                                       int64_t now_ms) {
+    auto payload = ipc::CborParse(frame.payload);
+    if (!payload) return Refuse(client, frame.request_id, IpcError::BadSchema, payload.error());
+    auto index = payload.value().GetUint("chunk_index");
+    if (!index) return Refuse(client, frame.request_id, IpcError::BadSchema, index.error());
+
+    const auto& root = participant_.params().round.dataset_root;
+    if (root == crypto::Hash256{}) {
+        return Refuse(client, frame.request_id, IpcError::Rejected,
+                      "no corpus is pinned for this round");
+    }
+
+    std::vector<uint8_t> bytes;
+
+    // This node's own copy, if it serves one.
+    if (auto* source = node_.corpus(); source != nullptr) {
+        auto size = source->ChunkBytes(index.value());
+        if (size) {
+            bytes.resize(static_cast<size_t>(size.value()));
+            auto read = source->ReadChunkRange(index.value(), 0, bytes);
+            if (!read || read.value() != bytes.size()) {
+                return Err("corpus: short read from the local copy");
+            }
+        }
+    }
+
+    if (bytes.empty()) {
+        if (const auto* ready = node_.TakeCorpusChunk(index.value()); ready != nullptr) {
+            bytes = *ready;
+        } else {
+            if (!node_.CorpusChunkInFlight(index.value())) {
+                // Ask whoever will answer. Corpus chunks are addressed by index
+                // rather than by hash, so there is no announcement to match
+                // against — any peer that serves this round's corpus will do.
+                bool asked = false;
+                for (uint64_t peer_id : node_.ReadyPeerIds()) {
+                    if (node_.RequestCorpusChunk(peer_id, index.value(), root)) {
+                        asked = true;
+                        break;
+                    }
+                }
+                if (!asked) {
+                    return Refuse(client, frame.request_id, IpcError::Rejected,
+                                  "no peer to ask for the corpus");
+                }
+            }
+            return Refuse(client, frame.request_id, IpcError::Unavailable,
+                          "corpus chunk is being fetched; ask again");
+        }
+    }
+
+    auto out = ipc::CborWriter()
+                   .BeginMap(2)
+                   .Key("chunk_index").Uint(index.value())
+                   .Key("bytes").Bytes(bytes)
+                   .Take();
+    if (!out) return Err(out.error());
+
+    ipc::Frame reply;
+    reply.type = ipc::MessageType::CorpusChunk;
+    reply.request_id = frame.request_id;
+    reply.payload = std::move(out.value());
+    (void)now_ms;
     return client.Send(reply);
 }
 

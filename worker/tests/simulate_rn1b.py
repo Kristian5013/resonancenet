@@ -62,6 +62,9 @@ def load_corpus(vocab_size: int, n_tokens_cap: int) -> np.ndarray:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--corpus", default=None,
+                    help="a text corpus (UTF-8, documents separated by a blank line). "
+                         "Without it the run uses synthetic tokens and says so.")
     ap.add_argument("--network", default="test")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--rounds", type=int, default=1)
@@ -98,8 +101,28 @@ def main() -> int:
         specs.append(WorkerSpec(worker_id=i, poison=poison))
 
     started = time.time()
+    corpus = None
+    if args.corpus:
+        from tokenizers import Tokenizer
+        from rn_worker.corpus import LocalCorpus
+        from rn_worker.consensus import genesis as gen
+        round_desc = gen.load_network(args.network, GENESIS_DIR)
+        tok_path = os.path.join(GENESIS_DIR, "tokenizer_round0.json")
+        with open(tok_path, "rb") as fh:
+            import hashlib
+            actual = hashlib.sha3_256(fh.read()).digest()
+        if actual != round_desc.tokenizer_hash:
+            raise SystemExit(
+                f"{tok_path} hashes to {actual.hex()}, the round pins "
+                f"{round_desc.tokenizer_hash.hex()}. Training with it would produce token "
+                f"ids that mean different strings than the network agreed on."
+            )
+        corpus = LocalCorpus(args.corpus, 1 << 20, Tokenizer.from_file(tok_path))
+        print(f"corpus: {args.corpus} ({corpus.n_bytes/1e9:.2f} GB of text, "
+              f"{corpus.n_chunks} chunks)")
+
     net = LocalNetwork(
-        args.network, GENESIS_DIR, tokens, specs,
+        args.network, GENESIS_DIR, tokens, specs, corpus=corpus,
         lr=args.lr, verbose=True,
         # The real worker profile: bf16 plus activation checkpointing is what puts
         # a billion parameters inside 24 GB in deterministic mode.

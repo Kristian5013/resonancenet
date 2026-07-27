@@ -88,6 +88,11 @@ public:
     size_t InboundCount() const;
     size_t OutboundCount() const;
     size_t ReadyCount() const;
+
+    // The peers past the handshake, so a caller can ask one of them for something
+    // that is addressed by index rather than by hash and therefore has no
+    // announcement to match against.
+    std::vector<uint64_t> ReadyPeerIds() const;
     AddressManager& addresses() { return addresses_; }
     ObjectStore& objects() { return objects_; }
 
@@ -102,6 +107,24 @@ public:
     // seed node is for.
     void SetCorpus(CorpusSource* corpus) { corpus_ = corpus; }
     CorpusSource* corpus() { return corpus_; }
+
+    // Asks a peer for one chunk of the corpus.
+    //
+    // The serving half of this has always been here — a node answers `getcorpus`
+    // by streaming parts — but nothing asked, so a worker could only train on a
+    // corpus its own machine held. That makes a seed pointless: the whole reason
+    // chunks travel with inclusion proofs is so they can come from a stranger.
+    //
+    // `dataset_root` is what the assembled chunk is checked against, and it comes
+    // from the round descriptor rather than from the peer, so a seed that serves
+    // altered text is caught by arithmetic.
+    Status RequestCorpusChunk(uint64_t peer_id, uint64_t chunk_index,
+                              const crypto::Hash256& dataset_root);
+
+    // A chunk that arrived and proved itself, or nullptr. Borrowed: a chunk is a
+    // megabyte and the caller copies it only if it wants to keep it.
+    const std::vector<uint8_t>* TakeCorpusChunk(uint64_t chunk_index);
+    bool CorpusChunkInFlight(uint64_t chunk_index) const;
 
     // Publishes an object: stores it locally and announces it to every peer.
     Result<crypto::Hash256> Publish(InvType type, std::vector<uint8_t> data, int64_t now_ms);
@@ -132,6 +155,7 @@ private:
     Status HandleObject(Peer& peer, const ReceivedMessage& message, int64_t now_ms);
     Status HandleGetChunks(Peer& peer, const ReceivedMessage& message);
     Status HandleGetCorpus(Peer& peer, const ReceivedMessage& message);
+    Status HandleCorpus(Peer& peer, const ReceivedMessage& message);
     void ServeCorpusFeeds();
     Status HandleChunk(Peer& peer, const ReceivedMessage& message, int64_t now_ms);
     Status NotifyHandler(Peer& peer, const ReceivedMessage& message, int64_t now_ms);
@@ -198,6 +222,15 @@ private:
     };
     std::map<uint64_t, CorpusFeed> corpus_feeds_;
     CorpusSource* corpus_{nullptr};
+
+    // Chunks being fetched from peers, and chunks that arrived and verified.
+    struct CorpusFetch {
+        std::unique_ptr<CorpusAssembler> assembler;
+        crypto::Hash256 dataset_root{};
+        int64_t started_at{0};
+    };
+    std::map<uint64_t, CorpusFetch> corpus_fetches_;
+    std::map<uint64_t, std::vector<uint8_t>> corpus_ready_;
     uint64_t next_peer_id_{1};
     bool running_{false};
 };

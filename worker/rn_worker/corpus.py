@@ -145,6 +145,60 @@ class ArrayCorpus:
         return self.tokens[start:end]
 
 
+class RemoteCorpus:
+    """A corpus the worker does not hold, fetched a chunk at a time through the node.
+
+    This is what makes a seed worth running: the corpus lives on a machine with the
+    disk for it, the model trains on a machine with the GPU for it, and the two need
+    not be the same. A chunk is about a megabyte and a round draws a few hundred, so
+    an outer step moves a couple of hundred megabytes — 170 KB/s against a
+    twenty-minute round.
+
+    The node verifies every chunk against dataset_root before handing it over, so
+    nothing here has to trust where the bytes came from. What this class does have to
+    handle is waiting: the daemon refuses rather than blocks while a fetch is in
+    flight, because it serves every worker from one loop.
+    """
+
+    def __init__(self, client, n_chunks: int, tokenizer, cache_chunks: int = 64,
+                 poll_seconds: float = 0.25, timeout_seconds: float = 120.0):
+        self.client = client
+        self.n_chunks = int(n_chunks)
+        self.tokenizer = tokenizer
+        self._cache: dict[int, np.ndarray] = {}
+        self._cache_limit = cache_chunks
+        self._poll = poll_seconds
+        self._timeout = timeout_seconds
+
+    def chunk_bytes(self, index: int) -> bytes:
+        import time as _time
+        deadline = _time.monotonic() + self._timeout
+        while True:
+            try:
+                return self.client.corpus_chunk(index)
+            except Exception as exc:
+                # "Being fetched, ask again" is the normal path, not an error.
+                if "fetch" not in str(exc).lower() and "unavailable" not in str(exc).lower():
+                    raise
+                if _time.monotonic() > deadline:
+                    raise CorpusError(
+                        f"corpus chunk {index} did not arrive within {self._timeout:.0f}s; "
+                        f"the node has no peer serving this round's corpus"
+                    ) from exc
+                _time.sleep(self._poll)
+
+    def tokens_for_chunk(self, index: int) -> np.ndarray:
+        cached = self._cache.get(index)
+        if cached is not None:
+            return cached
+        ids = np.asarray(self.tokenizer.encode(self.chunk_bytes(index).decode("utf-8")).ids,
+                         dtype=np.uint32)
+        if len(self._cache) >= self._cache_limit:
+            self._cache.pop(next(iter(self._cache)))
+        self._cache[index] = ids
+        return ids
+
+
 def verify_chunk(chunk: bytes, proof_siblings: list[bytes], leaf_index: int,
                  dataset_root: bytes) -> bool:
     """RFC-6962 inclusion proof, mirroring crypto::VerifyMerkleProof.
