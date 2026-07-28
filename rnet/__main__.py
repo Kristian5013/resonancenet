@@ -10,6 +10,7 @@ than the anchors it is holding it to.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from .consensus import genesis
@@ -87,6 +88,28 @@ def cmd_train(args) -> int:
     except KeyboardInterrupt:
         print("\nrnet: stopped")
         return 0
+
+
+def cmd_corpus_build(args) -> int:
+    """Download a Hugging Face dataset into the one file a corpus is addressed
+    over. Resumable — interrupt it and run it again."""
+    from .dataset.build import BuildError, build, free_space
+
+    free = free_space(os.path.dirname(os.path.abspath(args.out)) or ".")
+    print(f"free space: {free / 2**40:.2f} TiB")
+    try:
+        state = build(args.repo, args.out, column=args.column,
+                      cache_dir=args.cache, parallel=args.parallel,
+                      token=args.token or os.environ.get("HF_TOKEN"),
+                      limit_files=args.limit)
+    except BuildError as exc:
+        print(f"rnet: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\nrnet: stopped — run again to resume")
+        return 0
+    print(f"{args.out}: {state.bytes_written:,} bytes")
+    return 0
 
 
 def cmd_genesis_weights(args) -> int:
@@ -168,6 +191,19 @@ def main(argv: list[str] | None = None) -> int:
     train.add_argument("--rounds", type=int, default=0,
                        help="0 means until stopped")
     train.set_defaults(fn=cmd_train)
+
+    corpus = sub.add_parser("corpus-build",
+                            help="download a dataset into a corpus file (resumable)")
+    corpus.add_argument("--repo", default="HuggingFaceFW/fineweb-edu")
+    corpus.add_argument("--out", required=True, metavar="PATH")
+    corpus.add_argument("--column", default="text")
+    corpus.add_argument("--cache", default=None,
+                        help="default: beside --out, never the home directory")
+    corpus.add_argument("--parallel", type=int, default=8)
+    corpus.add_argument("--token", default=None, help="or set HF_TOKEN")
+    corpus.add_argument("--limit", type=int, default=0,
+                        help="stop after N files; for trying it out")
+    corpus.set_defaults(fn=cmd_corpus_build)
 
     show = sub.add_parser("genesis-show", help="what this build believes each network is")
     show.add_argument("networks", nargs="*")
