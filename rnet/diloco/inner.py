@@ -36,7 +36,7 @@ from ..consensus.numerics import Numerics
 from ..dataset.scheduler import synthetic_window, window_seed
 from ..model import weights as W
 from ..model.transformer import Transformer
-from .quantize import quantize_update
+from .quantize import quantize_update, quantize_update_chunked
 
 
 class InnerError(Exception):
@@ -157,8 +157,7 @@ def run(model: Transformer, spec: ModelSpec, numerics: Numerics, *,
     """
     before = W.save_weights(model)
     order = sorted(before)
-    flat_before = np.concatenate([
-        _to_float(before[name]) for name in order]) if order else np.array([])
+    total = int(sum(before[name].size for name in order))
 
     optimizer = _adafactor(model, lr)
     model.train()
@@ -180,12 +179,21 @@ def run(model: Transformer, spec: ModelSpec, numerics: Numerics, *,
             on_step(step, loss_value)
 
     after = W.save_weights(model)
-    flat_after = np.concatenate([_to_float(after[name]) for name in order])
 
     # before - after: a worker reports how far it moved, and the network moves
     # the same way when it subtracts.
-    payload, exp = quantize_update(flat_before - flat_after,
-                                   numerics.contribution_format)
+    #
+    # A TENSOR AT A TIME, in the same order the concatenation used, so the
+    # bytes are identical to the version that built one array of 397,728,768
+    # float64s and subtracted another from it. That version peaked at 19.9 GB
+    # and was OOM-killed at the submit, having already spent eighteen minutes
+    # computing the update it was about to send.
+    def deltas():
+        for name in order:
+            yield _to_float(before[name]) - _to_float(after[name])
+
+    payload, exp = quantize_update_chunked(deltas, total,
+                                           numerics.contribution_format)
     return RoundResult(payload=payload, scale_exp=exp, final_loss=loss_value,
                        steps=inner_steps, base_weights=before)
 

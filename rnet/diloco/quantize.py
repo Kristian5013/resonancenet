@@ -62,7 +62,18 @@ def choose_scale_exp(values: np.ndarray, fmt: ContributionFormat) -> int:
         raise QuantiseError(
             f"quantise: {int((~finite).sum())} of {values.size} values are not finite")
 
-    max_abs = float(np.abs(values).max())
+    return exp_for_max(float(np.abs(values).max()), fmt)
+
+
+def exp_for_max(max_abs: float, fmt: ContributionFormat) -> int:
+    """The exponent for an update whose largest magnitude is `max_abs`.
+
+    Split out so that the chunked path and the whole-array path share this
+    arithmetic rather than each having their own copy of it. Two copies of a
+    rule that decides how a contribution is encoded is two chances to encode it
+    differently, and the difference would surface as a verifier unable to
+    reproduce a perfectly honest worker.
+    """
     if max_abs == 0.0:
         # A worker that changed nothing still has to say so, and 0 is the
         # exponent that makes every zero dequantise to zero.
@@ -113,6 +124,67 @@ def clamped_count(values: np.ndarray, exp: int, fmt: ContributionFormat) -> int:
 def dequantize(q: np.ndarray, exp: int) -> np.ndarray:
     """Integers back to floats. Exact, because the scale is a power of two."""
     return np.ldexp(np.asarray(q, dtype=np.float64), exp)
+
+
+def quantize_update_chunked(chunks, total: int, fmt: ContributionFormat
+                            ) -> tuple[np.ndarray, int]:
+    """`quantize_update` without holding the whole update in memory at once.
+
+    Byte for byte the same answer. The exponent depends only on the largest
+    magnitude, and the encoding is elementwise, so both are computable in two
+    passes over pieces — and `chunks` is called twice, once for each.
+
+    WHY THIS EXISTS. The straightforward version concatenated the weights
+    before, the weights after, and their difference into three float64 arrays,
+    then made three or four more inside `quantize`. At 397,728,768 parameters
+    that is 3.18 GB each and a measured peak of 19.9 GB, which the kernel's OOM
+    killer ended eighteen minutes into a round — after all two hundred inner
+    steps had been computed and immediately before they would have been
+    submitted. The most expensive possible moment to run out of memory.
+
+    float64 is not the extravagance it looks like and is kept: these are
+    differences of bf16 values whose exponents can be far apart, and float32's
+    twenty-four mantissa bits do not always hold one exactly. Precision is not
+    what was wrong; residency was.
+    """
+    if total == 0:
+        raise QuantiseError("quantise: an empty update is not an update")
+
+    max_abs = 0.0
+    seen = bad = 0
+    for piece in chunks():
+        if not piece.size:
+            continue
+        seen += int(piece.size)
+        finite = np.isfinite(piece)
+        if not finite.all():
+            # A non-finite pseudo-gradient means the inner loop diverged.
+            # Encoding it would spread one worker's blown-up run to everyone
+            # who aggregates it.
+            bad += int((~finite).sum())
+            continue
+        max_abs = max(max_abs, float(np.abs(piece).max()))
+    if bad:
+        raise QuantiseError(
+            f"quantise: {bad} of {seen} values are not finite")
+    exp = exp_for_max(max_abs, fmt)
+
+    out = np.empty(total, dtype=np.int64)
+    at = 0
+    for piece in chunks():
+        if not piece.size:
+            continue
+        end = at + piece.size
+        if end > total:
+            raise QuantiseError(
+                f"quantise: chunks produced more than the {total} values "
+                f"promised")
+        out[at:end] = quantize(piece, exp, fmt)
+        at = end
+    if at != total:
+        raise QuantiseError(
+            f"quantise: chunks produced {at} values, not the {total} promised")
+    return out, exp
 
 
 def quantize_update(values: np.ndarray, fmt: ContributionFormat

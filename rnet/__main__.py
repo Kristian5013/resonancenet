@@ -123,15 +123,18 @@ def cmd_train(args) -> int:
         return 1
     from .worker.client import WorkerError
     from .diloco.inner import InnerError
+    from .dataset.corpus import CorpusError
+    from .dataset.tokenizer import TokenizerError
     try:
         return run(TrainerConfig(
             network=args.network, datadir=args.datadir or "", device=args.device,
             lr=args.lr, rounds=args.rounds, corpus=args.corpus or ""))
-    except (WorkerError, InnerError) as exc:
-        # InnerError is a precondition failure like any other — an unset
-        # CUBLAS_WORKSPACE_CONFIG is the first thing every contributor hits, and
-        # it arrived as a traceback, which reads as a broken program rather than
-        # a setup step.
+    except (WorkerError, InnerError, TokenizerError, CorpusError) as exc:
+        # All four are preconditions rather than faults, and they are what a
+        # new contributor actually hits: an unset CUBLAS_WORKSPACE_CONFIG, a
+        # missing tokenizer, a corpus that indexes to the wrong root. Each one
+        # arrived as a traceback, which reads as a broken program instead of a
+        # setup step — and the message inside already says what to do.
         print(f"rnet: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

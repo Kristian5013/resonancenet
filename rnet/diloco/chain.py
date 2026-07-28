@@ -89,14 +89,31 @@ class Chain:
     _orphans: dict[bytes, list[CheckpointHeader]] = field(default_factory=dict)
     _orphan_count: int = 0
 
+    # The height its root sits at. Zero for a chain that still holds its
+    # genesis; on a node that has been running long enough for `_prune` to drop
+    # it, the height of the oldest checkpoint still retained.
+    #
+    # This exists because a PRUNED CHAIN CANNOT BE REBUILT FROM GENESIS. The
+    # entries that survive pruning no longer reach it — replaying them into a
+    # fresh chain leaves the oldest one an orphan of a parent that was
+    # deliberately discarded. A node restarting after seventeen checkpoints,
+    # with `retained` at sixteen, would have found its own saved chain
+    # unloadable. Proved by ChainStoreTests.ItSavesWhatThePruningLeft.
+    root_height: int = 0
+
     def __post_init__(self):
-        if self.genesis.outer_step != 0 or self.genesis.parent != bytes(32):
-            raise ChainError("chain: genesis must be step 0 with no parent")
+        if self.root_height == 0:
+            if self.genesis.outer_step != 0 or self.genesis.parent != bytes(32):
+                raise ChainError("chain: genesis must be step 0 with no parent")
+        elif self.genesis.outer_step != self.root_height:
+            raise ChainError(
+                f"chain: root is at step {self.genesis.outer_step} and was "
+                f"given height {self.root_height}")
         if self.retained < 2:
             # One retained checkpoint cannot answer a challenge about the step
             # before it, which is every challenge worth issuing.
             raise ChainError(f"chain: retained {self.retained} must be at least 2")
-        entry = Entry(self.genesis, self.genesis.id, 0)
+        entry = Entry(self.genesis, self.genesis.id, self.root_height)
         self._by_id[entry.id] = entry
         self._head = entry.id
 
@@ -115,6 +132,16 @@ class Chain:
 
     def has(self, checkpoint_id: bytes) -> bool:
         return checkpoint_id in self._by_id
+
+    def entries(self) -> list:
+        """Every checkpoint held, in no particular order.
+
+        For persisting. Deliberately a copy: a caller iterating this while the
+        chain accepts a checkpoint would otherwise be iterating a dict that
+        changed size, and the caller is a save that must not be able to break
+        the node it is saving.
+        """
+        return list(self._by_id.values())
 
     def at_height(self, height: int) -> Entry | None:
         """The checkpoint at `height` on the chain leading to the head.

@@ -9,8 +9,15 @@ WHAT PERSISTS AND WHAT DOES NOT. The address table persists, because a node
 that forgot its peers on every restart would rejoin the network through the
 seeds every time and put the whole network's reachability on whoever runs them.
 The bucket key persists with it, or the table would be re-bucketed on load and
-the eclipse resistance it was built with would be thrown away. The chain does
-not persist yet; that wants a store, and a half-written one is worse than none.
+the eclipse resistance it was built with would be thrown away.
+
+The chain persists too, and it is the one file whose absence is not survivable:
+addresses are hearsay and starting empty costs a round of seeding, but a chain
+is the record of work that was done. A damaged chain file stops the node rather
+than silently restarting it from genesis, because a height of zero is far too
+quiet a symptom for "every checkpoint is gone". WHAT IS STILL NOT SAVED IS THE
+WEIGHTS: those live with the workers that computed them, and a header commits
+to them without holding them.
 
 THE STATUS LINE IS THE INTERFACE. A daemon that runs silently is a daemon
 nobody can tell is broken. Once a minute it says how many peers, how far along
@@ -32,13 +39,23 @@ from ..canon.stream import CanonError, Reader, Writer
 from ..consensus import genesis as genesis_module
 from ..consensus.init import hash_of_values
 from ..consensus.objects import CheckpointHeader
-from ..diloco.chain import Chain
+from ..diloco.chain import Chain, Outcome
 from ..net.address import NetAddress, Services, TimestampedAddress
 from ..net.addrman import AddrMan
+from ..net import seeds
 from ..net.node import DEFAULT_PORT, Node, NodeConfig
 from ..net.peer import State
 from .objects import ObjectStore
 from .service import Service
+
+class ChainStoreError(Exception):
+    """The chain on disk cannot be read, and starting without it would throw
+    away work rather than merely a cache."""
+
+
+CHAIN_FILE = "chain.dat"
+CHAIN_MAGIC = b"RNCH"
+CHAIN_VERSION = 1
 
 PEERS_FILE = "peers.dat"
 PEERS_MAGIC = b"RNPR"
@@ -93,6 +110,119 @@ def save_peers(path: str, addrman: AddrMan, now_ms: int) -> int:
     return len(entries)
 
 
+def save_chain(path: str, chain: Chain) -> int:
+    """Write every checkpoint this node holds, atomically.
+
+    In HEIGHT ORDER, because loading replays them through `Chain.add` and a
+    checkpoint whose parent has not arrived is an orphan rather than a link.
+    Saving them sorted is what makes the load a straight line instead of a
+    second orphan-resolution problem.
+
+    Only headers. The weights they commit to are hundreds of megabytes and live
+    with the workers that computed them; a header is a couple of hundred bytes
+    and is what makes "this is the chain I was on" checkable.
+    """
+    entries = sorted((e for e in chain.entries()), key=lambda e: e.height)
+    w = Writer().raw(CHAIN_MAGIC).u16(CHAIN_VERSION).u32(len(entries))
+    for entry in entries:
+        body = entry.header.to_container()
+        w.u32(len(body)).raw(body)
+    raw = w.take()
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(raw)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    return len(entries)
+
+
+def load_chain(path: str, genesis: CheckpointHeader, retained: int) -> Chain:
+    """Read the chain back, or start at genesis if there is nothing to read.
+
+    UNLIKE THE ADDRESS TABLE, a damaged file here is fatal. Addresses are a
+    cache of hearsay and starting empty costs one round of seeding; a chain is
+    the record of work that was actually done, and silently starting again from
+    genesis would discard every checkpoint and every worker's training with no
+    louder symptom than a height of zero. A node that cannot read its chain
+    should stop and say so while the file is still there to be looked at.
+
+    Nothing in the file is trusted. Every header is replayed through
+    `Chain.add`, which re-derives its id and re-checks that it connects, so a
+    file from another network or a tampered one is refused by the same code
+    that refuses a bad checkpoint from a peer.
+    """
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except FileNotFoundError:
+        return Chain(genesis, retained=retained)
+    except OSError as exc:
+        raise ChainStoreError(f"chain: {path} cannot be read: {exc}") from exc
+
+    try:
+        r = Reader(raw)
+        if r._take(4) != CHAIN_MAGIC:
+            raise ChainStoreError(f"chain: {path} is not a chain file")
+        version = r.u16()
+        if version != CHAIN_VERSION:
+            raise ChainStoreError(
+                f"chain: {path} is version {version}, this build writes "
+                f"{CHAIN_VERSION}")
+        count = r.u32()
+        headers = []
+        for _ in range(count):
+            headers.append(CheckpointHeader.from_container(r.blob(limit=1 << 20)))
+        r.expect_exhausted()
+    except ChainStoreError:
+        raise
+    except Exception as exc:                                  # noqa: BLE001
+        raise ChainStoreError(
+            f"chain: {path} is damaged ({exc}). It holds the checkpoints this "
+            f"node produced; moving it aside restarts from genesis and "
+            f"abandons them.") from exc
+
+    if not headers:
+        return Chain(genesis, retained=retained)
+
+    # THE ROOT IS THE OLDEST THING SAVED, WHICH IS USUALLY NOT THE GENESIS. A
+    # node that has produced more checkpoints than it retains has pruned the
+    # genesis away on purpose, and the entries that survive no longer reach it:
+    # replaying them into a fresh chain leaves the oldest an orphan of a parent
+    # that was deliberately discarded. Rooting there is what a pruned node's
+    # chain actually is.
+    headers.sort(key=lambda h: h.outer_step)
+    root, rest = headers[0], headers[1:]
+
+    if root.outer_step == 0:
+        if root.id != genesis.id:
+            raise ChainStoreError(
+                f"chain: {path} starts at {root.id.hex()[:16]}… and this "
+                f"build's genesis is {genesis.id.hex()[:16]}…. That is a "
+                f"datadir from a different network.")
+        root = genesis
+    elif root.round_id != genesis.round_id:
+        # Past the genesis there is nothing compiled in to check a pruned root
+        # against — the node is trusting its own disk, which is the same trust
+        # any pruned node places in its own past. The round id is the one thing
+        # still checkable, and it is what catches a datadir carried between
+        # networks.
+        raise ChainStoreError(
+            f"chain: {path} is rooted in round {root.round_id} and this build "
+            f"is round {genesis.round_id}. That is a datadir from a different "
+            f"network.")
+
+    chain = Chain(root, retained=retained, root_height=root.outer_step)
+    for header in rest:
+        outcome = chain.add(header)
+        if outcome is not Outcome.EXTENDED and outcome is not Outcome.SIDE_BRANCH:
+            raise ChainStoreError(
+                f"chain: {path} holds checkpoint {header.id.hex()[:16]}… at "
+                f"step {header.outer_step} which this build {outcome.name}. "
+                f"The file and the anchors disagree.")
+    return chain
+
+
 def load_peers(path: str, now_ms: int) -> AddrMan:
     """Read the table back, or start a fresh one if there is nothing to read.
 
@@ -130,6 +260,7 @@ class Daemon:
     service: Service = None
     workers: object = None
     _index: object = None
+    _saved_head: bytes = b""
     started_at: float = field(default_factory=time.monotonic)
     _stopping: asyncio.Event = None
 
@@ -188,7 +319,12 @@ class Daemon:
             weights_hash=bytes.fromhex(genesis_module.WEIGHTS_HASH[network]),
             optimizer_state_hash=bytes(32), contribution_root=bytes(32),
             producer_id=0, timestamp_ms=0)
-        chain = Chain(genesis_checkpoint, retained=policy.retained_checkpoints)
+        chain = load_chain(os.path.join(datadir, CHAIN_FILE), genesis_checkpoint,
+                           policy.retained_checkpoints)
+        if chain.height:
+            self._log(f"  chain    resumed at height {chain.height}, head "
+                      f"{chain.head.id.hex()[:16]}…")
+        self._saved_head = chain.head.id
 
         corpus = self._open_corpus(round_desc)
         self.service = Service(
@@ -269,6 +405,8 @@ class Daemon:
             asyncio.ensure_future(self.node.connect(address))
             self._log(f"  connect  {address}")
 
+        await self._seed_if_empty()
+
         self._install_signals()
         status = asyncio.ensure_future(self._status_loop())
         upkeep = asyncio.ensure_future(self._upkeep_loop())
@@ -281,6 +419,44 @@ class Daemon:
                     await task
             await self.shutdown()
         return 0
+
+    async def _seed_if_empty(self) -> None:
+        """Ask the compiled-in seeds, and only when there is nobody else to ask.
+
+        The condition is the whole design. A node that seeded on every start
+        would put the network's reachability on whoever runs the seeds — which
+        is exactly the failure the persisted address table exists to avoid — and
+        would hand them a census of every node that ever restarts.
+
+        What comes back is HEARSAY, not a dial list. Each address goes into the
+        table with the seed as its source, so it lands in the buckets the seed's
+        own group gets and competes for space like anything else heard secondhand.
+        Connecting to them directly would be faster and would remove the eclipse
+        resistance at the one moment a node is most vulnerable to it: when it
+        knows nothing and will believe whatever it is first told.
+        """
+        if self.config.connect or len(self.node.addrman):
+            return
+        if not seeds.has_seeds(self.config.network):
+            return
+        found = await seeds.resolve(self.config.network, self.config.port)
+        if not found:
+            self._log("  seeds    none answered; this node will wait to be found")
+            return
+        now_ms = int(time.time() * 1000)
+        # A synthetic source so every seeded address shares one source group,
+        # rather than each appearing to have vouched for itself.
+        source = found[0]
+        added = 0
+        for address in found:
+            if self.node.addrman.add(
+                    TimestampedAddress(address, Services.CHAIN, now_ms),
+                    source, now_ms):
+                added += 1
+        self._log(f"  seeds    {added} address(es) from "
+                  f"{len(seeds.DNS_SEEDS.get(self.config.network, ()))} name(s) "
+                  f"and {len(seeds.FALLBACK_SEEDS.get(self.config.network, ()))} "
+                  f"literal(s)")
 
     def _install_signals(self) -> None:
         loop = asyncio.get_event_loop()
@@ -298,6 +474,7 @@ class Daemon:
         stopped and lost its table is a node that comes back needing the seeds.
         """
         datadir = self.config.resolved_datadir()
+        self._save_chain_if_moved(datadir, force=True)
         try:
             saved = save_peers(os.path.join(datadir, PEERS_FILE),
                                self.node.addrman, int(time.time() * 1000))
@@ -331,6 +508,30 @@ class Daemon:
             if self.workers is not None:
                 with contextlib.suppress(Exception):
                     self.workers.expire_challenges()
+            self._save_chain_if_moved(self.config.resolved_datadir())
+
+    def _save_chain_if_moved(self, datadir: str, *, force: bool = False) -> None:
+        """Write the chain when the head has moved, and not otherwise.
+
+        On the upkeep tick rather than on every accepted checkpoint, because a
+        round takes minutes and this runs every few seconds: the most that can
+        be lost to a power cut is one tick, and the alternative couples the
+        consensus path to a filesystem it should not be able to block on.
+
+        Comparing the HEAD ID rather than the height, because a reorganisation
+        replaces the head at the same height — saving only on a height change
+        would leave the file describing a branch this node has abandoned.
+        """
+        chain = getattr(self.service, "chain", None)
+        if chain is None:
+            return
+        if not force and chain.head.id == self._saved_head:
+            return
+        try:
+            save_chain(os.path.join(datadir, CHAIN_FILE), chain)
+            self._saved_head = chain.head.id
+        except OSError as exc:
+            self._log(f"rnet: could not save the chain: {exc}")
 
     def status(self) -> str:
         uptime = time.monotonic() - self.started_at
