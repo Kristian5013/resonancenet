@@ -139,7 +139,28 @@ class GenesisTests(unittest.TestCase):
         r = genesis.round_descriptor("main")
         self.assertEqual(r.model.parameter_count(), 397_728_768)
         self.assertFalse(r.model.is_moe)
-        self.assertEqual(r.dataset_chunks, 6_956_933)
+
+    def test_MainCarriesTheCorpusTheTreeDeclares(self):
+        """A wiring test, and it used to be a copy of the chunk count.
+
+        The copy went stale the first time the network was re-pinned, which is
+        the wrong failure: it says nothing about whether the pin is right, only
+        that somebody changed it. What is worth checking is that the descriptor
+        carries what params.py declares rather than dropping it — a
+        `dataset_chunks` silently left at zero would mean a round pinning a
+        corpus whose size nothing agreed on.
+
+        Whether the pin names the RIGHT corpus is not a question a test can
+        answer. `rnet corpus-index --network main` answers it, against a file.
+        """
+        from rnet.consensus import params
+        r = genesis.round_descriptor("main")
+        self.assertEqual(r.dataset_root, params.CORPUS_ROOT)
+        self.assertEqual(r.dataset_chunks, params.CORPUS_CHUNKS)
+        self.assertNotEqual(r.dataset_root, bytes(32))
+        self.assertGreater(r.dataset_chunks, 0)
+        # The pin names a snapshot. One that does not is one nobody can rebuild.
+        self.assertEqual(len(params.CORPUS_REVISION), 40, params.CORPUS_REVISION)
 
     def test_TheMixtureNetworkIsDescribedAndFitsAShard(self):
         r = genesis.round_descriptor("moe")

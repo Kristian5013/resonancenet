@@ -30,13 +30,25 @@ from .objects import OPT_ADAFACTOR, PolicyDescriptor, RoundDescriptor
 
 PROTOCOL_VERSION = 0x0002_0000
 
-# The corpus and tokenizer are carried from the implementation this replaces.
-# Both are derived from bytes rather than from code — the root from a scan of
-# 7,359,506,899,436 bytes of FineWeb-Edu, the tokenizer hash from the artifact
-# itself — so they survive a rewrite unchanged and need no reindexing.
-FINEWEB_EDU_ROOT = bytes.fromhex(
-    "7195da139188f4a1b779bd380562718e080959531aee0cabbf777cd13501a3b8")
-FINEWEB_EDU_CHUNKS = 6_956_933
+# THE CORPUS THIS NETWORK IS PINNED TO.
+#
+#   HuggingFaceFW/fineweb-edu
+#   revision 87f09149ef4734204d70ed1d046ddc9ca3f2b8f9
+#   crawls CC-MAIN-2025-21 and CC-MAIN-2025-26 — 29,642,369 documents, 147.6 GiB of text
+#
+# The revision is the point. A root without one is a root nobody can reproduce:
+# the same command a month later sees a different file list and produces
+# something that differs for reasons indistinguishable from a bug. The previous
+# pin had no revision, and the corpus it named could not be rebuilt.
+#
+# The tokenizer is carried unchanged from the implementation this replaces —
+# the hash is of the artifact itself, so it survives a rewrite.
+CORPUS_ROOT = bytes.fromhex(
+    "2831ce67f1079928e2afa5279462651b29bf9cde066ba9644d6dbd3e4bfd2f9b")
+CORPUS_CHUNKS = 150_093
+CORPUS_BYTES = 158_466_435_280
+CORPUS_REPO = "HuggingFaceFW/fineweb-edu"
+CORPUS_REVISION = "87f09149ef4734204d70ed1d046ddc9ca3f2b8f9"
 TOKENIZER_32K = bytes.fromhex(
     "1f8d0c4bc23d000c4f602654e615a53fc61f0fb3f56afdce492b640ad54b9d93")
 
@@ -99,8 +111,8 @@ def _round(magic: int, model: ModelSpec, numerics: Numerics, *,
         numerics=numerics,
         optimizer_id=OPT_ADAFACTOR,
         tokenizer_hash=TOKENIZER_32K if corpus else NO_CORPUS,
-        dataset_root=FINEWEB_EDU_ROOT if corpus else NO_CORPUS,
-        dataset_chunks=FINEWEB_EDU_CHUNKS if corpus else 0,
+        dataset_root=CORPUS_ROOT if corpus else NO_CORPUS,
+        dataset_chunks=CORPUS_CHUNKS if corpus else 0,
     )
 
 

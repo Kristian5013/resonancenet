@@ -8,9 +8,9 @@ data. Proved by MerkleTests.ALeafCannotPoseAsANode.
 
 The tree shape is pairwise doubling with the odd node promoted unchanged, NOT
 RFC-6962's split at the largest power of two. This is a deliberate carry-over:
-`dataset_root` 7195da13… was computed over 7.36 TB by the implementation this
-one replaces, and the corpus that would be needed to recompute it lives on a
-detached volume. Keeping the shape keeps the pin valid. Promotion is safe here
+it was chosen by the implementation this one replaces, and every `dataset_root`
+in the tree is a root of THIS shape. Changing it would not be a refactor, it
+would silently re-pin every network. Promotion is safe here
 precisely because of the domain separation above — unlike Bitcoin's
 duplicate-the-last-node padding, which admits two leaf sets with one root.
 """

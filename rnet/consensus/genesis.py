@@ -31,10 +31,10 @@ from .params import NETWORKS
 # `python -m rnet genesis-anchors` after any change there, and understand that
 # doing so forks the network.
 GENESIS_HASH: dict[str, str] = {
-    "main":    "adfd6082694c614cf44b2490df78ba15efc51ddc1174dd5740506c80ff4f9597",
-    "moe":     "c8006631fd3952446636c88b6616b0455e388ce9bbb2504f4ed6756bf9efc7fe",
-    "test":    "ce2413197ac4fe09034567d762c9f3a02726f488b5775a3ae1c629170f0e9ba5",
-    "regtest": "153cc31ec891b6dc0ff66107bc0d7c70cc9dcbb3257b25294f8ad54e2aa70794",
+    "main":      "9328672c89bd904ae025fdfcc8518570fdd135b7ad6f665ae9bbb00bf8a374ff",
+    "moe":       "fc0ce991598b0221d7f3bd360cac3dd4d9cd8456d0864e27f8eb2df242330b9a",
+    "regtest":   "153cc31ec891b6dc0ff66107bc0d7c70cc9dcbb3257b25294f8ad54e2aa70794",
+    "test":      "52d7dfeb716c6e8dd66de1fec32203a5b5d509a21a424a3813001e52054d3d28",
 }
 
 POLICY_HASH: dict[str, str] = {
@@ -50,10 +50,10 @@ POLICY_HASH: dict[str, str] = {
 # billion-parameter mixture, 1.5 for the dense 400M), which is why verify_build
 # does not do it and `rnet genesis-weights` does.
 WEIGHTS_HASH: dict[str, str] = {
-    "main":    "26358eaeb57666cf9e5d5fa59106ab407e5dbbd0f67da925f040abd064bdb37d",
-    "moe":     "9360d21931a36f52732d88e8438626e44565373b39eb54d76ef2f81cfac1b50a",
-    "test":    "7f06a158466cf62426beb621b655d0cf352e8e5b60510304ed8aab8b3d89eb44",
-    "regtest": "f1f0c82d26889543586f6a5bbe76d301696edf017b159d66fb343eb21bd40cae",
+    "main":      "0ea5ef9780b5d01335eba4fbe2fbc2f87ca26734447e18a7e8f1db45aba01230",
+    "moe":       "8949e4adf6e78a7862f9ebafdef8fe5aced3deec2ff1077044c872b62c592572",
+    "test":      "87f27de23a0e4b38910dc04212b3484823f30aab6d79b72aa76a584e4ba8814c",
+    "regtest":   "f1f0c82d26889543586f6a5bbe76d301696edf017b159d66fb343eb21bd40cae",
 }
 
 

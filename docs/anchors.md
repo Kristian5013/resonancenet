@@ -34,7 +34,7 @@ did.
 
 ```bash
 python -m rnet genesis-weights main
-main     26358eaeb57666cf9e5d5fa59106ab407e5dbbd0f67da925f040abd064bdb37d  397,728,768 params  1.5s
+main     0ea5ef9780b5d01335eba4fbe2fbc2f87ca26734447e18a7e8f1db45aba01230  397,728,768 params  1.5s
 ```
 
 **The stream is keyed by the tensor's NAME, not by a running counter.** Two

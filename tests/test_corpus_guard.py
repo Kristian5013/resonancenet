@@ -32,7 +32,7 @@ except ImportError:                                           # pragma: no cover
 from rnet.consensus import genesis
 from rnet.consensus.numerics import ROUND0
 from rnet.consensus.objects import Verdict as VerdictKind
-from rnet.consensus.params import DENSE_400M, FINEWEB_EDU_ROOT, TINY_3M
+from rnet.consensus.params import DENSE_400M, CORPUS_ROOT, TINY_3M
 from rnet.diloco import inner
 from rnet.diloco.inner import InnerError
 from rnet.worker import ipc
@@ -43,12 +43,12 @@ class CorpusGuardTests(unittest.TestCase):
 
     def test_APinnedCorpusWithNoReaderRefusesToTrain(self):
         with self.assertRaises(InnerError) as ctx:
-            inner.derive_batch(DENSE_400M, FINEWEB_EDU_ROOT, round_id=0,
+            inner.derive_batch(DENSE_400M, CORPUS_ROOT, round_id=0,
                                worker_id=1, outer_step=1, inner_index=0,
                                micro_batch=1, corpus=None)
         message = str(ctx.exception)
         self.assertIn("pins a corpus", message)
-        self.assertIn(FINEWEB_EDU_ROOT.hex()[:16], message)
+        self.assertIn(CORPUS_ROOT.hex()[:16], message)
 
     def test_ANetworkWithNoCorpusPinnedStillTrains(self):
         """regtest is synthetic by design, and that is a real answer rather than
@@ -81,7 +81,7 @@ class CorpusGuardTests(unittest.TestCase):
             claimed_payload_hash=bytes([3]) * 32,
             determinism_class=ROUND0.determinism_class)
         answer = replay(model=None, spec=DENSE_400M, numerics=ROUND0,
-                        message=message, dataset_root=FINEWEB_EDU_ROOT,
+                        message=message, dataset_root=CORPUS_ROOT,
                         base_weights=None, device="cpu", lr=1e-3, corpus=None)
         self.assertEqual(answer.verdict, int(VerdictKind.INDETERMINATE))
         self.assertIn("corpus", answer.note)
@@ -91,7 +91,7 @@ class CorpusGuardTests(unittest.TestCase):
         """It must refuse before a model is built or a step is taken, or the
         cost of the mistake is twenty minutes of GPU rather than nothing."""
         with self.assertRaises(InnerError):
-            inner.derive_batch(DENSE_400M, FINEWEB_EDU_ROOT, round_id=0,
+            inner.derive_batch(DENSE_400M, CORPUS_ROOT, round_id=0,
                                worker_id=1, outer_step=1, inner_index=0,
                                micro_batch=1, corpus=None)
 

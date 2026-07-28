@@ -31,9 +31,10 @@ Read this before anything else. It is the part most projects leave out.
 | ✅ The protocol runs | rounds close, checkpoints chain, challenges replay and verdicts publish — between two daemons and two workers, on real sockets |
 | ✅ Four anchors, self-certifying | genesis, policy, corpus root and initial weights, all checkable with the standard library alone |
 | ✅ IPv4 and IPv6 | one address type, two listening sockets, no branch that could treat the families differently |
-| ✅ 464 tests | including an adversarial audit's findings, as tests |
+| ✅ 482 tests | including an adversarial audit's findings, as tests |
 | ✅ A corpus reader | chunking, a Merkle index, and a resumable builder. A corpus that indexes to the wrong root is refused, not warned about |
-| ❌ **Nobody can reproduce the pinned corpus** | `main`, `test` and `moe` pin FineWeb-Edu at a snapshot that names no revision, and the dataset has since grown from 4.52 TB to 5.84 TB. Root `7195da13…` cannot be rebuilt from upstream today. **Only `regtest` runs end to end**, on synthetic tokens |
+| ✅ A corpus anyone can rebuild | `main` pins FineWeb-Edu at commit `87f09149…`, crawls `CC-MAIN-2025-21` and `CC-MAIN-2025-26` — 147.6 GiB, 29,642,369 documents, root `2831ce67…`. Two commands reproduce it byte for byte |
+| ❌ 16K context is mostly unused | those crawls average 858 tokens a document, so a 16,384-token window holds about thirteen unrelated ones. Deliberate for a first run: a proven corpus makes a falling loss mean the protocol works |
 | ❌ No chain persistence | a restarted node rebuilds from genesis and cannot rejoin a network past its retention window |
 | ❌ No mixture-of-experts training | the 29.4B shape is described, pinned and tested; how workers divide a sharded mixture is unsolved |
 | ❌ No seed, no network | `seed.resonancenet.org` resolves to a released address. Nodes find each other only with `--connect` |
@@ -91,12 +92,12 @@ python -m rnet genesis-show main
 
 ```
 network        main  (magic 0x524e4d31)
-genesis        adfd6082694c614cf44b2490df78ba15efc51ddc1174dd5740506c80ff4f9597
+genesis        9328672c89bd904ae025fdfcc8518570fdd135b7ad6f665ae9bbb00bf8a374ff
 policy         d0de7064ef6f9ae67133958c9d8a93df06b42c72f19789d557adee4243e39431
-weights        26358eaeb57666cf9e5d5fa59106ab407e5dbbd0f67da925f040abd064bdb37d  (derived, not shipped)
+weights        0ea5ef9780b5d01335eba4fbe2fbc2f87ca26734447e18a7e8f1db45aba01230  (derived, not shipped)
 model          d_model 1024, 24 layers, 8 heads (head_dim 128), GQA 4:1, seq_len 16384, vocab 32000 — dense, 397,728,768 parameters
 arithmetic     bf16 params, bf16 compute, fp32 accumulate, flash attention, int8 contributions (class 0x1730f203)
-corpus         7195da139188f4a1… (6,956,933 chunks)
+corpus         2831ce67f1079928… (150,093 chunks)
 tokenizer      1f8d0c4bc23d000c…
 schedule       200 inner steps, 2 contributor(s) minimum, 1200s deadline
 verification   25% challenged, quorum 3, shadow mode
@@ -209,7 +210,7 @@ produce an update nobody could reproduce.
 
 ```
 python: /path/to/rnet/.venv/bin/python 3.12.13
-Ran 464 tests in 55.5s
+Ran 482 tests in 56.5s
 OK
 ```
 

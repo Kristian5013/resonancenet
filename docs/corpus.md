@@ -16,14 +16,14 @@ round pins.
 
 Boundaries are **derived, not stored**: a chunk ends at the first `\n\n` at or
 after `target_chunk_bytes` from its start. So the manifest is three numbers
-rather than an offset table for 6,956,933 chunks, and any node that scans the
+rather than an offset table for 150,093 chunks, and any node that scans the
 corpus reaches the same boundaries or disagrees loudly about what chunk seven is.
 
 ```
-dataset_root    7195da139188f4a1b779bd380562718e080959531aee0cabbf777cd13501a3b8
+dataset_root    2831ce67f1079928e2afa5279462651b29bf9cde066ba9644d6dbd3e4bfd2f9b
 n_bytes         7,359,506,899,436
 target_chunk    1,048,576
-n_chunks        6,956,933
+n_chunks        150,093
 ```
 
 ## Which window a worker gets
@@ -100,14 +100,26 @@ appending, so an interrupted write never leaves a torn record inside the corpus.
 
 **`--revision` is not optional if the root has to mean anything.** Without it
 both Hugging Face calls track a moving branch, so the file list and the contents
-are whatever is there today. That is how the current pin came to be
-unreproducible: `7195da13…` was built against a snapshot nobody named, and
-FineWeb-Edu has since grown from 4.52 TB of parquet to 5.84 TB across 3,036
-files. A build today produces a different root, and nothing distinguishes that
-from a bug in this code. Any future pin must name the commit it was built from.
+are whatever is there today, and a build a month later differs for reasons
+nothing can distinguish from a bug in this code. The pin that preceded this one
+named no revision and could not be rebuilt.
 
-Budget: 7.4-9.4 TB of output, ~23 GB of transient cache at `--parallel 8`, and
-roughly a day of wall time — download-bound, not CPU-bound.
+**`--include` is not optional either, for this repository.** FineWeb-Edu holds
+3,036 parquet files: 2,410 under `data/` and 626 under `sample/` that are
+copies of subsets of the first 2,410. Without the filter the corpus gets about
+two terabytes of text it already contains — documents the model would see
+twice, and a root matching nothing. This is what `main` is pinned to:
+
+```bash
+rnet corpus-build --out CORPUS \
+  --include data/CC-MAIN-2025-21/ --include data/CC-MAIN-2025-26/ \
+  --revision 87f09149ef4734204d70ed1d046ddc9ca3f2b8f9
+rnet corpus-index --corpus CORPUS --network main
+```
+
+Measured: 100 files, 147.6 GiB of text, 29,642,369 documents, 15 minutes at
+170 MiB/s. Indexing it is 60.9 seconds and 150,093 chunks. The whole `data/`
+tree is 4.52 TB of parquet and about a day of downloading.
 
 ## Moving a network to a different corpus
 
