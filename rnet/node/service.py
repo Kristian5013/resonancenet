@@ -48,6 +48,13 @@ REQUEST_TIMEOUT_S = 60.0
 # from a peer, it is being led by one.
 MAX_IN_FLIGHT_PER_PEER = 128
 
+# And the table as a whole is bounded, because the per-peer cap does not bound
+# it: peer ids are per-connection, so reconnecting resets the count while the
+# entries persist. Without this the dict grows forever under attacker-chosen
+# keys, and a single 34-byte inv permanently blocks the node from ever fetching
+# that object from anybody.
+MAX_IN_FLIGHT_TOTAL = 4096
+
 # A locator goes back exponentially, so a few dozen entries reach genesis from
 # any height a node will ever be at.
 LOCATOR_DENSE = 10
@@ -104,6 +111,16 @@ class Service:
         if len(message.entries) > P.MAX_INV:
             self.node.penalise(peer, Score.FLOOD, "oversized inv")
             return
+        # The table is keyed by hashes the peer chooses, so it needs a ceiling
+        # of its own and not only a per-peer one: a peer that reconnects keeps
+        # its old entries alive under a new id, and the reaper only runs on a
+        # timer. Past the cap the node stops taking new announcements rather
+        # than growing — it is already fetching more than it can use.
+        if len(self._in_flight) >= MAX_IN_FLIGHT_TOTAL:
+            self.expire_requests()
+            if len(self._in_flight) >= MAX_IN_FLIGHT_TOTAL:
+                return
+
         outstanding = sum(1 for f in self._in_flight.values()
                           if f.peer_id == getattr(peer, "id", -1))
         wanted = []
@@ -270,7 +287,11 @@ class Service:
                 self.node.penalise(peer, Score.UNKNOWN_OBJECT, f"bad header: {exc}")
                 return
             outcome = self.chain.add(header)
-            if outcome is Outcome.REFUSED:
+            if outcome is Outcome.NO_ROOM:
+                # This node is full, which is this node's problem. Stop taking
+                # the batch, do not blame the peer.
+                break
+            if outcome.blames_the_sender:
                 self.node.penalise(peer, Score.WRONG_HASH, "header refused by the chain")
                 return
             if outcome in (Outcome.EXTENDED, Outcome.REORGANISED, Outcome.SIDE_BRANCH):

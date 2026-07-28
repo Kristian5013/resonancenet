@@ -64,7 +64,18 @@ class Object:
 
     @property
     def id(self) -> bytes:
-        """SHA3-256 of the whole container — this object's identity."""
+        """SHA3-256 of the whole container — this object's identity.
+
+        NOT memoised, deliberately, and it was for one commit. Caching it in
+        __dict__ makes `Object(**other.__dict__)` fail with an unexpected
+        keyword, which is a semantic change to every object in the protocol paid
+        for a speedup in one caller. The caller was fixed instead: see
+        Chain._hold_orphan, which compared ids in a linear scan and now compares
+        headers.
+
+        It IS expensive — a full re-serialisation and a SHA3 — so treat it as a
+        computation, not a field, and hold the result where it is needed twice.
+        """
         from ..canon.container import sha3_256
         return sha3_256(self.to_container())
 

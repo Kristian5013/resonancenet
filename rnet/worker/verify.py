@@ -58,6 +58,18 @@ def replay(model, spec: ModelSpec, numerics: Numerics, message: ipc.Verify, *,
     there is nothing to replay against, and saying so is the correct answer
     rather than an error.
     """
+    if corpus is None and dataset_root != bytes(32):
+        # A verifier without the corpus cannot judge work done on it. Replaying
+        # against synthetic tokens would reproduce noise, compare it to a real
+        # contribution's hash, and report MISMATCH — accusing an honest worker
+        # of exactly the thing the verifier is unable to check.
+        return ipc.Verdict(
+            challenge_id=message.challenge_id,
+            verdict=int(VerdictKind.INDETERMINATE),
+            replay_payload_hash=bytes(32),
+            determinism_class=numerics.determinism_class,
+            note="this round pins a corpus and none is attached here")
+
     if numerics.determinism_class != message.determinism_class:
         return ipc.Verdict(
             challenge_id=message.challenge_id,

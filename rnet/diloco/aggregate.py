@@ -10,9 +10,16 @@ rounding rule.
 
 Integers are associative. So contributions are summed as integers, and the only
 step that needs care is what to do when two workers chose different exponents:
-they are ALIGNED BY SHIFTING, never by rescaling through a float. Shifting the
-finer contribution up to the coarser one's scale is exact; converting both to
-float and back is not.
+they are ALIGNED BY SHIFTING, never by rescaling through a float, and the
+alignment goes toward the FINEST exponent present. Shifting a coarse
+contribution up is exact and loses nothing; shifting a fine one down discards
+its low bits, and past eight bits discards all of them.
+
+Getting that direction wrong is not a rounding matter. This aligned to the
+coarsest until an audit caught it, which meant one participant choosing a coarse
+exponent zeroed every other participant's work — a whole round erased from every
+node that aggregated it, silently, while the docstring promised that "every
+contribution is in the result".
 
 WHY A DIVERGENT EXPONENT IS REFUSED RATHER THAN ALIGNED. Aligning a contribution
 whose scale is 2^40 away means shifting it left by forty bits — the values would
@@ -75,26 +82,32 @@ def sum_contributions(contributions: list[Contribution]) -> tuple[np.ndarray, in
                 f"aggregate: worker {c.worker_id} sent {c.values.size} values, "
                 f"the first sent {size}")
 
-    # The coarsest exponent wins, because shifting a finer contribution UP is
-    # exact while shifting a coarser one DOWN would discard its low bits.
-    target = max(c.scale_exp for c in contributions)
-    for c in contributions:
-        gap = target - c.scale_exp
-        if gap > MAX_ALIGN_SHIFT:
-            raise AggregateError(
-                f"aggregate: worker {c.worker_id} is at exponent {c.scale_exp} "
-                f"against {target} — {gap} bits apart, past the {MAX_ALIGN_SHIFT} "
-                f"allowed. That is a different quantity, not a different scale.")
+    # THE FINEST EXPONENT WINS, and this is the whole correctness of the
+    # function. Shifting a coarse contribution UP is exact — it loses nothing —
+    # while shifting a fine one DOWN discards its low bits, and at an eight-bit
+    # gap discards all of them: 127 >> 8 is 0.
+    #
+    # This aligned to the COARSEST until it was audited, which meant one worker
+    # choosing a coarse exponent silently annihilated every other worker's
+    # contribution while the docstring promised the opposite. A single
+    # participant could erase a round from every node that aggregated it, and
+    # nothing anywhere would report a fault. Proved by
+    # AggregateTests.ACoarseContributorCannotEraseTheOthers.
+    target = min(c.scale_exp for c in contributions)
+    coarsest = max(c.scale_exp for c in contributions)
+    if coarsest - target > MAX_ALIGN_SHIFT:
+        raise AggregateError(
+            f"aggregate: exponents span {coarsest - target} bits, from {target} "
+            f"to {coarsest}, past the {MAX_ALIGN_SHIFT} allowed. That is a "
+            f"different quantity, not a different scale.")
 
     total = np.zeros(size, dtype=np.int64)
     for c in contributions:
-        gap = target - c.scale_exp
-        # Right-shift toward the coarser scale, rounding symmetrically so the
-        # aggregate is not biased toward zero by the alignment itself.
-        if gap:
-            total += _rounded_shift_down(c.values, gap)
-        else:
-            total += c.values
+        gap = c.scale_exp - target
+        # Left-shift toward the finer scale. Exact, so nothing is rounded and
+        # nothing is lost — the alignment itself introduces no error at all,
+        # which is what it should never have done.
+        total += (c.values << np.int64(gap)) if gap else c.values
     return total, target
 
 

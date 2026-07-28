@@ -81,6 +81,9 @@ class WorkerService:
     _verify_done: set = field(default_factory=set)
     # contribution_id -> its header, kept while a challenge about it is open
     _contribution_headers: dict = field(default_factory=dict)
+    # (outer_step, worker_id) for contributions already aggregated. Kept after
+    # the values are spent, because participation decides checkpoint authorship.
+    _spent_contributions: set = field(default_factory=set)
     # worker_id -> whether its last applied state agreed with the chain's.
     # Absent means "not yet compared", which is not the same as out of sync.
     _in_sync: dict = field(default_factory=dict)
@@ -172,6 +175,15 @@ class WorkerService:
         finally:
             if conn is not None:
                 self.workers.pop(conn.worker_id, None)
+                # Assignments die with the connection. A worker that was killed
+                # mid-round holds a slot for a step that will never receive it,
+                # and leaving it behind makes the daemon think that step still
+                # has work outstanding.
+                if conn.assignments:
+                    self._log(f"worker {conn.worker_id} left holding "
+                              f"{len(conn.assignments)} assignment(s)")
+                    conn.assignments.clear()
+                self._in_sync.pop(conn.worker_id, None)
             with contextlib.suppress(Exception):
                 writer.close()
 
@@ -356,13 +368,24 @@ class WorkerService:
         parts = self.contributions_at(outer_step)
         mean, exp = average_contributions(parts)
         fmt = self.round_desc.numerics.contribution_format
-        if int(np.abs(mean).max()) > fmt.max_magnitude:
-            # The bound that lets the aggregate ride in the contribution format
-            # is arithmetic, not hope — but it is checked, because a violation
-            # would silently clamp the update rather than fail.
-            raise ipc.IpcError(
-                f"produce: aggregate reached {int(np.abs(mean).max())}, past "
-                f"int{fmt.value}'s {fmt.max_magnitude}")
+
+        # Aligning to the finest exponent means the mean can exceed the
+        # contribution format — which is the price of not annihilating anyone's
+        # work, and it is worth paying. It is re-expressed at a coarser exponent
+        # that fits, by an integer shift with symmetric rounding, so the
+        # operation is exactly reproducible on every node rather than being a
+        # float round trip. When every worker chose a similar exponent — the
+        # ordinary case — the shift is zero and nothing happens at all.
+        from ..diloco.aggregate import _rounded_shift_down
+        peak = int(np.abs(mean).max())
+        shift = 0
+        while (peak >> shift) > fmt.max_magnitude:
+            shift += 1
+        if shift:
+            mean = _rounded_shift_down(mean, shift)
+            exp += shift
+            self._log(f"step {outer_step}: aggregate re-expressed {shift} bit(s) "
+                      f"coarser to fit int{fmt.value}")
         # Held, and handed out when each worker NEXT ASKS. Every worker must
         # apply — DiLoCo's outer step is not the producer's privilege, and one
         # that skipped it would start the next round from weights the network
@@ -392,11 +415,20 @@ class WorkerService:
             return
         seen[conn.worker_id] = (message.weights_hash, message.optimizer_state_hash)
 
-        # A worker known to be behind does not get to define the checkpoint.
-        # Its arithmetic is not wrong — it is arithmetic over a momentum the
-        # rest of the network does not share, and a checkpoint built from it
-        # would be a fork with one participant.
-        if self._in_sync.get(conn.worker_id) is False:
+        # Only a worker that TOOK PART in the round may define its checkpoint,
+        # and a worker known to be behind may not either.
+        #
+        # The participation rule is the one an audit found missing: a worker
+        # that attached seconds ago, holding genesis weights and having
+        # contributed nothing, was handed the outstanding Apply and its
+        # self-reported hash became the network's checkpoint. The in-sync guard
+        # could not catch it, because a worker that has never applied anything
+        # has never been compared to anything. Proved by
+        # WorkerServiceTests.ANewcomerCannotDefineACheckpoint.
+        took_part = (message.outer_step, conn.worker_id) in self.contributions or \
+            any(step == message.outer_step and wid == conn.worker_id
+                for (step, wid) in self._spent_contributions)
+        if not took_part or self._in_sync.get(conn.worker_id) is False:
             await self._send(conn, ipc.Accepted(contribution_id=bytes(32)))
             return
 
@@ -452,8 +484,10 @@ class WorkerService:
         outcome = self.chain.add(header)
         self.produced += 1
         # The contributions are spent. Keeping them would let the next round
-        # aggregate work that was already applied.
+        # aggregate work that was already applied — but WHO contributed is kept,
+        # because it is what decides who may define this step's checkpoint.
         for key in [k for k in self.contributions if k[0] == message.outer_step]:
+            self._spent_contributions.add(key)
             del self.contributions[key]
 
         if self.service is not None:

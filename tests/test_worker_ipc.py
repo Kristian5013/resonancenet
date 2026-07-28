@@ -383,28 +383,56 @@ class WorkerServiceTests(unittest.IsolatedAsyncioTestCase):
                          self.round_desc.model.parameter_count())
         self.assertEqual(work.momentum_q16, self.policy.outer_momentum_q16)
 
-    def test_TheAggregateFitsTheContributionFormat(self):
-        """Why the aggregate can ride back at int8 instead of int64: each part
-        is within the format after alignment, a sum of n is within n times it,
-        and the mean is within it again. 400 MB instead of 3.2 GB."""
+    def test_TheAggregateFitsWhenEveryoneAgreesOnScale(self):
+        """The ordinary case, and why the aggregate can ride back packed.
+
+        With every contributor at one exponent — what a round of honest workers
+        on one model actually produces — the mean is inside the format and the
+        transport shift is zero. 400 MB instead of 3.2 GB for the dense model.
+        """
         from rnet.diloco.aggregate import Contribution, average_contributions
         fmt = ContributionFormat.INT8_POW2
-        from rnet.diloco.aggregate import MAX_ALIGN_SHIFT
         rng = np.random.default_rng(0)
         for n in (2, 3, 8, 50):
-            # Spreads within the alignment rule; wider than MAX_ALIGN_SHIFT is
-            # refused outright as a different quantity, not aggregated.
-            spread = [(i * MAX_ALIGN_SHIFT) // max(1, n - 1) for i in range(n)]
-            for exponents in ([0] * n, spread, [-e for e in spread]):
-                parts = [
-                    Contribution(
-                        values=rng.integers(-fmt.max_magnitude,
-                                            fmt.max_magnitude + 1, 64),
-                        scale_exp=e, fmt=fmt, worker_id=i)
-                    for i, e in enumerate(exponents)]
-                mean, _ = average_contributions(parts)
-                self.assertLessEqual(int(np.abs(mean).max()), fmt.max_magnitude,
-                                     f"{n} parts at {exponents[:3]}…")
+            parts = [Contribution(
+                values=rng.integers(-fmt.max_magnitude, fmt.max_magnitude + 1, 64),
+                scale_exp=-17, fmt=fmt, worker_id=i) for i in range(n)]
+            mean, _ = average_contributions(parts)
+            self.assertLessEqual(int(np.abs(mean).max()), fmt.max_magnitude, n)
+
+    def test_ASpreadOfScalesIsCarriedNotClipped(self):
+        """When they disagree the mean CAN exceed the format, and that is the
+        price of aligning toward the finest exponent rather than annihilating
+        the finer contributors. It is re-expressed by an integer shift, not
+        clipped and not refused.
+
+        This test asserted the opposite until the alignment bug was found — it
+        passed only because the old direction had already thrown the finer
+        contributions away.
+        """
+        from rnet.diloco.aggregate import (MAX_ALIGN_SHIFT, Contribution,
+                                           _rounded_shift_down,
+                                           average_contributions)
+        fmt = ContributionFormat.INT8_POW2
+        parts = [
+            Contribution(np.full(8, 100, dtype=np.int64), -20, fmt, 1),
+            Contribution(np.full(8, 100, dtype=np.int64), -20 + MAX_ALIGN_SHIFT,
+                         fmt, 2),
+        ]
+        mean, exp = average_contributions(parts)
+        self.assertGreater(int(np.abs(mean).max()), fmt.max_magnitude)
+
+        peak = int(np.abs(mean).max())
+        shift = 0
+        while (peak >> shift) > fmt.max_magnitude:
+            shift += 1
+        packed = _rounded_shift_down(mean, shift)
+        self.assertLessEqual(int(np.abs(packed).max()), fmt.max_magnitude)
+        self.assertGreater(shift, 0)
+
+        # And the fine contributor is still in there rather than erased.
+        coarse_only, _ = average_contributions(parts[1:])
+        self.assertNotEqual(int(mean[0]), int(coarse_only[0]))
 
     async def test_EveryWorkerIsHandedTheApplyWhenItAsks(self):
         """Not pushed. This channel is strict request-and-response, so an

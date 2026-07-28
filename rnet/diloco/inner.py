@@ -118,6 +118,21 @@ def derive_batch(spec: ModelSpec, dataset_root: bytes, round_id: int,
     for regtest and not a fallback for a corpus that failed to load: a round
     that pins a root and cannot read it must fail, not invent.
     """
+    if corpus is None and dataset_root != bytes(32):
+        # The rule this module already stated, now enforced. Falling through to
+        # synthetic tokens here is not a graceful degradation: the round pins a
+        # corpus, the daemon accepts the contribution, the chain advances on it,
+        # and a verifier replaying from the same protocol state reproduces the
+        # identical noise and AGREES — so the anti-cheating machinery certifies
+        # work that could not possibly have learned anything. Measured: 50 inner
+        # steps on the 397M model with loss flat at 10.53 against ln(32000) =
+        # 10.37, submitted and accepted without a word.
+        raise InnerError(
+            f"inner: this round pins a corpus ({dataset_root.hex()[:16]}…) and no "
+            f"corpus is attached. Training would silently use random tokens, the "
+            f"daemon would accept it, and the verifier would confirm it — so it "
+            f"stops here instead.")
+
     windows = []
     for b in range(micro_batch):
         seed = window_seed(dataset_root, round_id, worker_id, outer_step,

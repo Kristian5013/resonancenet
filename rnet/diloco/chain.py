@@ -50,7 +50,20 @@ class Outcome(Enum):
     SIDE_BRANCH = "side"           # valid, connected, not preferred
     ORPHANED = "orphaned"          # parent unknown; held for later
     KNOWN = "known"                # already had it
-    REFUSED = "refused"            # will not be held at all
+    REFUSED = "refused"            # malformed: the sender is at fault
+    NO_ROOM = "no-room"            # well-formed, but this node is full
+
+    @property
+    def blames_the_sender(self) -> bool:
+        """Whether this outcome says anything about the peer.
+
+        NO_ROOM does not, and conflating it with REFUSED was a way for a node to
+        eclipse itself: an attacker filled the orphan pool once, and from then
+        on every honest peer offering a checkpoint this node could not yet
+        connect was scored as misbehaving and banned by netblock for a day.
+        Proved by ChainTests.AFullPoolDoesNotBlameThePeer.
+        """
+        return self is Outcome.REFUSED
 
 
 class ChainError(Exception):
@@ -174,9 +187,19 @@ class Chain:
 
     def _hold_orphan(self, header: CheckpointHeader) -> Outcome:
         if self._orphan_count >= MAX_ORPHANS:
-            return Outcome.REFUSED
+            # Not the sender's fault, and saying so matters: scored as
+            # misbehaviour, a full pool turns every honest peer offering an
+            # unconnectable checkpoint into a ban.
+            return Outcome.NO_ROOM
         waiting = self._orphans.setdefault(header.parent, [])
-        if any(h.id == header.id for h in waiting):
+        # Compared as headers, not as ids. `Object.id` re-serialises the whole
+        # container and runs SHA3 on every access, so scanning the list by id
+        # made holding N orphans cost N**2 hashes — an unsolicited run of
+        # headers froze the event loop for minutes, answering no pings, serving
+        # no peers and ignoring the worker socket, for a kilobyte of traffic.
+        # Dataclass equality compares eight fields and no bytes are hashed.
+        # Proved by ChainTests.HoldingOrphansDoesNotCostQuadraticHashing.
+        if header in waiting:
             return Outcome.KNOWN
         waiting.append(header)
         self._orphan_count += 1

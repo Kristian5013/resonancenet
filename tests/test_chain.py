@@ -232,7 +232,34 @@ class ChainTests(unittest.TestCase):
         for i in range(MAX_ORPHANS):
             chain.add(header(9, bytes([i // 256, i % 256]) + bytes(30), weights=i))
         self.assertEqual(chain.add(header(9, bytes([255, 255]) + bytes(30))),
-                         Outcome.REFUSED)
+                         Outcome.NO_ROOM)
+
+    def test_AFullPoolDoesNotBlameThePeer(self):
+        """Conflating "this node is full" with "this header is malformed" is how
+        a node eclipses itself: an attacker fills the pool once, and from then
+        on every honest peer offering a checkpoint the node cannot yet connect
+        is scored as misbehaving and banned by netblock for a day."""
+        self.assertFalse(Outcome.NO_ROOM.blames_the_sender)
+        self.assertTrue(Outcome.REFUSED.blames_the_sender)
+        for outcome in (Outcome.EXTENDED, Outcome.REORGANISED,
+                        Outcome.SIDE_BRANCH, Outcome.ORPHANED, Outcome.KNOWN):
+            self.assertFalse(outcome.blames_the_sender, outcome)
+
+    def test_HoldingOrphansDoesNotCostQuadraticHashing(self):
+        """Scanning the waiting list by `id` re-serialised and re-hashed every
+        entry on every insert, which froze the event loop for minutes on a
+        kilobyte of unsolicited headers."""
+        import time as _t
+        chain = Chain(genesis(), retained=64)
+        parent = bytes([7]) * 32
+        started = _t.monotonic()
+        for i in range(2000):
+            self.assertEqual(chain.add(header(9, parent, weights=i)),
+                             Outcome.ORPHANED)
+        elapsed = _t.monotonic() - started
+        # Two thousand into one bucket. By id this was tens of seconds; by
+        # header equality it is well under one.
+        self.assertLess(elapsed, 5.0, f"took {elapsed:.1f}s")
 
     def test_AnOrphanIsNotHeldTwice(self):
         chain = Chain(genesis(), retained=64)

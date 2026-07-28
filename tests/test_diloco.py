@@ -145,24 +145,54 @@ class AggregateTests(unittest.TestCase):
         total, _ = A.sum_contributions(cs)
         self.assertTrue(np.array_equal(total, np.full(size, 10)))
 
-    def test_DifferentExponentsAlignByShiftingNotRescaling(self):
+    def test_AlignmentGoesTowardTheFinestExponent(self):
+        """Up, never down: shifting a coarse contribution up is exact."""
         fine = A.Contribution(np.array([4], dtype=np.int64), -10, F.INT8_POW2, 1)
         coarse = A.Contribution(np.array([1], dtype=np.int64), -8, F.INT8_POW2, 2)
         total, exp = A.sum_contributions([fine, coarse])
-        # 4 * 2^-10 == 1 * 2^-8, so the aligned sum is 2 at exponent -8.
-        self.assertEqual(exp, -8)
-        self.assertEqual(total.tolist(), [2])
+        # 4*2^-10 + 1*2^-8 = 8*2^-10, exactly.
+        self.assertEqual(exp, -10)
+        self.assertEqual(total.tolist(), [8])
 
-    def test_AlignmentRoundsSymmetrically(self):
-        """An arithmetic shift rounds toward negative infinity and would drag
-        every aggregate slightly negative."""
-        neg = A.Contribution(np.array([-3], dtype=np.int64), 0, F.INT8_POW2, 1)
-        pos = A.Contribution(np.array([3], dtype=np.int64), 0, F.INT8_POW2, 2)
-        anchor = A.Contribution(np.array([0], dtype=np.int64), 1, F.INT8_POW2, 3)
-        down_neg, _ = A.sum_contributions([neg, anchor])
-        down_pos, _ = A.sum_contributions([pos, anchor])
-        self.assertEqual(int(down_neg[0]), -int(down_pos[0]))
-        self.assertEqual(int(down_pos[0]), 2)   # 3/2 rounds away from zero
+    def test_AlignmentIsExactAndLosesNothing(self):
+        """It rounds nowhere, because a left shift has nothing to round."""
+        r = rng(11)
+        for gap in range(0, A.MAX_ALIGN_SHIFT + 1):
+            values = r.integers(-127, 128, 64).astype(np.int64)
+            fine = A.Contribution(np.zeros(64, dtype=np.int64), -gap, F.INT8_POW2, 1)
+            coarse = A.Contribution(values, 0, F.INT8_POW2, 2)
+            total, exp = A.sum_contributions([fine, coarse])
+            self.assertEqual(exp, -gap)
+            self.assertTrue(np.array_equal(total, values << np.int64(gap)),
+                            f"gap {gap}")
+
+    def test_ACoarseContributorCannotEraseTheOthers(self):
+        """The bug an audit found, as a test.
+
+        Aligning toward the COARSEST exponent right-shifted every finer
+        contribution, and at an eight-bit gap 127 >> 8 is 0 — so one participant
+        choosing a coarse exponent silently zeroed everybody else's work, on
+        every node that aggregated it, while the docstring promised the
+        opposite.
+        """
+        honest = [A.Contribution(np.full(16, 100, dtype=np.int64), -20,
+                                 F.INT8_POW2, worker_id=i) for i in range(1, 4)]
+        coarse = A.Contribution(np.full(16, 1, dtype=np.int64), -4,
+                                F.INT8_POW2, worker_id=9)
+        total, exp = A.sum_contributions(honest + [coarse])
+        self.assertEqual(exp, -20)
+
+        # Every honest contribution survives intact, and the coarse one is
+        # simply large — which is what a coarse exponent means.
+        without, _ = A.sum_contributions(honest)
+        self.assertTrue(np.all(total > without),
+                        "the coarse contributor added nothing")
+        self.assertTrue(np.all(without == 300),
+                        "the honest contributions were altered")
+        # And the honest work is still visible in the total rather than lost in
+        # rounding: dropping one honest contributor changes the result.
+        fewer, _ = A.sum_contributions(honest[:2] + [coarse])
+        self.assertTrue(np.all(total - fewer == 100))
 
     def test_ADivergentExponentIsRefused(self):
         """Past a bound it is not a different scale, it is a different quantity

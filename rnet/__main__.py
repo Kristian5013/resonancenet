@@ -72,11 +72,16 @@ def cmd_train(args) -> int:
     """Attach a worker to the local daemon and train for it."""
     from .worker.trainer import TrainerConfig, run
     from .worker.client import WorkerError
+    from .diloco.inner import InnerError
     try:
         return run(TrainerConfig(
             network=args.network, datadir=args.datadir or "", device=args.device,
             lr=args.lr, rounds=args.rounds))
-    except WorkerError as exc:
+    except (WorkerError, InnerError) as exc:
+        # InnerError is a precondition failure like any other — an unset
+        # CUBLAS_WORKSPACE_CONFIG is the first thing every contributor hits, and
+        # it arrived as a traceback, which reads as a broken program rather than
+        # a setup step.
         print(f"rnet: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

@@ -47,6 +47,10 @@ MAX_PERSISTED = 20_000
 
 STATUS_INTERVAL_S = 60.0
 
+# How often the reapers run. Short relative to the timeouts they enforce, long
+# enough that an idle node is idle.
+UPKEEP_INTERVAL_S = 15.0
+
 
 @dataclass
 class DaemonConfig:
@@ -126,7 +130,17 @@ class Daemon:
     workers: object = None
     started_at: float = field(default_factory=time.monotonic)
     _stopping: asyncio.Event = None
-    _log = print
+
+    @staticmethod
+    def _log(*args) -> None:
+        """Print and flush.
+
+        The docstring above calls the status line the interface, and under
+        systemd, nohup, docker or a pipe — which is how a node is actually run —
+        python buffers 8 KB, so the first line appeared over an hour after
+        start and the operator saw an empty log and concluded it had hung.
+        """
+        print(*args, flush=True)
 
     # -- setup ----------------------------------------------------------------
 
@@ -221,12 +235,14 @@ class Daemon:
 
         self._install_signals()
         status = asyncio.ensure_future(self._status_loop())
+        upkeep = asyncio.ensure_future(self._upkeep_loop())
         try:
             await self._stopping.wait()
         finally:
-            status.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await status
+            for task in (status, upkeep):
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
             await self.shutdown()
         return 0
 
@@ -261,6 +277,24 @@ class Daemon:
         while True:
             await asyncio.sleep(self.config.status_interval_s)
             self._log(self.status())
+
+    async def _upkeep_loop(self) -> None:
+        """Run the reapers the other modules wrote and nobody called.
+
+        Both existed with docstrings explaining why their absence is a denial of
+        service — an in-flight table keyed by hashes a peer chooses, growing
+        forever, and challenges that never expire — and neither was wired to
+        anything. A function that is never called is not a defence.
+        """
+        while True:
+            await asyncio.sleep(UPKEEP_INTERVAL_S)
+            with contextlib.suppress(Exception):
+                freed = self.service.expire_requests()
+                if freed:
+                    self._log(f"rnet: released {freed} stalled request(s)")
+            if self.workers is not None:
+                with contextlib.suppress(Exception):
+                    self.workers.expire_challenges()
 
     def status(self) -> str:
         uptime = time.monotonic() - self.started_at

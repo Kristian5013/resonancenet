@@ -155,10 +155,23 @@ def run(config: TrainerConfig, *, log=print) -> int:
 
             base_weights = result.base_weights
             payload = pack(result.payload, numerics.contribution_format)
-            accepted = client.submit(
-                assignment_id=reply.assignment_id, payload=payload,
-                scale_exp=result.scale_exp, value_count=int(result.payload.size),
-                final_loss=result.final_loss)
+            try:
+                accepted = client.submit(
+                    assignment_id=reply.assignment_id, payload=payload,
+                    scale_exp=result.scale_exp,
+                    value_count=int(result.payload.size),
+                    final_loss=result.final_loss)
+            except WorkerError as exc:
+                # Being overtaken is the ordinary fate of the slowest card in a
+                # round, not a fault. Exiting here tore down a long-running
+                # contributor over a normal race, discarding the built model and
+                # the weights a challenge would need, and needed an operator to
+                # restart it.
+                if "STALE_ASSIGNMENT" not in str(exc):
+                    raise
+                log(f"step {reply.outer_step}: overtaken while training — "
+                    f"asking for current work")
+                continue
             log(f"step {reply.outer_step}: submitted "
                 f"{accepted.contribution_id.hex()[:16]}…, "
                 f"loss {result.final_loss:.4f}, {time.time() - started:.0f}s")
