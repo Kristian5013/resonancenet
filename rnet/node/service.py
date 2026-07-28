@@ -75,6 +75,7 @@ class Service:
     chain: Chain
     objects: ObjectStore = field(default_factory=ObjectStore)
     corpus: object = None
+    index: object = None
     dataset_root: bytes = bytes(32)
     dataset_chunks: int = 0
 
@@ -309,13 +310,27 @@ class Service:
                                "no corpus for that root"))
             return
         try:
-            data, proof = self.corpus.chunk_with_proof(message.index)
+            data, proof = self._chunk_with_proof(message.index)
         except Exception:
             peer.send(P.Reject(P.Command.GETCHUNK, P.RejectCode.UNAVAILABLE,
                                f"chunk {message.index} unavailable"))
             return
         peer.send(P.Chunk(dataset_root=self.dataset_root, index=message.index,
                           leaf_count=proof.leaf_count, proof=proof.path, data=data))
+
+    def _chunk_with_proof(self, index: int):
+        """A chunk and its inclusion proof, however the corpus is held.
+
+        The proof is rebuilt from the file rather than kept in memory: for seven
+        million chunks the leaves are 223 MB of hashes, which is affordable and
+        pointless when serving one proof means reading the corpus anyway.
+        """
+        from ..dataset.index import proof_for
+        if hasattr(self.corpus, "chunk_with_proof"):
+            return self.corpus.chunk_with_proof(index)
+        if self.index is None:
+            raise RuntimeError("corpus: no index, so no proofs")
+        return self.corpus.get(index), proof_for(self.index, index)
 
     def _on_chunk(self, peer: Peer, message: P.Chunk) -> bool:
         """Corpus bytes. Verified before they are believed, never after.

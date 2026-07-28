@@ -59,7 +59,7 @@ def cmd_daemon(args) -> int:
         connect=tuple(args.connect or ()),
         listen_v4=not args.no_v4, listen_v6=not args.no_v6,
         max_outbound=args.max_outbound, max_inbound=args.max_inbound,
-        status_interval_s=args.status_interval)
+        corpus=args.corpus or "", status_interval_s=args.status_interval)
     try:
         return asyncio.run(Daemon(config=config).run())
     except KeyboardInterrupt:
@@ -77,7 +77,7 @@ def cmd_train(args) -> int:
     try:
         return run(TrainerConfig(
             network=args.network, datadir=args.datadir or "", device=args.device,
-            lr=args.lr, rounds=args.rounds))
+            lr=args.lr, rounds=args.rounds, corpus=args.corpus or ""))
     except (WorkerError, InnerError) as exc:
         # InnerError is a precondition failure like any other — an unset
         # CUBLAS_WORKSPACE_CONFIG is the first thing every contributor hits, and
@@ -179,6 +179,8 @@ def main(argv: list[str] | None = None) -> int:
     daemon.add_argument("--no-v6", action="store_true", help="do not listen on IPv6")
     daemon.add_argument("--max-outbound", type=int, default=8)
     daemon.add_argument("--max-inbound", type=int, default=64)
+    daemon.add_argument("--corpus", default=None, metavar="PATH",
+                        help="serve this corpus file to peers and workers")
     daemon.add_argument("--status-interval", type=float, default=60.0,
                         metavar="SECONDS")
     daemon.set_defaults(fn=cmd_daemon)
@@ -190,6 +192,9 @@ def main(argv: list[str] | None = None) -> int:
     train.add_argument("--lr", type=float, default=1e-3)
     train.add_argument("--rounds", type=int, default=0,
                        help="0 means until stopped")
+    train.add_argument("--corpus", default=None, metavar="PATH",
+                       help="a corpus file on this machine; without it, chunks "
+                            "are fetched through the daemon")
     train.set_defaults(fn=cmd_train)
 
     corpus = sub.add_parser("corpus-build",

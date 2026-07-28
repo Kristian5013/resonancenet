@@ -29,6 +29,7 @@ from .verify import replay
 class TrainerConfig:
     network: str = "regtest"
     datadir: str = ""
+    corpus: str = ""            # a local corpus file; otherwise fetched via the daemon
     device: str = "cuda"
     lr: float = 1e-3
     rounds: int = 0             # 0 means until stopped
@@ -37,6 +38,33 @@ class TrainerConfig:
     def resolved_datadir(self) -> str:
         return self.datadir or os.path.join(
             os.path.expanduser("~"), ".rnet", self.network)
+
+
+def _open_local(path: str, round_desc, tokenizer, log):
+    """A corpus on this machine, using a cached index where one is valid.
+
+    The index is a cache of the boundary scan, and scanning seven terabytes is
+    hours. It is checked against the file's size and the round's target before
+    it is believed — an index that could disagree with the corpus and win would
+    be a way to make two nodes train on different text while agreeing on a root.
+    """
+    from ..dataset.corpus import LocalCorpus
+    from ..dataset.index import CorpusIndex, build_index
+
+    target = 1 << 20
+    index_path = path + ".rnidx"
+    index = CorpusIndex.load(index_path, path, target)
+    if index is None:
+        log("corpus    no usable index; scanning (this takes a while)")
+        index = build_index(path, target)
+        index.save(index_path)
+    if index.root != round_desc.dataset_root:
+        raise WorkerError(
+            f"corpus: {path} indexes to {index.root.hex()[:16]}… and this round "
+            f"pins {round_desc.dataset_root.hex()[:16]}…. That is a different "
+            f"corpus, not a different copy of the same one.")
+    log(f"corpus    {index.n_chunks:,} chunks, root verified against the round")
+    return LocalCorpus.open(path, target, tokenizer, offsets=index.offsets)
 
 
 def run(config: TrainerConfig, *, log=print) -> int:
@@ -57,6 +85,21 @@ def run(config: TrainerConfig, *, log=print) -> int:
     socket_path = os.path.join(config.resolved_datadir(), "worker.sock")
     spec, numerics = round_desc.model, round_desc.numerics
 
+    # The corpus is opened BEFORE the handshake and before a model is built. A
+    # round that pins one and cannot read it must fail, and failing after
+    # twenty minutes of GPU is not failing, it is wasting somebody's evening.
+    corpus = None
+    if round_desc.dataset_root != bytes(32):
+        from ..dataset.corpus import LocalCorpus
+        from ..dataset.tokenizer import load as load_tokenizer
+        tokenizer = load_tokenizer(round_desc.tokenizer_hash)
+        if config.corpus:
+            log(f"corpus    {config.corpus} — scanning for chunk boundaries")
+            corpus = _open_local(config.corpus, round_desc, tokenizer, log)
+        else:
+            log(f"corpus    fetched through the daemon "
+                f"({round_desc.dataset_chunks:,} chunks)")
+
     log(f"network   {network}, round {round_desc.round_id}")
     log(f"model     {spec.parameter_count():,} parameters, seq_len {spec.seq_len}")
     log(f"arithmetic {numerics.describe()}")
@@ -70,6 +113,13 @@ def run(config: TrainerConfig, *, log=print) -> int:
             raise WorkerError(
                 f"the daemon is running different consensus rules: {exc}") from exc
         log(f"worker id {client.worker_id} (assigned by the daemon, not chosen here)")
+
+        if corpus is None and round_desc.dataset_root != bytes(32):
+            from ..dataset.corpus import RemoteCorpus
+            from ..dataset.tokenizer import load as load_tokenizer
+            corpus = RemoteCorpus(client=client,
+                                  n_chunks=round_desc.dataset_chunks,
+                                  tokenizer=load_tokenizer(round_desc.tokenizer_hash))
 
         # Built once and reloaded from the assignment's base each round: a model
         # rebuilt from scratch every time would spend minutes deriving weights
@@ -97,7 +147,7 @@ def run(config: TrainerConfig, *, log=print) -> int:
                 answer = replay(model, spec, numerics, reply,
                                 dataset_root=round_desc.dataset_root,
                                 base_weights=verify_base, device=config.device,
-                                lr=config.lr)
+                                lr=config.lr, corpus=corpus)
                 # Replaying leaves the model wherever the target's round ended.
                 # Put it back, or the next round would train from somebody
                 # else's weights.
@@ -150,7 +200,7 @@ def run(config: TrainerConfig, *, log=print) -> int:
                 round_id=reply.round_id, worker_id=client.worker_id,
                 outer_step=reply.outer_step, inner_steps=reply.inner_steps,
                 micro_batch=reply.micro_batch, lr=config.lr,
-                device=config.device, on_step=progress)
+                device=config.device, corpus=corpus, on_step=progress)
             print()
 
             base_weights = result.base_weights

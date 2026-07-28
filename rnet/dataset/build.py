@@ -49,6 +49,11 @@ DEFAULT_PARALLEL = 8
 MAX_ATTEMPTS = 12
 BACKOFF_CAP_S = 300.0
 
+# Rows read from a parquet file at a time. Small enough that one batch is a
+# bounded allocation regardless of how large the file is, large enough that the
+# per-batch overhead disappears.
+BATCH_ROWS = 4096
+
 
 class BuildError(Exception):
     pass
@@ -107,12 +112,32 @@ def remove_download(path: str) -> int:
     return freed
 
 
-def text_from_parquet(path: str, column: str) -> list:
-    """Every document in one parquet file, in file order."""
+def append_parquet(path: str, column: str, out) -> tuple[int, int]:
+    """Stream one parquet file into `out`. Returns (bytes written, documents).
+
+    Batched rather than `read_table(...).to_pylist()`, which was the first
+    version and was the bottleneck: it pulls a 2.3 GB file wholly into memory
+    and then builds half a million Python string objects from it. On a 30 GB box
+    with eight downloads also buffering, that is memory pressure severe enough
+    to stall the network — the incoming rate measured ZERO while a file was
+    being converted, and the pipeline looked like a slow download when it was
+    really a slow reader.
+    """
     import pyarrow.parquet as pq
 
-    table = pq.read_table(path, columns=[column])
-    return table.column(column).to_pylist()
+    written = documents = 0
+    reader = pq.ParquetFile(path)
+    for batch in reader.iter_batches(batch_size=BATCH_ROWS, columns=[column]):
+        for value in batch.column(0):
+            text = value.as_py()
+            if not text:
+                continue
+            encoded = text.encode("utf-8")
+            out.write(encoded)
+            out.write(SEPARATOR)
+            written += len(encoded) + len(SEPARATOR)
+            documents += 1
+    return written, documents
 
 
 def build(repo_id: str, out_path: str, *, column: str = "text",
@@ -170,39 +195,45 @@ def build(repo_id: str, out_path: str, *, column: str = "text",
 
     with ThreadPoolExecutor(max_workers=parallel) as pool, \
             open(out_path, "ab") as out:
-        # Submitted in order and consumed in order. `map` preserves ordering
-        # regardless of which download finishes first, which is exactly the
-        # property the root depends on.
-        for name, local in pool.map(fetch, remaining):
+        # A BOUNDED window of downloads in flight, not `pool.map` over all of
+        # them. map submits every task at once, so downloads race ahead of the
+        # reader and every finished file sits on disk waiting — measured at 64
+        # files and 152 GB of cache before this was noticed, on a build that
+        # would have kept growing until the volume filled.
+        #
+        # Order is still exactly the submission order, which is what the corpus
+        # root depends on: results are consumed from the head of the window.
+        window: list = []
+        cursor = 0
+        depth = parallel + 2
+
+        while cursor < len(remaining) or window:
+            while len(window) < depth and cursor < len(remaining):
+                window.append(pool.submit(fetch, remaining[cursor]))
+                cursor += 1
+
+            name, local = window.pop(0).result()
             try:
-                documents = text_from_parquet(local, column)
+                written, documents = append_parquet(local, column, out)
             except Exception as exc:                      # noqa: BLE001
                 raise BuildError(f"corpus: {name} did not parse: {exc}") from exc
-
-            written = 0
-            for doc in documents:
-                if not doc:
-                    continue
-                encoded = doc.encode("utf-8")
-                out.write(encoded)
-                out.write(SEPARATOR)
-                written += len(encoded) + len(SEPARATOR)
             out.flush()
             os.fsync(out.fileno())
 
             state.bytes_written += written
-            state.documents += len(documents)
+            state.documents += documents
             state.files_done.append(name)
             state.save()
             freed = remove_download(local)
 
             elapsed = max(1e-6, time.monotonic() - started)
-            rate = (state.bytes_written - at_start) / elapsed
+            gained = state.bytes_written - at_start
             done, total = len(state.files_done), len(files)
-            left = (total - done) * (elapsed / max(1, done - 0)) if done else 0
+            todo = total - done
             log(f"[{done:>6}/{total}] {state.bytes_written / 2**40:6.3f} TiB  "
-                f"{rate / 2**20:6.1f} MiB/s  freed {freed / 2**20:5.0f} MiB  "
-                f"{left / 3600:5.1f}h left")
+                f"{gained / elapsed / 2**20:6.1f} MiB/s  "
+                f"freed {freed / 2**20:5.0f} MiB  "
+                f"{todo * elapsed / max(1, done) / 3600:5.1f}h left")
 
     log(f"done: {state.bytes_written:,} bytes, {state.documents:,} documents")
     return state

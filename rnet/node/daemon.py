@@ -62,6 +62,7 @@ class DaemonConfig:
     listen_v6: bool = True
     max_outbound: int = 8
     max_inbound: int = 64
+    corpus: str = ""
     status_interval_s: float = STATUS_INTERVAL_S
 
     def resolved_datadir(self) -> str:
@@ -128,6 +129,7 @@ class Daemon:
     node: Node = None
     service: Service = None
     workers: object = None
+    _index: object = None
     started_at: float = field(default_factory=time.monotonic)
     _stopping: asyncio.Event = None
 
@@ -188,8 +190,9 @@ class Daemon:
             producer_id=0, timestamp_ms=0)
         chain = Chain(genesis_checkpoint, retained=policy.retained_checkpoints)
 
+        corpus = self._open_corpus(round_desc)
         self.service = Service(
-            node=self.node, chain=chain, objects=ObjectStore(),
+            node=self.node, chain=chain, objects=ObjectStore(), corpus=corpus,
             dataset_root=round_desc.dataset_root,
             dataset_chunks=round_desc.dataset_chunks)
         self.service.install()
@@ -198,8 +201,41 @@ class Daemon:
         from .workerservice import WorkerService
         self.workers = WorkerService(
             datadir=datadir, round_desc=round_desc, policy=policy, chain=chain,
-            service=self.service)
+            service=self.service, corpus=corpus)
         self.workers._log = self._log
+
+    def _open_corpus(self, round_desc):
+        """The corpus this node serves, if it was given one.
+
+        Verified against the round's root before it is served, not after: a node
+        handing out chunks from the wrong corpus would be feeding every worker
+        that trusts it text the network never agreed on, and they would find out
+        only when a verifier could not reproduce them.
+        """
+        if not self.config.corpus:
+            return None
+        if round_desc.dataset_root == bytes(32):
+            self._log("rnet: this round pins no corpus; --corpus ignored")
+            return None
+
+        from ..dataset.corpus import LocalCorpus
+        from ..dataset.index import CorpusIndex, build_index
+
+        path, target = self.config.corpus, 1 << 20
+        index_path = path + ".rnidx"
+        index = CorpusIndex.load(index_path, path, target)
+        if index is None:
+            self._log(f"rnet: indexing {path} — one pass, and it is the disk "
+                      f"rather than the arithmetic that takes the time")
+            index = build_index(path, target)
+            index.save(index_path)
+        if index.root != round_desc.dataset_root:
+            raise RuntimeError(
+                f"corpus: {path} indexes to {index.root.hex()[:16]}… and this "
+                f"network pins {round_desc.dataset_root.hex()[:16]}…")
+        self._log(f"  corpus   {path} — {index.n_chunks:,} chunks, root verified")
+        self._index = index
+        return LocalCorpus.open(path, target, offsets=index.offsets)
 
     # -- running ---------------------------------------------------------------
 
