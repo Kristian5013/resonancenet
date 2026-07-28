@@ -16,6 +16,28 @@ import sys
 from .consensus import genesis
 
 
+def default_genesis_dir() -> str:
+    """Where the shipped artifacts are, from wherever this was invoked.
+
+    The default used to be the literal relative path `share/genesis`, which is
+    right in exactly one directory: the root of a source checkout. Anywhere
+    else — a subdirectory of the checkout, or a machine that pip-installed the
+    package rather than cloning it — `genesis-verify` printed eight REFUSED
+    lines about a missing file and exited 1, which reads as the artifacts
+    failing their anchors rather than as the wrong working directory.
+
+    Order matters: an explicit `./share/genesis` wins, so somebody checking a
+    directory they assembled themselves gets what they meant.
+    """
+    package = os.path.dirname(os.path.abspath(__file__))
+    for candidate in (os.path.join(os.getcwd(), "share", "genesis"),
+                      os.path.join(os.path.dirname(package), "share", "genesis"),
+                      os.path.join(package, "share", "genesis")):
+        if os.path.isdir(candidate):
+            return candidate
+    return os.path.join("share", "genesis")
+
+
 def cmd_genesis_show(args) -> int:
     for i, network in enumerate(args.networks or genesis.networks()):
         if i:
@@ -25,6 +47,7 @@ def cmd_genesis_show(args) -> int:
 
 
 def cmd_genesis_emit(args) -> int:
+    args.out = args.out or default_genesis_dir()
     for network in args.networks or genesis.networks():
         rnet_path, rnpol_path = genesis.emit(network, args.out)
         print(f"{network:8} {rnet_path}")
@@ -34,6 +57,14 @@ def cmd_genesis_emit(args) -> int:
 
 def cmd_genesis_verify(args) -> int:
     """Check artifacts on disk against the compiled-in anchors."""
+    args.dir = args.dir or default_genesis_dir()
+    if not os.path.isdir(args.dir):
+        print(f"rnet: no artifacts at {args.dir}.\n"
+              f"      They are derivable rather than shipped — write them with\n"
+              f"      `rnet genesis-emit --out {args.dir}` and verify those,\n"
+              f"      or point --dir at a checkout's share/genesis.",
+              file=sys.stderr)
+        return 1
     failed = False
     for network in args.networks or genesis.networks():
         for suffix, loader in ((".rnet", genesis.load_round),
@@ -53,6 +84,7 @@ def cmd_daemon(args) -> int:
     import asyncio
 
     from .node.daemon import Daemon, DaemonConfig
+    from .node.workerservice import WorkerServiceError
 
     config = DaemonConfig(
         network=args.network, datadir=args.datadir or "", port=args.port,
@@ -62,6 +94,9 @@ def cmd_daemon(args) -> int:
         corpus=args.corpus or "", status_interval_s=args.status_interval)
     try:
         return asyncio.run(Daemon(config=config).run())
+    except WorkerServiceError as exc:
+        print(f"rnet: {exc}", file=sys.stderr)
+        return 1
     except KeyboardInterrupt:
         # asyncio installs handlers for SIGINT where it can; this is the path
         # on platforms where it cannot, and exiting quietly beats a traceback.
@@ -71,7 +106,21 @@ def cmd_daemon(args) -> int:
 
 def cmd_train(args) -> int:
     """Attach a worker to the local daemon and train for it."""
-    from .worker.trainer import TrainerConfig, run
+    try:
+        from .worker.trainer import TrainerConfig, run
+    except ImportError as exc:
+        # The consensus half installs with numpy alone, on purpose, so the
+        # training half is the one place where a missing dependency is normal
+        # rather than a broken install. It arrived as a bare ModuleNotFoundError
+        # traceback pointing at a line number inside diloco/inner.py, which
+        # tells a new contributor nothing they can act on.
+        print(f"rnet: training needs PyTorch and it is not installed "
+              f"({exc.name}).\n"
+              f"      pip install -e '.[train]'\n"
+              f"      or, for a specific CUDA build:\n"
+              f"      pip install torch --index-url "
+              f"https://download.pytorch.org/whl/cu128", file=sys.stderr)
+        return 1
     from .worker.client import WorkerError
     from .diloco.inner import InnerError
     try:
@@ -101,7 +150,7 @@ def cmd_corpus_build(args) -> int:
         state = build(args.repo, args.out, column=args.column,
                       cache_dir=args.cache, parallel=args.parallel,
                       token=args.token or os.environ.get("HF_TOKEN"),
-                      limit_files=args.limit)
+                      limit_files=args.limit, revision=args.revision)
     except BuildError as exc:
         print(f"rnet: {exc}", file=sys.stderr)
         return 1
@@ -208,6 +257,10 @@ def main(argv: list[str] | None = None) -> int:
     corpus.add_argument("--token", default=None, help="or set HF_TOKEN")
     corpus.add_argument("--limit", type=int, default=0,
                         help="stop after N files; for trying it out")
+    corpus.add_argument("--revision", default=None, metavar="SHA",
+                        help="dataset commit to build from; without it the "
+                             "build tracks a moving branch and the root it "
+                             "produces names no snapshot")
     corpus.set_defaults(fn=cmd_corpus_build)
 
     show = sub.add_parser("genesis-show", help="what this build believes each network is")
@@ -216,12 +269,12 @@ def main(argv: list[str] | None = None) -> int:
 
     emit = sub.add_parser("genesis-emit", help="write the artifacts for a network")
     emit.add_argument("networks", nargs="*")
-    emit.add_argument("--out", default="share/genesis")
+    emit.add_argument("--out", default=None)
     emit.set_defaults(fn=cmd_genesis_emit)
 
     verify = sub.add_parser("genesis-verify", help="check artifacts against the anchors")
     verify.add_argument("networks", nargs="*")
-    verify.add_argument("--dir", default="share/genesis")
+    verify.add_argument("--dir", default=None)
     verify.set_defaults(fn=cmd_genesis_verify)
 
     weights = sub.add_parser("genesis-weights",

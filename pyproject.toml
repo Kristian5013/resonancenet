@@ -31,6 +31,12 @@ dependencies = ["numpy>=1.26"]
 # and must not be made to carry two gigabytes of CUDA it will never call.
 train = ["torch>=2.5", "tokenizers>=0.20"]
 
+# Building a corpus from Hugging Face. Separate again, and for the same reason:
+# a node that already has the corpus, or one on a network that pins none, never
+# downloads anything. Undeclared until a verification run found that the
+# documented install could not run the documented command.
+corpus = ["huggingface_hub>=0.24", "pyarrow>=16"]
+
 [project.scripts]
 rnet = "rnet.__main__:main"
 

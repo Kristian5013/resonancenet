@@ -45,6 +45,10 @@ SOCKET_NAME = "worker.sock"
 MAX_WORKERS = 16
 
 
+class WorkerServiceError(Exception):
+    """The worker channel cannot be opened, with a reason worth printing."""
+
+
 @dataclass
 class WorkerConn:
     worker_id: int
@@ -108,10 +112,25 @@ class WorkerService:
     def socket_path(self) -> str:
         return os.path.join(self.datadir, SOCKET_NAME)
 
+    # A unix socket address is a fixed-size struct: sun_path is 108 bytes on
+    # Linux, NUL included, and the kernel does not care that the directory
+    # exists. Exceeding it surfaces as a bare `OSError: AF_UNIX path too long`
+    # from deep inside asyncio, AFTER the TCP listeners are already bound, so
+    # the node dies looking like a network fault when the real answer is
+    # "choose a shorter --datadir".
+    SUN_PATH_MAX = 107
+
     async def start(self) -> str:
         os.makedirs(self.datadir, exist_ok=True)
         os.chmod(self.datadir, 0o700)
         path = self.socket_path
+        encoded = os.fsencode(path)
+        if len(encoded) > self.SUN_PATH_MAX:
+            raise WorkerServiceError(
+                f"worker socket path is {len(encoded)} bytes and the kernel "
+                f"allows {self.SUN_PATH_MAX}: {path}\n"
+                f"Pass a shorter --datadir (a relative one is fine; "
+                f"~/.rnet/<network> is the default and always fits).")
         # A socket left by a process that died is not a socket anyone is
         # listening on, and refusing to start because of one would mean a crash
         # needs a manual cleanup before the node comes back.
@@ -326,7 +345,23 @@ class WorkerService:
         # Production comes before more training. A round whose quorum is met and
         # which nobody applies is a round that never closes, and every worker
         # would keep contributing to a step that can no longer accept them.
-        if self.ready_to_produce(outer_step):
+        #
+        # But only to a worker ALLOWED to produce, and that condition is not a
+        # detail of this branch: handing the Apply to a worker that _on_applied
+        # will then refuse is a livelock, not a wasted round-trip. The refusal
+        # returns an empty acceptance without spending the contributions, so
+        # `ready_to_produce` is still true on the next ask and the same Apply
+        # goes out again — measured at four times a second, indefinitely, with
+        # the chain frozen and the worker's weights drifting further from the
+        # network on every iteration because applying mutates them.
+        #
+        # It bit the case where every contributor exits at a round boundary
+        # (`--rounds N`) and a fresh worker attaches afterwards. With this
+        # check the newcomer falls through to a normal assignment instead,
+        # contributes to the open step, and is then eligible to close it — so
+        # the round recovers rather than wedging the datadir.
+        # Proved by WorkerServiceTests.ANonParticipantIsNeverHandedTheApply.
+        if self.ready_to_produce(outer_step) and self._may_produce(conn, outer_step):
             await self._ask_to_produce(conn, outer_step)
             return
 
@@ -415,20 +450,10 @@ class WorkerService:
             return
         seen[conn.worker_id] = (message.weights_hash, message.optimizer_state_hash)
 
-        # Only a worker that TOOK PART in the round may define its checkpoint,
-        # and a worker known to be behind may not either.
-        #
-        # The participation rule is the one an audit found missing: a worker
-        # that attached seconds ago, holding genesis weights and having
-        # contributed nothing, was handed the outstanding Apply and its
-        # self-reported hash became the network's checkpoint. The in-sync guard
-        # could not catch it, because a worker that has never applied anything
-        # has never been compared to anything. Proved by
-        # WorkerServiceTests.ANewcomerCannotDefineACheckpoint.
-        took_part = (message.outer_step, conn.worker_id) in self.contributions or \
-            any(step == message.outer_step and wid == conn.worker_id
-                for (step, wid) in self._spent_contributions)
-        if not took_part or self._in_sync.get(conn.worker_id) is False:
+        # The last line of the same defence the ask path applies. Reaching here
+        # means a worker applied something it was never handed, so it is refused
+        # rather than trusted — see `_may_produce`.
+        if not self._may_produce(conn, message.outer_step):
             await self._send(conn, ipc.Accepted(contribution_id=bytes(32)))
             return
 
@@ -735,6 +760,28 @@ class WorkerService:
 
     def ready_to_produce(self, outer_step: int) -> bool:
         return len(self.contributions_at(outer_step)) >= self.policy.min_contributors
+
+    def _may_produce(self, conn: WorkerConn, outer_step: int) -> bool:
+        """Whether this worker is allowed to define the checkpoint for a step.
+
+        Only one that TOOK PART in it, and not one known to be behind.
+
+        The participation rule is the one an audit found missing: a worker that
+        attached seconds ago, holding genesis weights and having contributed
+        nothing, was handed the outstanding Apply and its self-reported hash
+        became the network's checkpoint. The in-sync guard could not catch it,
+        because a worker that has never applied anything has never been compared
+        to anything. Proved by
+        WorkerServiceTests.ANewcomerCannotDefineACheckpoint.
+
+        Asked in two places on purpose — before offering the Apply and again
+        before honouring one — because offering work that will be refused is a
+        loop rather than a wasted message.
+        """
+        took_part = (outer_step, conn.worker_id) in self.contributions or \
+            any(step == outer_step and wid == conn.worker_id
+                for (step, wid) in self._spent_contributions)
+        return took_part and self._in_sync.get(conn.worker_id) is not False
 
     def status(self) -> str:
         line = (f"workers {len(self.workers)} — {self.accepted} accepted, "

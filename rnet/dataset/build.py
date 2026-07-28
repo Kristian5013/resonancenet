@@ -59,6 +59,16 @@ class BuildError(Exception):
     pass
 
 
+# Building a corpus is the one job here that reaches outside the standard
+# library and numpy, and neither package was declared anywhere, so the
+# documented install could not run the documented command — it died on a raw
+# ModuleNotFoundError from inside a helper.
+_MISSING = ("corpus: building needs `{name}`, which is not installed.\n  "
+            "pip install -e '.[corpus]'   (huggingface_hub and pyarrow)\n"
+            "Only building needs it. Reading a corpus you already have does "
+            "not.")
+
+
 @dataclass
 class BuildState:
     """What has been written, so an interrupted build resumes exactly."""
@@ -123,7 +133,10 @@ def append_parquet(path: str, column: str, out) -> tuple[int, int]:
     being converted, and the pipeline looked like a slow download when it was
     really a slow reader.
     """
-    import pyarrow.parquet as pq
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise BuildError(_MISSING.format(name=exc.name)) from exc
 
     written = documents = 0
     reader = pq.ParquetFile(path)
@@ -143,9 +156,24 @@ def append_parquet(path: str, column: str, out) -> tuple[int, int]:
 def build(repo_id: str, out_path: str, *, column: str = "text",
           cache_dir: str | None = None, parallel: int = DEFAULT_PARALLEL,
           token: str | None = None, limit_files: int = 0,
-          log=print) -> BuildState:
-    """Download `repo_id` and append its text to `out_path`, resumably."""
-    from huggingface_hub import hf_hub_download, list_repo_files
+          revision: str | None = None, log=print) -> BuildState:
+    """Download `repo_id` and append its text to `out_path`, resumably.
+
+    `revision` NAMES THE SNAPSHOT and is the difference between a corpus root
+    that can be checked and one that merely happened. Without it both calls
+    below track the repository's moving `main`, so a build run a month after
+    the pin silently sees a different file list and different contents, and
+    produces a root that will never match — with no way to tell that apart from
+    a bug in this code. FineWeb-Edu grew from 4.52 TB to 5.84 TB between the
+    pin and 2026-07-28, which is exactly how this was noticed.
+
+    Pass the commit sha a network pinned. `None` means "whatever is there now",
+    which is honest for a first build that is about to define a new pin.
+    """
+    try:
+        from huggingface_hub import hf_hub_download, list_repo_files
+    except ImportError as exc:
+        raise BuildError(_MISSING.format(name=exc.name)) from exc
 
     out_dir = os.path.dirname(os.path.abspath(out_path)) or "."
     os.makedirs(out_dir, exist_ok=True)
@@ -158,13 +186,14 @@ def build(repo_id: str, out_path: str, *, column: str = "text",
 
     # Sorted, and sorted is the specification rather than a convenience.
     files = sorted(f for f in list_repo_files(repo_id, repo_type="dataset",
-                                              token=token)
+                                              revision=revision, token=token)
                    if f.endswith(".parquet"))
     if limit_files:
         files = files[:limit_files]
     remaining = [f for f in files if f not in state.files_done]
 
-    log(f"{repo_id}: {len(files)} parquet file(s), {len(remaining)} to go")
+    log(f"{repo_id}@{revision or 'main (UNPINNED — the root this produces names no snapshot)'}: "
+        f"{len(files)} parquet file(s), {len(remaining)} to go")
     if state.bytes_written:
         log(f"resuming at {state.bytes_written / 2**40:.2f} TiB, "
             f"{state.documents:,} documents")
@@ -184,6 +213,7 @@ def build(repo_id: str, out_path: str, *, column: str = "text",
         for attempt in range(MAX_ATTEMPTS):
             try:
                 return name, hf_hub_download(repo_id, name, repo_type="dataset",
+                                             revision=revision,
                                              cache_dir=cache_dir, token=token)
             except Exception as exc:                      # noqa: BLE001
                 last = exc

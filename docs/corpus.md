@@ -1,9 +1,11 @@
 # The corpus, and how a worker is told what to train on
 
-> **Status: there is no corpus reader in this tree.** `main`, `test` and `moe`
-> pin FineWeb-Edu and refuse to train because nothing here can read it. This
-> document describes the addressing that is implemented and pinned — the root,
-> the schedule, the proofs — and names the missing piece explicitly.
+> **Status: the reader exists; the corpus it points at cannot be rebuilt.**
+> `LocalCorpus`, `RemoteCorpus`, the Merkle index and `rnet corpus-build` are
+> all here. What is missing is upstream: the pin names a FineWeb-Edu snapshot
+> by content and not by revision, and the dataset has moved since. See
+> [Building one](#building-one) — it is the one thing standing between this
+> document and a `main` that trains.
 
 ## Text, not tokens
 
@@ -61,23 +63,22 @@ pin the width it was built at — for a given index, several widths produce an
 identical walk — so trusting the sender's `leaf_count` would let it choose which
 tree its proof is against.
 
-## What is missing
+## Reading one
 
-An object with two methods:
+Two implementations of one interface, in `rnet/dataset/corpus.py`:
 
 ```python
-class Corpus:
-    def window_for_seed(self, seed: bytes, length: int) -> list[int]: ...
-    def get(self, index: int) -> bytes | None: ...
+def window_for_seed(self, seed: bytes, length: int) -> list[int]: ...
+def get(self, index: int) -> bytes | None: ...
 ```
 
-A local one reads the file, derives the boundaries by the rule above, tokenizes
-with the pinned artifact, and takes the window. A remote one asks its daemon,
-which fetches from a peer and verifies against `dataset_root` before handing
-anything over — which is what lets the corpus live on a machine with the disk
-for it while training happens on a machine with the GPU for it.
+`LocalCorpus` reads the file, derives the boundaries by the rule above,
+tokenizes with the pinned artifact, and takes the window. `RemoteCorpus` asks
+its daemon, which fetches from a peer and verifies against `dataset_root`
+before handing anything over — which is what lets the corpus live on a machine
+with the disk for it while training happens on a machine with the GPU for it.
 
-Until then, a round that pins a root and cannot read it **fails rather than
+A round that pins a root and cannot read it **fails rather than
 inventing**. That guard is not cosmetic: without it the trainer silently
 substituted hash noise, the daemon accepted the contribution, the chain advanced
 on it, and the verifier — replaying with the same absent corpus — reproduced the
@@ -86,11 +87,24 @@ that could not possibly have learned anything.
 
 ## Building one
 
-FineWeb-Edu is 4.52 TB of parquet, about 7.36 TB as text. The build is: download,
-extract the text column, write documents separated by blank lines, then index —
-one streaming pass with `memchr` for the boundaries and SHA3 per chunk into the
-tree.
+```bash
+pip install -e '.[corpus]'
+rnet corpus-build --out /mnt/data/fineweb-edu.txt --revision <sha>
+```
 
-Indexing is not the bottleneck. Measured: `mmap.find` at 5,185 MB/s and threaded
-`hashlib` at 13,927 MB/s, against a disk that will do a fraction of that. The
-whole 7.36 TB is about nine minutes of arithmetic and hours of I/O.
+The build is: download, extract the text column, write documents separated by
+blank lines, then index — seek to each candidate boundary, read a 64 KiB window,
+find the separator, SHA3 the chunk into the tree. Resumable: interrupt it and
+run it again, and it truncates to exactly the bytes its state file claims before
+appending, so an interrupted write never leaves a torn record inside the corpus.
+
+**`--revision` is not optional if the root has to mean anything.** Without it
+both Hugging Face calls track a moving branch, so the file list and the contents
+are whatever is there today. That is how the current pin came to be
+unreproducible: `7195da13…` was built against a snapshot nobody named, and
+FineWeb-Edu has since grown from 4.52 TB of parquet to 5.84 TB across 3,036
+files. A build today produces a different root, and nothing distinguishes that
+from a bug in this code. Any future pin must name the commit it was built from.
+
+Budget: 7.4-9.4 TB of output, ~23 GB of transient cache at `--parallel 8`, and
+roughly a day of wall time — download-bound, not CPU-bound.

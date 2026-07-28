@@ -31,8 +31,9 @@ Read this before anything else. It is the part most projects leave out.
 | ✅ The protocol runs | rounds close, checkpoints chain, challenges replay and verdicts publish — between two daemons and two workers, on real sockets |
 | ✅ Four anchors, self-certifying | genesis, policy, corpus root and initial weights, all checkable with the standard library alone |
 | ✅ IPv4 and IPv6 | one address type, two listening sockets, no branch that could treat the families differently |
-| ✅ 438 tests | including an adversarial audit's findings, as tests |
-| ❌ **No corpus reader** | `main`, `test` and `moe` pin FineWeb-Edu and nothing in this tree can read it. They refuse to train rather than inventing data. **Only `regtest` runs today**, on synthetic tokens |
+| ✅ 464 tests | including an adversarial audit's findings, as tests |
+| ✅ A corpus reader | chunking, a Merkle index, and a resumable builder. A corpus that indexes to the wrong root is refused, not warned about |
+| ❌ **Nobody can reproduce the pinned corpus** | `main`, `test` and `moe` pin FineWeb-Edu at a snapshot that names no revision, and the dataset has since grown from 4.52 TB to 5.84 TB. Root `7195da13…` cannot be rebuilt from upstream today. **Only `regtest` runs end to end**, on synthetic tokens |
 | ❌ No chain persistence | a restarted node rebuilds from genesis and cannot rejoin a network past its retention window |
 | ❌ No mixture-of-experts training | the 29.4B shape is described, pinned and tested; how workers divide a sharded mixture is unsolved |
 | ❌ No seed, no network | `seed.resonancenet.org` resolves to a released address. Nodes find each other only with `--connect` |
@@ -50,17 +51,27 @@ library** — that is deliberate: checking what a network claims should not
 require the hardware to participate in it.
 
 ```bash
-git clone <this repository> rnet && cd rnet
-python3 -m venv .venv
+git clone https://github.com/Kristian5013/resonancenet rnet && cd rnet
+python3.12 -m venv .venv                # name the interpreter — see below
 .venv/bin/pip install -e .              # numpy only
 ```
+
+Name the version rather than relying on `python3`. On a machine whose `python3`
+is 3.14 the venv step fails outright with `ensurepip is not available`, which
+looks like this project's problem and is not.
 
 Training additionally needs PyTorch with CUDA:
 
 ```bash
-.venv/bin/pip install -e '.[train]'
+.venv/bin/pip install -e '.[train]'     # torch, tokenizers
 # or, for a specific CUDA build:
 .venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cu128
+```
+
+Building a corpus needs two more, and only building does:
+
+```bash
+.venv/bin/pip install -e '.[corpus]'    # huggingface_hub, pyarrow
 ```
 
 **Hardware.** `regtest` runs on anything, including CPU. Round 0 of `main` is a
@@ -82,12 +93,11 @@ python -m rnet genesis-show main
 network        main  (magic 0x524e4d31)
 genesis        adfd6082694c614cf44b2490df78ba15efc51ddc1174dd5740506c80ff4f9597
 policy         d0de7064ef6f9ae67133958c9d8a93df06b42c72f19789d557adee4243e39431
-weights        26358eaeb57666cf9e5d5fa59106ab407e5dbbd0f67da925f040abd064bdb37d
-model          d_model 1024, 24 layers, 8 heads, GQA 4:1, seq_len 16384 — dense,
-               397,728,768 parameters
-arithmetic     bf16 params, bf16 compute, fp32 accumulate, flash attention,
-               int8 contributions (class 0x1730f203)
+weights        26358eaeb57666cf9e5d5fa59106ab407e5dbbd0f67da925f040abd064bdb37d  (derived, not shipped)
+model          d_model 1024, 24 layers, 8 heads (head_dim 128), GQA 4:1, seq_len 16384, vocab 32000 — dense, 397,728,768 parameters
+arithmetic     bf16 params, bf16 compute, fp32 accumulate, flash attention, int8 contributions (class 0x1730f203)
 corpus         7195da139188f4a1… (6,956,933 chunks)
+tokenizer      1f8d0c4bc23d000c…
 schedule       200 inner steps, 2 contributor(s) minimum, 1200s deadline
 verification   25% challenged, quorum 3, shadow mode
 ```
@@ -115,6 +125,7 @@ python -m rnet daemon --network regtest --datadir ~/.rnet/regtest
 ```
 rnet regtest: listening on [::]:9444, 0.0.0.0:9444
   workers  /home/you/.rnet/regtest/worker.sock
+  datadir  /home/you/.rnet/regtest
   genesis  153cc31ec891b6dc0ff66107bc0d7c70…
   weights  f1f0c82d26889543586f6a5bbe76d301…
   peers    0 known
@@ -147,6 +158,10 @@ card — which is precisely the property everything here rests on.
 
 **`regtest` needs two contributors** to close a round. Start a second worker in
 another terminal; both attach to the same daemon.
+
+Useful flags: `--device cpu` (no GPU needed, and then the variable above is not
+needed either), `--rounds N` to stop after N, `--lr`, and `--corpus PATH` for a
+network that pins one.
 
 ```
 step 1: applying 2 contribution(s)
@@ -193,9 +208,13 @@ produce an update nobody could reproduce.
 ```
 
 ```
-Ran 438 tests in 55.6s
+python: /path/to/rnet/.venv/bin/python 3.12.13
+Ran 464 tests in 55.5s
 OK
 ```
+
+A green run needs the `train` extra — three modules test the training half and
+skip without torch (`OK (skipped=3)` on a numpy-only install, 425 tests).
 
 The script exists for one thing a test cannot arrange for itself: exporting
 `CUBLAS_WORKSPACE_CONFIG` before python starts. Without a CUDA device the

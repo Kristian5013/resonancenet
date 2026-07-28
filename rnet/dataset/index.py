@@ -1,9 +1,14 @@
 """Indexing a corpus: from a file of text to a root a round can pin.
 
-One streaming pass. Find the boundaries by the rule in `corpus.py` — the same
-function, called rather than reimplemented, because two implementations of one
-rule is two chances to disagree about what chunk seven is — hash each chunk into
-a Merkle leaf, and fold the leaves into the root.
+Find the boundaries by the rule in `corpus.py` — the same function, called
+rather than reimplemented, because two implementations of one rule is two
+chances to disagree about what chunk seven is — hash each chunk into a Merkle
+leaf, and fold the leaves into the root.
+
+It is not a streaming pass, and the difference matters for what it costs.
+`derive_offsets` seeks to `target_chunk_bytes` past each boundary and reads a
+64 KiB window looking for the separator, so finding the boundaries touches a few
+percent of the file rather than all of it. Hashing then reads every byte once.
 
 WHY THE OFFSETS ARE CACHED AND NEVER TRUSTED. Scanning seven terabytes is hours
 of I/O, so the index file exists to avoid repeating it. But it is a cache of a
@@ -15,7 +20,7 @@ a way to make two nodes train on different text while agreeing on a root.
 THE ARITHMETIC IS NOT THE BOTTLENECK, and it is worth saying because the
 opposite is assumed. Measured on the machine this was written for:
 
-    boundary scan (mmap.find, C memmem)      5,185 MB/s
+    boundary scan (bytes.find over a window) 5,185 MB/s
     SHA3 across 24 threads (hashlib)        13,927 MB/s
     the disk the corpus is on                  384 MB/s
 

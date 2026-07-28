@@ -445,6 +445,51 @@ class WorkerServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(work, ipc.Apply)
             self.assertEqual(work.outer_step, 1)
 
+    async def test_ANonParticipantIsNeverHandedTheApply(self):
+        """The livelock, as a test.
+
+        `_on_applied` has always refused an applier that took no part — an
+        audit put it there. But the ask path offered the Apply to ANY worker
+        the moment the quorum was met, so the refusal returned an empty
+        acceptance, left the contributions unspent, and `ready_to_produce` was
+        still true on the next ask. The same Apply went out again, about four
+        times a second, forever: chain frozen at zero, and the worker's weights
+        drifting further from the network on every iteration because applying
+        mutates them.
+
+        The way in was ordinary. Two workers run `--rounds 1`, submit, and exit
+        at the round boundary before anyone applies. Whoever attaches next has
+        contributed nothing — and used to be handed that Apply for as long as it
+        stayed connected. The only recovery was deleting the datadir.
+        """
+        contributors = await self.two_contributions()
+        self.assertTrue(self.service.ready_to_produce(1))
+        for client in contributors:      # they submitted and left
+            client.close()
+
+        newcomer = self.client()
+        await self.in_thread(newcomer.hello)
+
+        # An assignment, not an Apply — so it can join the open step instead of
+        # being handed a decision it is not entitled to make.
+        work = await self.in_thread(newcomer.next_work)
+        self.assertIsInstance(work, ipc.Assignment)
+        self.assertEqual(work.outer_step, 1)
+
+        # And asking again does not turn into one either: the loop needed the
+        # offer to repeat, so one refusal is not enough to prove it is gone.
+        for _ in range(3):
+            again = await self.in_thread(newcomer.next_work)
+            self.assertNotIsInstance(again, ipc.Apply)
+
+        # Having contributed, it becomes eligible — the round recovers rather
+        # than stalling for want of anyone allowed to close it.
+        count = self.round_desc.model.parameter_count()
+        packed, exp = self.contribution(count, 99)
+        await self.in_thread(newcomer.submit, work.assignment_id, packed, exp,
+                             count, 5.7)
+        self.assertIsInstance(await self.in_thread(newcomer.next_work), ipc.Apply)
+
     async def test_AnAppliedReportBuildsTheCheckpoint(self):
         clients = await self.two_contributions()
         work = await self.in_thread(clients[0].next_work)

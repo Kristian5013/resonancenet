@@ -19,6 +19,16 @@ import unittest
 
 import numpy as np
 
+# torch is an optional dependency (`pip install -e '.[train]'`): the consensus
+# half of this tree installs with numpy alone and must stay checkable on a
+# machine with no GPU and no CUDA wheels. Without this the module raised
+# ModuleNotFoundError at import, unittest reported it as an ERROR rather than a
+# skip, and a base install could not get a green run at all.
+try:
+    import torch                                              # noqa: F401
+except ImportError:                                           # pragma: no cover
+    raise unittest.SkipTest("needs torch: pip install -e '.[train]'")
+
 from rnet.consensus import genesis
 from rnet.consensus.numerics import ROUND0
 from rnet.consensus.objects import Verdict as VerdictKind
