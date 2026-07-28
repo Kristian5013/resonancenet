@@ -11,3 +11,6 @@ venv/
 *.rnidx
 *.tmp
 .venv/
+*.egg-info/
+build/
+dist/

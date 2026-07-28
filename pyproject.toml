@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "resonancenet"
+version = "0.2.0"
+description = "A protocol for decentralized, verifiable language model training"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+keywords = ["distributed-training", "p2p", "consensus", "diloco"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Distributed Computing",
+]
+
+# numpy and nothing else. The consensus half — anchors, canonical bytes, the
+# wire, the address table — runs on the standard library alone, and checking
+# what a network claims must not require the hardware to participate in it.
+# numpy is here because deriving 400 million initial weights in pure Python
+# would take minutes rather than seconds, and that path is not optional.
+dependencies = ["numpy>=1.26"]
+
+[project.optional-dependencies]
+# Training. Deliberately separate: a relay node runs on a machine with no GPU
+# and must not be made to carry two gigabytes of CUDA it will never call.
+train = ["torch>=2.5", "tokenizers>=0.20"]
+
+[project.scripts]
+rnet = "rnet.__main__:main"
+
+[project.urls]
+Repository = "https://github.com/Kristian5013/resonancenet"
+
+[tool.setuptools.packages.find]
+include = ["rnet*"]
+
+[tool.setuptools.package-data]
+rnet = []

@@ -1,0 +1,56 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          # CPU torch: the runner has no GPU, and the round tests fall back to
+          # CPU deliberately rather than skipping — they are slower there, not
+          # absent, because a test that skips on the only machine that runs it
+          # is a test nobody runs.
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e '.[train]'
+
+      - name: The consensus half needs nothing but the standard library
+        run: |
+          # Checked separately and first, because it is a claim the project
+          # makes: an auditor should be able to verify what a network says
+          # without a GPU, without torch, and without numpy for the parts that
+          # do not derive weights.
+          python - <<'EOF'
+          import subprocess, sys, textwrap
+          probe = textwrap.dedent("""
+              import sys
+              for blocked in ("torch", "numpy"):
+                  sys.modules[blocked] = None
+              from rnet.consensus import genesis
+              for network in genesis.networks():
+                  genesis.verify_build(network)
+                  genesis.describe(network)
+              print("anchors verified without torch or numpy")
+          """)
+          sys.exit(subprocess.run([sys.executable, "-c", probe]).returncode)
+          EOF
+
+      - name: Suite
+        run: ./ci/run_tests.sh
+
+      - name: The CLI an auditor would actually run
+        run: |
+          python -m rnet genesis-show
+          python -m rnet genesis-emit --out /tmp/genesis
+          python -m rnet genesis-verify --dir /tmp/genesis
+          python -m rnet genesis-weights regtest
