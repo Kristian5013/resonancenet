@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "resonancenet"
-version = "0.2.0"
+version = "0.3.0"
 description = "A protocol for decentralized, verifiable language model training"
 readme = "README.md"
 requires-python = ">=3.12"
