@@ -389,3 +389,85 @@ class EndToEndTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class BlockedArithmeticIsTheSameArithmeticTests(unittest.TestCase):
+    """Holding fewer arrays at once, and changing no value.
+
+    The outer step allocated an array the size of the model on nearly every
+    line — six across the step, on top of five inside each `mul_q16`, three
+    times. It measured 27.6 GB for one 397,728,768-parameter round and the
+    kernel killed the other worker on the machine. Everything below is the same
+    arithmetic done in pieces, and a single differing integer here would be two
+    nodes disagreeing about a checkpoint.
+    """
+
+    def reference_mul(self, constant, values):
+        """What `mul_q16` was, kept as the definition."""
+        sign = np.sign(values)
+        magnitude = np.abs(values).astype(np.int64)
+        return (sign * ((magnitude * constant + (1 << 15)) >> 16)).astype(np.int64)
+
+    def test_BlockingDoesNotChangeTheProduct(self):
+        rng = np.random.default_rng(4)
+        for size in (0, 1, 3, O.BLOCK - 1, O.BLOCK, O.BLOCK + 5, 3 * O.BLOCK + 7):
+            values = rng.integers(-(10 ** 12), 10 ** 12, size, dtype=np.int64)
+            for constant in (0, 1, 45875, 58982, 65535, 65536):
+                with self.subTest(size=size, constant=constant):
+                    np.testing.assert_array_equal(
+                        O.mul_q16(constant, values),
+                        self.reference_mul(constant, values))
+
+    def test_WritingInPlaceGivesTheSameAnswer(self):
+        rng = np.random.default_rng(5)
+        values = rng.integers(-(10 ** 10), 10 ** 10, O.BLOCK + 1234, dtype=np.int64)
+        want = self.reference_mul(58982, values)
+        scratch = values.copy()
+        O.mul_q16(58982, scratch, out=scratch)
+        np.testing.assert_array_equal(scratch, want)
+
+    def test_TheDomainCheckStillBitesAcrossBlocks(self):
+        """A value past the domain in the LAST block must raise as loudly as one
+        in the first — a check that stopped early would let a wrapped, plausible
+        number into a checkpoint."""
+        values = np.zeros(2 * O.BLOCK + 3, dtype=np.int64)
+        values[-1] = O.DOMAIN_MAX + 1
+        with self.assertRaises(O.OuterError):
+            O.mul_q16(45875, values)
+
+    def test_AWholeOuterStepIsUnchanged(self):
+        """The step itself, against an implementation that allocates freely."""
+        def reference(momentum_q16, lr_q16, nesterov, momentum, aggregate):
+            m = self.reference_mul(momentum_q16, momentum) + aggregate
+            direction = (aggregate + self.reference_mul(momentum_q16, m)
+                         if nesterov else m)
+            return self.reference_mul(lr_q16, direction), m
+
+        rng = np.random.default_rng(6)
+        for nesterov in (True, False):
+            with self.subTest(nesterov=nesterov):
+                opt = O.OuterOptimizer(momentum_q16=58982, lr_q16=45875,
+                                       nesterov=nesterov)
+                momentum = np.zeros(9999, dtype=np.int64)
+                for round_index in range(4):
+                    aggregate = rng.integers(-(10 ** 6), 10 ** 6, 9999,
+                                             dtype=np.int64)
+                    want, momentum = reference(58982, 45875, nesterov,
+                                               momentum, aggregate)
+                    got, _ = opt.step(aggregate.copy(), 0)
+                    np.testing.assert_array_equal(got, want, f"round {round_index}")
+                    np.testing.assert_array_equal(opt.momentum, momentum,
+                                                  f"momentum {round_index}")
+
+    def test_ClassicalMomentumIsNotScaledInPlace(self):
+        """Without nesterov the direction IS the momentum, and scaling it in
+        place would multiply the carried state by the learning rate on every
+        round — a recurrence nobody agreed to, and invisible for several rounds
+        because the first one still looks right."""
+        opt = O.OuterOptimizer(momentum_q16=58982, lr_q16=45875, nesterov=False)
+        aggregate = np.full(64, 1 << 20, dtype=np.int64)
+        first, _ = opt.step(aggregate.copy(), 0)
+        self.assertTrue(np.array_equal(opt.momentum, aggregate),
+                        "momentum should be the aggregate after one step")
+        self.assertFalse(np.array_equal(first, opt.momentum),
+                         "the returned update should be the scaled one")

@@ -51,24 +51,49 @@ DOMAIN_MAX = ((1 << 63) - 1 - (Q16_ONE // 2)) // Q16_ONE
 class OuterError(Exception):
     pass
 
+# How many values to multiply at once. Large enough that numpy's per-call
+# overhead disappears, small enough that five temporaries of this size are
+# nothing next to the arrays they replace.
+BLOCK = 1 << 22
 
-def mul_q16(constant: int, values: np.ndarray) -> np.ndarray:
+
+def mul_q16(constant: int, values: np.ndarray, out=None) -> np.ndarray:
     """`constant`/65536 times `values`, rounded half away from zero.
 
     Symmetric rounding, like everywhere else integers meet a scale here: an
     arithmetic shift would round toward negative infinity and walk the whole
     model slightly negative over thousands of steps.
+
+    `out` may alias `values`: each block is read into temporaries before
+    anything is written back, so writing in place is safe and is what lets
+    the outer step hold three arrays instead of nine.
     """
     if constant < 0:
         raise OuterError(f"outer: a negative Q16 constant ({constant}) is not a rate")
-    peak = int(np.abs(values).max()) if values.size else 0
-    if peak > DOMAIN_MAX:
-        raise OuterError(
-            f"outer: a value of {peak} exceeds the {DOMAIN_MAX} that can be "
-            f"multiplied in Q16 without leaving int64")
-    sign = np.sign(values)
-    magnitude = np.abs(values).astype(np.int64)
-    return (sign * ((magnitude * constant + (Q16_ONE // 2)) >> 16)).astype(np.int64)
+
+    values = np.asarray(values)
+    if out is None:
+        out = np.empty(values.shape, dtype=np.int64)
+
+    # IN BLOCKS, and `out` may be `values`. Every line below made a full-size
+    # temporary — sign, magnitude, the product, the rounded shift, the signed
+    # result — five of them, at 3.18 GB each for the dense 400M, and this is
+    # called three times per outer step. A worker measured 27.6 GB applying one
+    # round and the kernel killed the other one. The arithmetic is elementwise,
+    # so a block at a time is the same arithmetic; proved by
+    # OuterTests.BlockingDoesNotChangeTheProduct.
+    for at in range(0, values.size, BLOCK):
+        end = min(at + BLOCK, values.size)
+        block = values[at:end]
+        peak = int(np.abs(block).max()) if block.size else 0
+        if peak > DOMAIN_MAX:
+            raise OuterError(
+                f"outer: a value of {peak} exceeds the {DOMAIN_MAX} that can be "
+                f"multiplied in Q16 without leaving int64")
+        sign = np.sign(block)
+        magnitude = np.abs(block).astype(np.int64)
+        out[at:end] = sign * ((magnitude * constant + (Q16_ONE // 2)) >> 16)
+    return out
 
 
 @dataclass
@@ -126,20 +151,35 @@ class OuterOptimizer:
         aggregate = np.ascontiguousarray(aggregate, dtype=np.int64)
         momentum = self._aligned_momentum(aggregate.size, scale_exp)
 
+        # WRITTEN IN PLACE. Each of these lines used to allocate another array
+        # the size of the model — six of them across the step, on top of the
+        # five `mul_q16` made internally — and the whole thing measured 27.6 GB
+        # for a 397,728,768-parameter round. The values are the same; what
+        # changes is how many of them are resident at once.
+        #
         # m = mu * m + g
-        momentum = mul_q16(self.momentum_q16, momentum) + aggregate
+        mul_q16(self.momentum_q16, momentum, out=momentum)
+        momentum += aggregate
         self.momentum = momentum
 
         if self.nesterov:
             # Look ahead: the update uses where momentum is about to be, which
             # is what makes Nesterov different from classical and is worth the
             # extra multiply.
-            direction = aggregate + mul_q16(self.momentum_q16, momentum)
+            #
+            # One buffer serves as the look-ahead, then the direction, then the
+            # result: each value is dead by the time the next line overwrites it.
+            direction = mul_q16(self.momentum_q16, momentum)
+            direction += aggregate
         else:
-            direction = momentum
+            # Classical: the direction IS the momentum, and scaling it must not
+            # write into the state that has to survive to the next round.
+            direction = mul_q16(self.lr_q16, momentum)
+            self.steps += 1
+            return direction, scale_exp
 
         self.steps += 1
-        return mul_q16(self.lr_q16, direction), scale_exp
+        return mul_q16(self.lr_q16, direction, out=direction), scale_exp
 
     def state_bytes(self) -> bytes:
         """The canonical serialization of the optimizer's state.
