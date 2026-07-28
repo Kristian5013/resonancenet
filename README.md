@@ -31,14 +31,15 @@ Read this before anything else. It is the part most projects leave out.
 | ✅ The protocol runs | rounds close, checkpoints chain, challenges replay and verdicts publish — between two daemons and two workers, on real sockets |
 | ✅ Four anchors, self-certifying | genesis, policy, corpus root and initial weights, all checkable with the standard library alone |
 | ✅ IPv4 and IPv6 | one address type, two listening sockets, no branch that could treat the families differently |
-| ✅ 513 tests | including an adversarial audit's findings, as tests |
+| ✅ 546 tests | including an adversarial audit's findings, as tests |
 | ✅ A corpus reader | chunking, a Merkle index, and a resumable builder. A corpus that indexes to the wrong root is refused, not warned about |
 | ✅ A corpus anyone can rebuild | `main` pins FineWeb-Edu at commit `87f09149…`, crawls `CC-MAIN-2025-21` and `CC-MAIN-2025-26` — 147.6 GiB, 29,642,369 documents, root `2831ce67…`. Two commands reproduce it byte for byte |
 | ❌ 16K context is mostly unused | those crawls average 858 tokens a document, so a 16,384-token window holds about thirteen unrelated ones. Deliberate for a first run: a proven corpus makes a falling loss mean the protocol works |
 | ✅ The chain survives a restart | headers are written to the datadir and replayed through the same code that accepts one from a peer. A damaged file stops the node rather than silently starting again from genesis |
 | ❌ No mixture-of-experts training | the 29.4B shape is described, pinned and tested; how workers divide a sharded mixture is unsolved |
 | ✅ DNS seeds | `seed.resonancenet.org` plus a compiled-in literal, asked only when the address table is empty. What a seed says is filed as hearsay, not dialled — the eclipse resistance matters most at the moment a node will believe anything |
-| ❌ **Trained weights are not saved** | the model lives in the workers' memory. The chain records what the weights should be; nothing writes them. A reboot loses the training |
+| ✅ Weights survive a restart | stored under their own Merkle root — the same one a checkpoint header commits to — and a worker that comes back loads them instead of starting again from genesis |
+| ❌ **A new node cannot fetch weights from a peer** | it syncs the chain in seconds and then needs the weights the head commits to. There is no wire protocol for them yet, so they are published as a release asset and verified the same way a peer's would be |
 | ❌ No incentive layer | contributions are not rewarded. This is not a code problem |
 
 If you want to see the protocol work, `regtest` does that today. If you want to
@@ -211,7 +212,7 @@ produce an update nobody could reproduce.
 
 ```
 python: /path/to/rnet/.venv/bin/python 3.12.13
-Ran 513 tests in 96.0s
+Ran 546 tests in 82.5s
 OK
 ```
 
