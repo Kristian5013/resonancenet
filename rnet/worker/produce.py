@@ -77,16 +77,24 @@ class Producer:
 
         step, exp = self.optimizer.step(update, message.scale_exp)
 
+        # A TENSOR AT A TIME. The straightforward version concatenated every
+        # weight into one float64 array, subtracted the update into a second,
+        # and sliced that back apart — 3.18 GB each for the dense 400M, on top
+        # of the momentum and the aggregate the outer step is already holding.
+        # A worker peaked at 27.8 GB here and was OOM-killed.
+        #
+        # `apply_update` is elementwise and the exponent is given, so the
+        # arithmetic per tensor is exactly the arithmetic the whole-array
+        # version did on that tensor's slice. Proved by
+        # ProducerTests.ApplyingATensorAtATimeIsTheSameWeights.
         current = dict(base_weights)
-        order = [t.name for t in layout(self.spec)]
-        flat = np.concatenate([_to_float(current[name]) for name in order])
-        moved = apply_update(flat, step, exp)
-
         at = 0
         for tensor in layout(self.spec):
-            current[tensor.name] = float32_to_bf16(
-                moved[at:at + tensor.numel].astype(np.float32))
-            at += tensor.numel
+            end = at + tensor.numel
+            moved = apply_update(_to_float(current[tensor.name]),
+                                 step[at:end], exp)
+            current[tensor.name] = float32_to_bf16(moved.astype(np.float32))
+            at = end
 
         W.load_weights(model, current)
         self.applied += 1

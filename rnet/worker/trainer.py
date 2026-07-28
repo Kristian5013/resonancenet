@@ -18,6 +18,8 @@ import numpy as np
 from ..consensus import genesis as genesis_module
 from ..diloco import inner
 from ..diloco.quantize import pack
+from ..consensus.init import hash_of_values
+from ..model import store
 from ..model import weights as W
 from . import ipc
 from .client import AnchorMismatch, DaemonClient, WorkerError
@@ -128,11 +130,14 @@ def run(config: TrainerConfig, *, log=print) -> int:
                         grad_checkpointing=True)
         producer = Producer(spec)
         base_weights = W.save_weights(model)
+        weights_dir = os.path.join(config.resolved_datadir(), "weights")
+        held = hash_of_values(spec, base_weights)
         # The base of the round most recently completed, which is what a
         # challenge about that round has to be replayed against. One extra copy
         # of the weights, and the alternative is fetching them back over a
         # socket at the moment a challenge lands.
         verify_base = None
+        verify_base_hash = held
         done = 0
 
         while config.rounds == 0 or done < config.rounds:
@@ -172,12 +177,52 @@ def run(config: TrainerConfig, *, log=print) -> int:
                 # will need.
                 verify_base = base_weights
                 base_weights = W.save_weights(model)
+                held = result.weights_hash
+
+                # WRITTEN BEFORE THE DAEMON IS TOLD. The chain records what the
+                # weights became and holds none of them, so until this line a
+                # reboot after a week of training left a node that knew exactly
+                # where it had got to and had no way to be there.
+                try:
+                    store.write(weights_dir, spec, base_weights)
+                    store.prune(weights_dir, [verify_base_hash, held])
+                except (store.StoreError, OSError) as exc:
+                    # A cache, so a full disk costs the ability to resume rather
+                    # than the round.
+                    log(f"  (weights not stored: {exc})")
+                verify_base_hash = held
+
                 client.applied(reply.outer_step, result.weights_hash,
                                result.optimizer_state_hash)
                 log(f"step {reply.outer_step}: applied, weights "
                     f"{result.weights_hash.hex()[:16]}…, "
                     f"{time.time() - started:.1f}s")
                 continue
+
+            # THE ASSIGNMENT NAMES THE WEIGHTS TO TRAIN FROM, and until now this
+            # line only printed them. A worker holding anything else produced a
+            # contribution measured from the wrong place, which then went into
+            # the mean with everyone else's — the `_in_sync` check catches it
+            # afterwards, by which time it has already been aggregated.
+            #
+            # A restarted worker is the ordinary way to be here: it derived the
+            # genesis weights on start and the network is at step 40. Look for
+            # them in the store first, and refuse rather than train from the
+            # wrong base if they are nowhere.
+            if held != reply.base_weights_hash:
+                found = store.find(weights_dir, reply.base_weights_hash, spec)
+                if found is None:
+                    raise WorkerError(
+                        f"this worker holds weights {held.hex()[:16]}… and the "
+                        f"round starts from {reply.base_weights_hash.hex()[:16]}…, "
+                        f"which are not in {weights_dir}.\n"
+                        f"Training from the wrong base produces a contribution "
+                        f"that averages into everyone else's, so it stops here. "
+                        f"A node that has the checkpoint can serve them.")
+                W.load_weights(model, found)
+                base_weights = found
+                held = reply.base_weights_hash
+                log(f"resumed from stored weights {held.hex()[:16]}…")
 
             started = time.time()
             log(f"\nstep {reply.outer_step}: {reply.inner_steps} inner steps "
