@@ -151,7 +151,7 @@ def cmd_corpus_build(args) -> int:
                       cache_dir=args.cache, parallel=args.parallel,
                       token=args.token or os.environ.get("HF_TOKEN"),
                       limit_files=args.limit, revision=args.revision,
-                      include=args.include)
+                      include=tuple(args.include))
     except BuildError as exc:
         print(f"rnet: {exc}", file=sys.stderr)
         return 1
@@ -160,6 +160,75 @@ def cmd_corpus_build(args) -> int:
         return 0
     print(f"{args.out}: {state.bytes_written:,} bytes")
     return 0
+
+
+def cmd_corpus_index(args) -> int:
+    """Index a corpus file and print the root it produces.
+
+    There was no way to learn a corpus's root short of starting a daemon
+    against it and reading the exception, which is a poor way to find out that
+    a two-day build produced something the network does not pin. It is also
+    the command that DEFINES a pin: the root printed here is what goes into
+    params.py when a network is being anchored to a new corpus.
+    """
+    import time
+
+    from .dataset.corpus import CorpusError
+    from .dataset.index import CorpusIndex, IndexError_, build_index
+
+    target = args.target
+    index_path = args.corpus + ".rnidx"
+    started = time.monotonic()
+
+    index = None if args.rebuild else CorpusIndex.load(index_path, args.corpus, target)
+    if index is not None:
+        print(f"index    {index_path} (cached)")
+    else:
+        size = os.path.getsize(args.corpus) if os.path.exists(args.corpus) else 0
+        print(f"indexing {args.corpus} — {size / 2**40:.3f} TiB, one pass, and "
+              f"it is the disk rather than the arithmetic that takes the time")
+
+        def show(done, total, _t=started):
+            print(f"\r  {done:,}/{total:,} chunks  "
+                  f"{time.monotonic() - _t:5.1f}s".ljust(70), end="", flush=True)
+
+        try:
+            index = build_index(args.corpus, target, progress=show)
+        except (CorpusError, IndexError_, OSError) as exc:
+            print()
+            print(f"rnet: {exc}", file=sys.stderr)
+            return 1
+        print()
+        index.save(index_path)
+
+    print(f"corpus   {args.corpus}")
+    print(f"bytes    {index.n_bytes:,}")
+    print(f"chunks   {index.n_chunks:,} at {target:,} bytes")
+    print(f"root     {index.root.hex()}")
+    print(f"took     {time.monotonic() - started:.1f}s")
+    # The verdict below goes to stderr, which is not the same stream and does
+    # not queue behind this one — unflushed, it printed before the figures it
+    # is a verdict about.
+    sys.stdout.flush()
+
+    if not args.network:
+        return 0
+
+    # Comparing is the whole point when a network is named: "does this file
+    # hold the text that network agreed on" has exactly one right answer.
+    pinned = genesis.round_descriptor(args.network).dataset_root
+    if pinned == bytes(32):
+        print(f"\n{args.network} pins no corpus — nothing to compare against.")
+        return 0
+    if pinned == index.root:
+        print(f"\nMATCHES {args.network}. This file is the corpus that network "
+              f"pins, byte for byte.")
+        return 0
+    print(f"\nDIFFERENT from {args.network}, which pins {pinned.hex()}.\n"
+          f"That is a different corpus, not a different copy of the same one. "
+          f"Training on it\nwould produce updates no verifier holding the "
+          f"pinned corpus could reproduce.", file=sys.stderr)
+    return 1
 
 
 def cmd_genesis_weights(args) -> int:
@@ -258,15 +327,27 @@ def main(argv: list[str] | None = None) -> int:
     corpus.add_argument("--token", default=None, help="or set HF_TOKEN")
     corpus.add_argument("--limit", type=int, default=0,
                         help="stop after N files; for trying it out")
-    corpus.add_argument("--include", default="", metavar="PREFIX",
-                        help="keep only paths under this prefix, e.g. data/ — "
-                             "FineWeb-Edu also ships sample/ copies of its own "
-                             "text, and taking both duplicates ~2 TB")
+    corpus.add_argument("--include", action="append", default=[], metavar="PREFIX",
+                        help="keep only paths under this prefix; repeatable. "
+                             "FineWeb-Edu ships sample/ copies of its own text, "
+                             "so --include data/ is what avoids duplicating ~2 TB")
     corpus.add_argument("--revision", default=None, metavar="SHA",
                         help="dataset commit to build from; without it the "
                              "build tracks a moving branch and the root it "
                              "produces names no snapshot")
     corpus.set_defaults(fn=cmd_corpus_build)
+
+    index = sub.add_parser("corpus-index",
+                           help="index a corpus file and print its root")
+    index.add_argument("--corpus", required=True, metavar="PATH")
+    index.add_argument("--target", type=int, default=1 << 20, metavar="BYTES",
+                       help="target chunk size; the default is what a node uses "
+                            "and a different one is a different corpus")
+    index.add_argument("--network", default=None,
+                       help="compare the root against what this network pins")
+    index.add_argument("--rebuild", action="store_true",
+                       help="ignore any cached .rnidx and scan again")
+    index.set_defaults(fn=cmd_corpus_index)
 
     show = sub.add_parser("genesis-show", help="what this build believes each network is")
     show.add_argument("networks", nargs="*")

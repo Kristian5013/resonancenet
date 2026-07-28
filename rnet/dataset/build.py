@@ -156,7 +156,7 @@ def append_parquet(path: str, column: str, out) -> tuple[int, int]:
 def build(repo_id: str, out_path: str, *, column: str = "text",
           cache_dir: str | None = None, parallel: int = DEFAULT_PARALLEL,
           token: str | None = None, limit_files: int = 0,
-          revision: str | None = None, include: str = "", log=print) -> BuildState:
+          revision: str | None = None, include: tuple = (), log=print) -> BuildState:
     """Download `repo_id` and append its text to `out_path`, resumably.
 
     `revision` NAMES THE SNAPSHOT and is the difference between a corpus root
@@ -170,7 +170,7 @@ def build(repo_id: str, out_path: str, *, column: str = "text",
     Pass the commit sha a network pinned. `None` means "whatever is there now",
     which is honest for a first build that is about to define a new pin.
 
-    `include` KEEPS ONLY PATHS UNDER A PREFIX, and a dataset laid out like
+    `include` KEEPS ONLY PATHS UNDER THESE PREFIXES, and a dataset laid out like
     FineWeb-Edu needs it. That repository holds 3,036 parquet files: 2,410 under
     `data/`, and 626 under `sample/` which are COPIES of subsets of the first
     2,410. Taking everything appends about two terabytes of text the corpus
@@ -181,6 +181,13 @@ def build(repo_id: str, out_path: str, *, column: str = "text",
     It also explains a discrepancy that looked like the dataset moving under us.
     `data/` alone is 4.52 TB of parquet, the whole repository is 5.84 TB, and
     the difference is the samples rather than a year of growth.
+
+    Several prefixes are allowed because the slice worth training on is rarely
+    one directory. FineWeb-Edu is 110 crawls of about 45 GiB each and FinePDFs
+    is 1,748 languages, so "a hundred gigabytes of recent English" is two or
+    three prefixes, not one. The ORDER IS STILL THE SORTED ORDER OF THE PATHS,
+    not the order the prefixes were given — otherwise the same set of prefixes
+    written in a different order would produce a different root.
     """
     try:
         from huggingface_hub import hf_hub_download, list_repo_files
@@ -200,7 +207,8 @@ def build(repo_id: str, out_path: str, *, column: str = "text",
     every = sorted(f for f in list_repo_files(repo_id, repo_type="dataset",
                                               revision=revision, token=token)
                    if f.endswith(".parquet"))
-    files = [f for f in every if f.startswith(include)] if include else every
+    prefixes = (include,) if isinstance(include, str) and include else tuple(include)
+    files = [f for f in every if f.startswith(prefixes)] if prefixes else every
     dropped = len(every) - len(files)
     if limit_files:
         files = files[:limit_files]
@@ -208,11 +216,12 @@ def build(repo_id: str, out_path: str, *, column: str = "text",
 
     log(f"{repo_id}@{revision or 'main (UNPINNED — the root this produces names no snapshot)'}: "
         f"{len(files)} parquet file(s), {len(remaining)} to go"
-        + (f" ({dropped} outside {include!r} skipped)" if dropped else ""))
-    if include and not files:
-        raise BuildError(f"corpus: nothing in {repo_id} is under {include!r}; "
-                         f"the first paths are "
-                         + ", ".join(every[:3]) if every else "the repo has no parquet files")
+        + (f" ({dropped} outside {', '.join(prefixes)} skipped)" if dropped else ""))
+    if prefixes and not files:
+        raise BuildError(
+            f"corpus: nothing in {repo_id} is under {', '.join(prefixes)}. "
+            + (f"The first paths are {', '.join(every[:3])}" if every
+               else "The repo has no parquet files at all."))
 
     # A file already written that the filter now excludes is text inside the
     # corpus that this build would not choose again — silently different from
@@ -221,7 +230,7 @@ def build(repo_id: str, out_path: str, *, column: str = "text",
     if stale:
         raise BuildError(
             f"corpus: {out_path} already contains {len(stale)} file(s) that "
-            f"{include!r} excludes, the first being {stale[0]}.\n"
+            f"{', '.join(prefixes)} excludes, the first being {stale[0]}.\n"
             f"Resuming would leave them in and the root would describe neither "
             f"filter. Start this output again, or drop --include.")
     if state.bytes_written:

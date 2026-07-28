@@ -293,3 +293,71 @@ class IndexTests(CorpusFixture):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class IndexerCommandTests(CorpusFixture):
+    """The command that turns a file into a root.
+
+    It is how a pin is defined and how anyone checks one, so the two verdicts
+    it can reach — this is the corpus that network agreed on, or it is not —
+    matter more than the figures it prints on the way.
+    """
+
+    def run_cli(self, *argv) -> tuple:
+        import contextlib
+        import io
+
+        from rnet.__main__ import main
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_ItPrintsTheSameRootTheIndexerProduces(self):
+        path = self.write(self.documents(120))
+        expected = build_index(path, 4096)
+        code, out, _ = self.run_cli("corpus-index", "--corpus", path,
+                                    "--target", "4096")
+        self.assertEqual(code, 0)
+        self.assertIn(expected.root.hex(), out)
+        self.assertIn(f"{expected.n_chunks:,}", out)
+
+    def test_ANetworkWithNoCorpusIsSaidSoRatherThanFailed(self):
+        path = self.write(self.documents(20))
+        code, out, _ = self.run_cli("corpus-index", "--corpus", path,
+                                    "--target", "4096", "--network", "regtest")
+        self.assertEqual(code, 0)
+        self.assertIn("pins no corpus", out)
+
+    def test_AMismatchAgainstAPinnedNetworkExitsNonZero(self):
+        """The whole reason the command exists: finding out after a two-day
+        build that the file is not what the network agreed on, without having
+        to start a daemon and read an exception."""
+        path = self.write(self.documents(20))
+        code, _, err = self.run_cli("corpus-index", "--corpus", path,
+                                    "--target", "4096", "--network", "main")
+        self.assertEqual(code, 1)
+        self.assertIn("DIFFERENT from main", err)
+
+    def test_TheIndexIsCachedAndReused(self):
+        path = self.write(self.documents(60))
+        self.run_cli("corpus-index", "--corpus", path, "--target", "4096")
+        self.assertTrue(os.path.exists(path + ".rnidx"))
+        code, out, _ = self.run_cli("corpus-index", "--corpus", path,
+                                    "--target", "4096")
+        self.assertEqual(code, 0)
+        self.assertIn("cached", out)
+
+    def test_RebuildIgnoresTheCache(self):
+        path = self.write(self.documents(60))
+        self.run_cli("corpus-index", "--corpus", path, "--target", "4096")
+        code, out, _ = self.run_cli("corpus-index", "--corpus", path,
+                                    "--target", "4096", "--rebuild")
+        self.assertEqual(code, 0)
+        self.assertNotIn("cached", out)
+
+    def test_AMissingFileIsAMessageNotATraceback(self):
+        code, _, err = self.run_cli("corpus-index",
+                                    "--corpus", os.path.join(self.dir, "absent"))
+        self.assertEqual(code, 1)
+        self.assertTrue(err.startswith("rnet:"), err)
