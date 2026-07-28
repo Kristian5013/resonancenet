@@ -150,7 +150,8 @@ def cmd_corpus_build(args) -> int:
         state = build(args.repo, args.out, column=args.column,
                       cache_dir=args.cache, parallel=args.parallel,
                       token=args.token or os.environ.get("HF_TOKEN"),
-                      limit_files=args.limit, revision=args.revision)
+                      limit_files=args.limit, revision=args.revision,
+                      include=args.include)
     except BuildError as exc:
         print(f"rnet: {exc}", file=sys.stderr)
         return 1
@@ -257,6 +258,10 @@ def main(argv: list[str] | None = None) -> int:
     corpus.add_argument("--token", default=None, help="or set HF_TOKEN")
     corpus.add_argument("--limit", type=int, default=0,
                         help="stop after N files; for trying it out")
+    corpus.add_argument("--include", default="", metavar="PREFIX",
+                        help="keep only paths under this prefix, e.g. data/ — "
+                             "FineWeb-Edu also ships sample/ copies of its own "
+                             "text, and taking both duplicates ~2 TB")
     corpus.add_argument("--revision", default=None, metavar="SHA",
                         help="dataset commit to build from; without it the "
                              "build tracks a moving branch and the root it "

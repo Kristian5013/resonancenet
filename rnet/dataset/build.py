@@ -156,7 +156,7 @@ def append_parquet(path: str, column: str, out) -> tuple[int, int]:
 def build(repo_id: str, out_path: str, *, column: str = "text",
           cache_dir: str | None = None, parallel: int = DEFAULT_PARALLEL,
           token: str | None = None, limit_files: int = 0,
-          revision: str | None = None, log=print) -> BuildState:
+          revision: str | None = None, include: str = "", log=print) -> BuildState:
     """Download `repo_id` and append its text to `out_path`, resumably.
 
     `revision` NAMES THE SNAPSHOT and is the difference between a corpus root
@@ -169,6 +169,18 @@ def build(repo_id: str, out_path: str, *, column: str = "text",
 
     Pass the commit sha a network pinned. `None` means "whatever is there now",
     which is honest for a first build that is about to define a new pin.
+
+    `include` KEEPS ONLY PATHS UNDER A PREFIX, and a dataset laid out like
+    FineWeb-Edu needs it. That repository holds 3,036 parquet files: 2,410 under
+    `data/`, and 626 under `sample/` which are COPIES of subsets of the first
+    2,410. Taking everything appends about two terabytes of text the corpus
+    already contains — a root that matches nothing, and training data in which
+    some documents appear twice. Nothing here could detect that afterwards: a
+    duplicate is a perfectly well-formed document.
+
+    It also explains a discrepancy that looked like the dataset moving under us.
+    `data/` alone is 4.52 TB of parquet, the whole repository is 5.84 TB, and
+    the difference is the samples rather than a year of growth.
     """
     try:
         from huggingface_hub import hf_hub_download, list_repo_files
@@ -185,15 +197,33 @@ def build(repo_id: str, out_path: str, *, column: str = "text",
     state = BuildState.load(out_path + ".state")
 
     # Sorted, and sorted is the specification rather than a convenience.
-    files = sorted(f for f in list_repo_files(repo_id, repo_type="dataset",
+    every = sorted(f for f in list_repo_files(repo_id, repo_type="dataset",
                                               revision=revision, token=token)
                    if f.endswith(".parquet"))
+    files = [f for f in every if f.startswith(include)] if include else every
+    dropped = len(every) - len(files)
     if limit_files:
         files = files[:limit_files]
     remaining = [f for f in files if f not in state.files_done]
 
     log(f"{repo_id}@{revision or 'main (UNPINNED — the root this produces names no snapshot)'}: "
-        f"{len(files)} parquet file(s), {len(remaining)} to go")
+        f"{len(files)} parquet file(s), {len(remaining)} to go"
+        + (f" ({dropped} outside {include!r} skipped)" if dropped else ""))
+    if include and not files:
+        raise BuildError(f"corpus: nothing in {repo_id} is under {include!r}; "
+                         f"the first paths are "
+                         + ", ".join(every[:3]) if every else "the repo has no parquet files")
+
+    # A file already written that the filter now excludes is text inside the
+    # corpus that this build would not choose again — silently different from
+    # what the same command produces on an empty directory.
+    stale = [f for f in state.files_done if f not in set(files)]
+    if stale:
+        raise BuildError(
+            f"corpus: {out_path} already contains {len(stale)} file(s) that "
+            f"{include!r} excludes, the first being {stale[0]}.\n"
+            f"Resuming would leave them in and the root would describe neither "
+            f"filter. Start this output again, or drop --include.")
     if state.bytes_written:
         log(f"resuming at {state.bytes_written / 2**40:.2f} TiB, "
             f"{state.documents:,} documents")
