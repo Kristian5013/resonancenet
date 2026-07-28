@@ -365,3 +365,75 @@ class CorpusTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class SyncOnConnectTests(unittest.IsolatedAsyncioTestCase):
+    """Asking a peer that says it is ahead, at the moment it says so.
+
+    The handshake has always carried the far end's height and nothing read it.
+    `GetHeaders` went out in exactly two situations — a checkpoint arrived that
+    could not be connected, and a headers batch came back full — and neither
+    happens to a node that has just joined. So a newcomer sat at its own height
+    until somebody relayed it a checkpoint: on a network between rounds that is
+    up to a whole round, and on a paused one it is never.
+
+    Measured before this existed: a fresh node connected to a seed at height 1,
+    reached READY, and was still at height 0 two minutes later. After: height 1
+    in eighteen seconds.
+    """
+
+    async def joined(self, *, ahead: int, behind: int):
+        nodes, services = [], []
+        for height in (behind, ahead):
+            node = Node(config=NodeConfig(magic=MAGIC, genesis_hash=GEN,
+                                          policy_hash=POL, port=free_port()),
+                        addrman=AddrMan(key=bytes(32)))
+            chain, _ = build_chain(height)
+            node.height = chain.height
+            service = Service(node=node, chain=chain)
+            service.install()
+            await node.start()
+            self.addAsyncCleanup(node.stop)
+            nodes.append(node)
+            services.append(service)
+        newcomer, seed = nodes
+        peer = await newcomer.connect(
+            NetAddress.parse(f"127.0.0.1:{seed.config.port}"))
+        self.assertTrue(await settle(lambda: peer.state is State.READY))
+        return services[0], services[1]
+
+    async def test_ANewcomerCatchesUpWithoutWaitingForACheckpoint(self):
+        joiner, _ = await self.joined(ahead=6, behind=0)
+        self.assertTrue(await settle(lambda: joiner.chain.height == 6),
+                        f"stuck at height {joiner.chain.height}")
+
+    async def test_ItCatchesUpFromPartwayToo(self):
+        """Not only from genesis: a node that was offline for a few rounds is
+        the ordinary case, and it must not re-fetch what it already has."""
+        joiner, _ = await self.joined(ahead=8, behind=3)
+        self.assertTrue(await settle(lambda: joiner.chain.height == 8),
+                        f"stuck at height {joiner.chain.height}")
+
+    async def test_ANodeThatIsNotBehindAsksForNothing(self):
+        """Asking anyway would mean every connection on a settled network costs
+        a headers round trip for a batch the node already has."""
+        asked = []
+        joiner, _ = await self.joined(ahead=4, behind=4)
+        peer = joiner.node.ready[0]
+        real = peer.send
+        peer.send = lambda m: (asked.append(m) if isinstance(m, P.GetHeaders)
+                               else None) or real(m)
+        joiner.on_peer_ready(peer)
+        self.assertEqual(asked, [])
+
+    async def test_ItAsksWhenThePeerIsAheadEvenByOne(self):
+        asked = []
+        joiner, _ = await self.joined(ahead=2, behind=2)
+        peer = joiner.node.ready[0]
+        peer.start_height = joiner.chain.height + 1
+        real = peer.send
+        peer.send = lambda m: (asked.append(m) if isinstance(m, P.GetHeaders)
+                               else None) or real(m)
+        joiner.on_peer_ready(peer)
+        self.assertEqual(len(asked), 1)
+        self.assertTrue(asked[0].locators, "a locator is what finds the fork point")

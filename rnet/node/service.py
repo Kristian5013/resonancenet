@@ -84,6 +84,24 @@ class Service:
 
     def install(self) -> None:
         self.node.on_message = self.handle
+        self.node.on_ready = self.on_peer_ready
+
+    def on_peer_ready(self, peer: Peer) -> None:
+        """Ask a peer that says it is ahead for the headers we are missing.
+
+        The handshake has always carried the far end's height and nothing read
+        it. `GetHeaders` went out in exactly two situations: a checkpoint
+        arrived that could not be connected, and a headers batch came back full.
+        Neither happens to a node that has just joined — so it sat at its own
+        height until somebody relayed it a checkpoint, which on a network
+        between rounds is up to twenty minutes and on a paused one is never.
+
+        Measured before this existed: a fresh node connected to a seed at height
+        1, reached READY, and was still at height 0 two minutes later.
+        """
+        if peer.start_height > self.chain.height:
+            peer.send(P.GetHeaders(locators=tuple(self.locator()),
+                                   stop=bytes(32)))
 
     # -- dispatch ------------------------------------------------------------
 

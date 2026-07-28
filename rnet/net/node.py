@@ -107,6 +107,7 @@ class Node:
 
     height: int = 0
     on_message = None
+    on_ready = None
 
     _next_id: int = 1
     # nonce -> the address it was dialled towards, or None when we issued it on
@@ -379,6 +380,14 @@ class Node:
             # inbound peer's port is whatever ephemeral one it dialled from.
             self.addrman.connected(peer.address, int(time.time() * 1000))
         peer.send(P.GetAddr())
+        if self.on_ready is not None:
+            # The handshake carries the far end's height and nothing read it.
+            # A node that joined a network which was between checkpoints sat at
+            # height zero until one happened to be relayed to it — up to a whole
+            # round of doing nothing, and forever if the network was paused.
+            # Measured: a fresh node connected to a seed at height 1 and was
+            # still at height 0 two minutes later.
+            self.on_ready(peer)
 
     # -- upkeep ----------------------------------------------------------------
 
